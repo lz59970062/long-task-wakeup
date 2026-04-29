@@ -133,4 +133,40 @@ finally:
 
 When the callback resumes Codex, inspect artifacts, metrics, checkpoints, test reports, or generated files that are relevant to the task. Continue if the next step is clear and safe; otherwise ask one concise question.
 
+## Multi-Round Autonomy
+
+Use daemon handoff for controlled multi-round work, not unbounded autonomy. After every wakeup,
+decide explicitly whether to continue, stop successfully, stop blocked, or ask the user. Continue
+only when the next action is clear, low-risk, aligned with the same goal, and within the user's
+budget and project rules.
+
+Before launching another long task in the same goal chain, write a short decision record in the
+conversation or experiment notes:
+
+```text
+current_goal:
+last_result:
+decision: continue | stop_success | stop_blocked | ask_user
+reason:
+next_command:
+budget_remaining:
+```
+
+Continue automatically only for concrete follow-ups such as checking artifacts, running comparable
+backtests, retrying a transient infrastructure failure, or launching the next pre-planned experiment.
+Do not expand the search space, change the main research variable, alter the goal, or consume a
+materially larger budget without user approval.
+
+Stop and ask the user when repeated attempts do not resolve the issue, when the next step requires
+new key resources, or when the decision is strategic rather than mechanical. Examples include:
+
+- more GPU time, compute quota, disk, credentials, data, or external access
+- changing the model family, feature set, loss design, benchmark period, or evaluation objective
+- deleting or overwriting old experiments, databases, checkpoints, or production artifacts
+- ambiguous metric tradeoffs, unclear success criteria, or evidence that the original hypothesis is wrong
+- repeated failures whose cause is no longer a simple script, parameter, or transient environment issue
+
+When stopping, summarize what was tried, what changed, why the loop stopped, and the smallest
+decision or resource needed from the user.
+
 Use `--strict` only when the user explicitly wants callback failure to fail the wrapper or epilogue.
