@@ -86,7 +86,10 @@ codex-long-task-wakeup install-systemd --enable --now
 ```
 
 The service runs outside Codex tool sandboxes and keeps `codex-long-task-wakeup daemon` alive with
-systemd restart behavior. Inspect it with:
+systemd restart behavior. The installer records the resolved `codex` executable path in
+`CODEX_LONG_TASK_WAKEUP_CODEX_BIN` and records the current `PATH` so Codex's runtime dependencies
+such as Node/NVM are available under systemd. Use `--codex-bin /path/to/codex` or `--path "$PATH"`
+if discovery is not correct. Inspect it with:
 
 ```bash
 systemctl --user status codex-long-task-wakeup.service

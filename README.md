@@ -141,6 +141,9 @@ This writes:
 
 and runs `systemctl --user daemon-reload`, `enable`, and `restart`. The service keeps
 `codex-long-task-wakeup daemon` alive outside Codex tool sandboxes and restarts it if it exits.
+The installer also records the resolved `codex` executable path in
+`CODEX_LONG_TASK_WAKEUP_CODEX_BIN` and the current `PATH`, so the daemon can find `codex` and its
+runtime dependencies such as Node/NVM outside an interactive shell.
 
 Inspect or manage it with:
 
@@ -155,6 +158,18 @@ To review the generated unit before installing:
 
 ```bash
 codex-long-task-wakeup install-systemd --print
+```
+
+If `codex` is installed in a non-standard location, pass it explicitly:
+
+```bash
+codex-long-task-wakeup install-systemd --codex-bin /path/to/codex --enable --now
+```
+
+If the daemon needs a custom runtime path, pass it explicitly:
+
+```bash
+codex-long-task-wakeup install-systemd --path "$PATH" --enable --now
 ```
 
 You can still run the daemon in the foreground for debugging:
@@ -398,6 +413,9 @@ codex-long-task-wakeup install-systemd --enable --now
 
 并执行 `systemctl --user daemon-reload`、`enable` 和 `restart`。这个 service 会在 Codex
 工具 sandbox 外部保持 `codex-long-task-wakeup daemon` 常驻，并在异常退出后自动重启。
+安装器也会把解析到的 `codex` 可执行文件路径写入 `CODEX_LONG_TASK_WAKEUP_CODEX_BIN`，
+并写入当前 `PATH`，确保 daemon 在非交互式 systemd 环境里也能找到 Codex 的 Node/NVM
+等运行时依赖。
 
 查看和管理：
 
@@ -412,6 +430,12 @@ systemctl --user stop codex-long-task-wakeup.service
 
 ```bash
 codex-long-task-wakeup install-systemd --print
+```
+
+如果 `codex` 安装在非标准位置，可以显式指定：
+
+```bash
+codex-long-task-wakeup install-systemd --codex-bin /path/to/codex --enable --now
 ```
 
 调试时也可以前台运行：

@@ -80,11 +80,20 @@ def console_script_path() -> str:
     return sys.argv[0]
 
 
+def codex_bin_path(args: argparse.Namespace) -> str:
+    if args.codex_bin:
+        return str(Path(args.codex_bin).expanduser())
+    command = shutil.which("codex")
+    return command or "codex"
+
+
 def systemd_service_text(args: argparse.Namespace) -> str:
     command = [args.exec_start or console_script_path(), "daemon", "--interval", str(args.interval)]
     if args.queue_dir:
         command.extend(["--queue-dir", str(Path(args.queue_dir).expanduser())])
     exec_start = " ".join(systemd_quote(part) for part in command)
+    codex_bin = codex_bin_path(args)
+    path = args.path or os.environ.get("PATH", "")
     return "\n".join(
         [
             "[Unit]",
@@ -99,6 +108,8 @@ def systemd_service_text(args: argparse.Namespace) -> str:
             "Restart=always",
             f"RestartSec={args.restart_sec}",
             "Environment=PYTHONUNBUFFERED=1",
+            f"Environment={systemd_quote(f'PATH={path}')}",
+            f"Environment={systemd_quote(f'CODEX_LONG_TASK_WAKEUP_CODEX_BIN={codex_bin}')}",
             "",
             "[Install]",
             "WantedBy=default.target",
@@ -422,6 +433,8 @@ def main() -> int:
     systemd_parser.add_argument("--interval", type=float, default=2.0, help="Daemon polling interval in seconds")
     systemd_parser.add_argument("--restart-sec", type=float, default=5.0, help="Restart delay in seconds")
     systemd_parser.add_argument("--exec-start", help="Path to codex-long-task-wakeup executable")
+    systemd_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
+    systemd_parser.add_argument("--path", help="PATH environment for the daemon service")
     systemd_parser.add_argument("--force", action="store_true", help="Overwrite an existing service file")
     systemd_parser.add_argument("--enable", action="store_true", help="Run systemctl --user enable after writing the service")
     systemd_parser.add_argument("--now", action="store_true", help="Start or restart the service after writing it")
