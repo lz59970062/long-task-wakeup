@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-long-task-callback"
-version = "0.1.0"
+version = "0.1.1"
 description = "Explicit callback CLI for waking a Codex session after a long-running task finishes"
 requires-python = ">=3.9"
 license = { text = "MIT" }

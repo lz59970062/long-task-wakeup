@@ -9,6 +9,8 @@ description: Explicit callback workflow for long-running Codex-started tasks. Us
 
 Use an explicit callback only when requested or when a task is likely to run long enough that Codex may be inactive when it completes. Do not install hooks, start watchers, or poll.
 
+Do not let callback behavior interfere with task behavior. The task's original exit code and control flow must remain the source of truth.
+
 The callback command is:
 
 ```bash
@@ -64,6 +66,8 @@ codex-long-task-wakeup done \
 exit "$status"
 ```
 
+Keep `exit "$status"` after the callback. By default `codex-long-task-wakeup done` returns 0 even when Codex cannot be resumed, so the task result remains independent of wakeup success.
+
 Python `finally` pattern:
 
 ```python
@@ -87,3 +91,5 @@ finally:
 ## After Wakeup
 
 When the callback resumes Codex, inspect artifacts, metrics, checkpoints, test reports, or generated files that are relevant to the task. Continue if the next step is clear and safe; otherwise ask one concise question.
+
+Use `--strict` only when the user explicitly wants callback failure to fail the wrapper or epilogue.

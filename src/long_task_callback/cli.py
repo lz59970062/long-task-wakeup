@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+import sys
 import time
 
 
@@ -47,18 +48,29 @@ def resume_codex(args: argparse.Namespace, prompt: str) -> int:
         raise SystemExit("Pass --session <id> for the target Codex session, or --last as an explicit fallback.")
     cmd.append("-")
 
-    result = subprocess.run(
-        cmd,
-        input=prompt,
-        text=True,
-        cwd=args.cwd,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            input=prompt,
+            text=True,
+            cwd=args.cwd,
+            check=False,
+        )
+    except OSError as exc:
+        print(f"codex-long-task-wakeup: warning: failed to run Codex callback: {exc}", file=sys.stderr)
+        return 127
+
+    if result.returncode != 0:
+        print(
+            f"codex-long-task-wakeup: warning: Codex callback exited with {result.returncode}",
+            file=sys.stderr,
+        )
     return result.returncode
 
 
 def done(args: argparse.Namespace) -> int:
-    return resume_codex(args, build_prompt(args))
+    callback_code = resume_codex(args, build_prompt(args))
+    return callback_code if args.strict else 0
 
 
 def run(args: argparse.Namespace) -> int:
@@ -81,7 +93,9 @@ def run(args: argparse.Namespace) -> int:
         args.command = args.command or " ".join(args.wrapped_command)
         duration = time.time() - started
         prompt = build_prompt(args, duration)
-        resume_codex(args, prompt)
+        callback_code = resume_codex(args, prompt)
+        if args.strict and exit_code == 0 and callback_code != 0:
+            raise SystemExit(callback_code)
 
 
 def add_common_flags(parser: argparse.ArgumentParser) -> None:
@@ -94,6 +108,11 @@ def add_common_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--exit-code", type=int, help="Completed task exit code")
     parser.add_argument("--message", help="Extra callback message")
     parser.add_argument("--dry-run", action="store_true", help="Print the wakeup prompt instead of resuming Codex")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Propagate callback failure. By default callback failure never changes task success or exit code.",
+    )
 
 
 def main() -> int:
