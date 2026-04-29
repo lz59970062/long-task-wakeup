@@ -1,3 +1,3 @@
 """Long task callback CLI package."""
 
-__version__ = "0.1.2"
+__version__ = "0.3.4"

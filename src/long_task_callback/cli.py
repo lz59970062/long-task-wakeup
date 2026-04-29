@@ -12,6 +12,8 @@ import time
 import uuid
 from pathlib import Path
 
+from . import __version__
+
 
 def build_prompt(args: argparse.Namespace, duration: float | None = None) -> str:
     lines = [
@@ -412,6 +414,7 @@ def install_systemd(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Explicit callback tool for waking Codex after a long task.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="mode", required=True)
 
     done_parser = sub.add_parser("done", help="Wake Codex after an externally managed task finishes")

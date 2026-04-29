@@ -47,6 +47,34 @@ After installation, the global command is:
 codex-long-task-wakeup
 ```
 
+Verify that the installed command and the installed Python module are the same new package:
+
+```bash
+python -m long_task_callback --version
+python -m long_task_callback --help
+codex-long-task-wakeup --version
+codex-long-task-wakeup --help
+```
+
+The help output must include:
+
+```text
+daemon
+install-systemd
+install-skill
+```
+
+If `python -m long_task_callback --help` shows `install-systemd` but
+`codex-long-task-wakeup --help` does not, your shell is executing an older console script from
+another environment or earlier `PATH` entry. Inspect and refresh it with:
+
+```bash
+which -a codex-long-task-wakeup
+hash -r
+python -m pip install --upgrade --force-reinstall --no-cache-dir \
+  "git+https://github.com/lz59970062/long-task-wakeup.git"
+```
+
 Install the bundled Codex skill into `~/.codex/skills`:
 
 ```bash
@@ -318,6 +346,34 @@ python3 -m pip install .
 
 ```bash
 codex-long-task-wakeup
+```
+
+安装后先验证 Python 模块入口和全局命令是否一致：
+
+```bash
+python -m long_task_callback --version
+python -m long_task_callback --help
+codex-long-task-wakeup --version
+codex-long-task-wakeup --help
+```
+
+帮助输出必须包含：
+
+```text
+daemon
+install-systemd
+install-skill
+```
+
+如果 `python -m long_task_callback --help` 有 `install-systemd`，但
+`codex-long-task-wakeup --help` 没有，说明 shell 正在执行另一个环境或更早 `PATH` 里的旧
+console script。用下面命令定位并刷新：
+
+```bash
+which -a codex-long-task-wakeup
+hash -r
+python -m pip install --upgrade --force-reinstall --no-cache-dir \
+  "git+https://github.com/lz59970062/long-task-wakeup.git"
 ```
 
 把内置 Codex skill 安装到 `~/.codex/skills`：
