@@ -1,0 +1,4 @@
+interface:
+  display_name: "Long Task Callback"
+  short_description: "Wire long-running jobs to wake Codex when they finish"
+  default_prompt: "Add a callback so this long task wakes Codex when it finishes"

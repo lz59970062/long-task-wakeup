@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-long-task-callback"
-version = "0.1.1"
+version = "0.1.2"
 description = "Explicit callback CLI for waking a Codex session after a long-running task finishes"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -18,3 +18,6 @@ codex-long-task-wakeup = "long_task_callback.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+long_task_callback = ["skill/SKILL.md", "skill/agents/openai.yaml"]

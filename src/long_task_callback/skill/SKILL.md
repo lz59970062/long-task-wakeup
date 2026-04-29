@@ -31,12 +31,6 @@ For the standalone repository:
 python3 -m pip install "git+https://github.com/lz59970062/long-task-wakeup.git"
 ```
 
-After pip installation, install the bundled Codex skill:
-
-```bash
-codex-long-task-wakeup install-skill
-```
-
 Or use the bundled installer:
 
 ```bash

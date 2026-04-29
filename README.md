@@ -44,6 +44,19 @@ After installation, the global command is:
 codex-long-task-wakeup
 ```
 
+Install the bundled Codex skill into `~/.codex/skills`:
+
+```bash
+codex-long-task-wakeup install-skill
+```
+
+If you use a custom Codex home, set `CODEX_HOME` or pass `--path`:
+
+```bash
+CODEX_HOME=/path/to/.codex codex-long-task-wakeup install-skill
+codex-long-task-wakeup install-skill --path /path/to/.codex/skills
+```
+
 ## Usage
 
 ### Wrap A Long Command
@@ -196,6 +209,19 @@ python3 -m pip install .
 
 ```bash
 codex-long-task-wakeup
+```
+
+把内置 Codex skill 安装到 `~/.codex/skills`：
+
+```bash
+codex-long-task-wakeup install-skill
+```
+
+如果你使用自定义 Codex home，可以设置 `CODEX_HOME` 或传 `--path`：
+
+```bash
+CODEX_HOME=/path/to/.codex codex-long-task-wakeup install-skill
+codex-long-task-wakeup install-skill --path /path/to/.codex/skills
 ```
 
 ## 用法

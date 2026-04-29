@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import importlib.resources as resources
 import os
+import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 
 def build_prompt(args: argparse.Namespace, duration: float | None = None) -> str:
@@ -115,6 +118,37 @@ def add_common_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+
+
+def install_skill(args: argparse.Namespace) -> int:
+    target_root = Path(args.path).expanduser() if args.path else codex_home() / "skills"
+    target = target_root / "long-task-callback"
+    if target.exists() and not args.force:
+        print(
+            f"Skill already exists at {target}. Re-run with --force to overwrite.",
+            file=sys.stderr,
+        )
+        return 1
+
+    package_root = resources.files("long_task_callback").joinpath("skill")
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True, exist_ok=True)
+
+    for item in package_root.iterdir():
+        destination = target / item.name
+        if item.is_dir():
+            shutil.copytree(item, destination)
+        else:
+            with resources.as_file(item) as source:
+                shutil.copy2(source, destination)
+
+    print(f"Installed Codex skill to {target}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Explicit callback tool for waking Codex after a long task.")
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -126,6 +160,10 @@ def main() -> int:
     add_common_flags(run_parser)
     run_parser.add_argument("wrapped_command", nargs=argparse.REMAINDER)
 
+    install_parser = sub.add_parser("install-skill", help="Install the bundled Codex skill into CODEX_HOME")
+    install_parser.add_argument("--path", help="Skills directory to install into (defaults to ${CODEX_HOME:-~/.codex}/skills)")
+    install_parser.add_argument("--force", action="store_true", help="Overwrite an existing long-task-callback skill")
+
     args = parser.parse_args()
     if args.mode == "done":
         return done(args)
@@ -133,6 +171,8 @@ def main() -> int:
         if args.wrapped_command and args.wrapped_command[0] == "--":
             args.wrapped_command = args.wrapped_command[1:]
         return run(args)
+    if args.mode == "install-skill":
+        return install_skill(args)
     return 2
 
 
