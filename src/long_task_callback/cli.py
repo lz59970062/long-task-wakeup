@@ -4,6 +4,7 @@ import argparse
 import importlib.resources as resources
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -53,6 +54,57 @@ def queue_dir(args: argparse.Namespace | None = None) -> Path:
 
 def codex_command() -> str:
     return os.environ.get("CODEX_LONG_TASK_WAKEUP_CODEX_BIN", "codex")
+
+
+def systemd_user_dir() -> Path:
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    if config_home:
+        return Path(config_home).expanduser() / "systemd" / "user"
+    return Path("~/.config/systemd/user").expanduser()
+
+
+def systemd_quote(value: str) -> str:
+    if value and all(char not in value for char in " \t\n\"'\\"):
+        return value
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def service_name(name: str) -> str:
+    return name if name.endswith(".service") else f"{name}.service"
+
+
+def console_script_path() -> str:
+    command = shutil.which("codex-long-task-wakeup")
+    if command:
+        return command
+    return sys.argv[0]
+
+
+def systemd_service_text(args: argparse.Namespace) -> str:
+    command = [args.exec_start or console_script_path(), "daemon", "--interval", str(args.interval)]
+    if args.queue_dir:
+        command.extend(["--queue-dir", str(Path(args.queue_dir).expanduser())])
+    exec_start = " ".join(systemd_quote(part) for part in command)
+    return "\n".join(
+        [
+            "[Unit]",
+            "Description=Codex Long Task Wakeup Daemon",
+            "Documentation=https://github.com/lz59970062/long-task-wakeup",
+            "After=network-online.target",
+            "Wants=network-online.target",
+            "",
+            "[Service]",
+            "Type=simple",
+            f"ExecStart={exec_start}",
+            "Restart=always",
+            f"RestartSec={args.restart_sec}",
+            "Environment=PYTHONUNBUFFERED=1",
+            "",
+            "[Install]",
+            "WantedBy=default.target",
+            "",
+        ]
+    )
 
 
 def make_request(args: argparse.Namespace, prompt: str) -> dict[str, object]:
@@ -309,6 +361,44 @@ def install_skill(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_systemctl(args: list[str]) -> int:
+    command = ["systemctl", "--user", *args]
+    result = subprocess.run(command, check=False)
+    if result.returncode != 0:
+        print(f"codex-long-task-wakeup: warning: {' '.join(shlex.quote(part) for part in command)} exited with {result.returncode}", file=sys.stderr)
+    return result.returncode
+
+
+def install_systemd(args: argparse.Namespace) -> int:
+    name = service_name(args.name)
+    text = systemd_service_text(args)
+    if args.print:
+        print(text, end="")
+        return 0
+
+    target = systemd_user_dir() / name
+    if target.exists() and not args.force:
+        print(f"Service already exists at {target}. Re-run with --force to overwrite.", file=sys.stderr)
+        return 1
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    print(f"Installed systemd user service to {target}")
+
+    status = 0
+    if shutil.which("systemctl"):
+        status = run_systemctl(["daemon-reload"])
+        if args.enable:
+            status = run_systemctl(["enable", name]) or status
+        if args.now:
+            action = "restart" if args.enable else "start"
+            status = run_systemctl([action, name]) or status
+    else:
+        print("codex-long-task-wakeup: warning: systemctl not found; service file was written but not loaded", file=sys.stderr)
+
+    return status
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Explicit callback tool for waking Codex after a long task.")
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -326,6 +416,17 @@ def main() -> int:
     daemon_parser.add_argument("--once", action="store_true", help="Exit after the queue is empty")
     daemon_parser.add_argument("--max-items", type=int, help="Exit after processing this many queued requests")
 
+    systemd_parser = sub.add_parser("install-systemd", help="Install a user-level systemd service for the wakeup daemon")
+    systemd_parser.add_argument("--name", default="codex-long-task-wakeup", help="Systemd service name")
+    systemd_parser.add_argument("--queue-dir", help="Wakeup queue directory")
+    systemd_parser.add_argument("--interval", type=float, default=2.0, help="Daemon polling interval in seconds")
+    systemd_parser.add_argument("--restart-sec", type=float, default=5.0, help="Restart delay in seconds")
+    systemd_parser.add_argument("--exec-start", help="Path to codex-long-task-wakeup executable")
+    systemd_parser.add_argument("--force", action="store_true", help="Overwrite an existing service file")
+    systemd_parser.add_argument("--enable", action="store_true", help="Run systemctl --user enable after writing the service")
+    systemd_parser.add_argument("--now", action="store_true", help="Start or restart the service after writing it")
+    systemd_parser.add_argument("--print", action="store_true", help="Print the service file instead of writing it")
+
     install_parser = sub.add_parser("install-skill", help="Install the bundled Codex skill into CODEX_HOME")
     install_parser.add_argument("--path", help="Skills directory to install into (defaults to ${CODEX_HOME:-~/.codex}/skills)")
     install_parser.add_argument("--force", action="store_true", help="Overwrite an existing long-task-callback skill")
@@ -339,6 +440,8 @@ def main() -> int:
         return run(args)
     if args.mode == "daemon":
         return daemon(args)
+    if args.mode == "install-systemd":
+        return install_systemd(args)
     if args.mode == "install-skill":
         return install_skill(args)
     return 2

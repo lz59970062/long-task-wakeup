@@ -85,7 +85,21 @@ exit "$status"
 
 Add `--via-daemon` to `done` when that callback may run inside a resumed Codex tool sandbox.
 
-Run the daemon from a normal user shell, screen, tmux, or a user service outside Codex tool sandboxes:
+For durable daemon handoff, standardize on a user-level systemd service:
+
+```bash
+codex-long-task-wakeup install-systemd --enable --now
+```
+
+The service runs outside Codex tool sandboxes and keeps `codex-long-task-wakeup daemon` alive with
+systemd restart behavior. Inspect it with:
+
+```bash
+systemctl --user status codex-long-task-wakeup.service
+journalctl --user -u codex-long-task-wakeup.service -f
+```
+
+Use this foreground form only for debugging:
 
 ```bash
 codex-long-task-wakeup daemon
@@ -93,6 +107,8 @@ codex-long-task-wakeup daemon
 
 The daemon watches `${CODEX_HOME:-~/.codex}/long-task-wakeup/queue` by default. Use `--queue-dir`
 or `CODEX_LONG_TASK_WAKEUP_QUEUE_DIR` when a different queue location is needed.
+
+If user services must survive logout on the host, run `loginctl enable-linger "$USER"` once.
 
 Keep `exit "$status"` after the callback. By default `codex-long-task-wakeup done` returns 0 even when Codex cannot be resumed, so the task result remains independent of wakeup success.
 
