@@ -11,13 +11,16 @@ task's exit path. When the task finishes, that command resumes the original Code
 it to inspect the result, decide whether the goal is complete, and continue if the next step is
 clear.
 
-No polling. No daemon. No passive watcher. Nothing runs unless your task explicitly calls it.
+By default there is no polling and no daemon. Nothing runs unless your task explicitly calls it.
+For recursive or multi-stage workflows, the same callback can be queued for a small user-started
+daemon so nested Codex tool sandboxes do not have to launch more Codex processes themselves.
 
 ## Highlights
 
 - **Explicit by design**: only activates when written into the task command or code.
 - **Good for overnight work**: training, evals, benchmarks, deployments, data jobs, long tests.
 - **Same-session handoff**: resumes Codex with `codex exec resume`.
+- **Daemon handoff when needed**: `--via-daemon` queues the wakeup so an external daemon launches Codex.
 - **Non-interfering**: callback failure never changes the task exit code by default.
 - **Tiny surface area**: one Python package, one CLI command.
 - **No logs required**: pass task name, command, exit code, cwd, and optional message.
@@ -76,6 +79,17 @@ The wrapper returns the wrapped command's exit code, then wakes Codex.
 The wakeup step is best-effort. If Codex cannot be resumed, the wrapped command's exit code is
 still preserved.
 
+For recursive or multi-stage workflows, queue the wakeup for an external daemon:
+
+```bash
+codex-long-task-wakeup run \
+  --via-daemon \
+  --session <session-id> \
+  --cwd "$PWD" \
+  --task "train model" \
+  -- python train.py --config configs/exp.yaml
+```
+
 ### Add A Callback To Existing Code
 
 Use `done` when Codex writes the callback into a shell script, Python `finally` block,
@@ -96,6 +110,42 @@ exit "$status"
 
 The callback command returns `0` by default even if Codex cannot be resumed, so the final
 `exit "$status"` remains the source of truth for the task result.
+
+Use `--via-daemon` for callbacks that may be called from inside a resumed Codex turn:
+
+```bash
+codex-long-task-wakeup done \
+  --via-daemon \
+  --session <session-id> \
+  --cwd "$PWD" \
+  --task "train model" \
+  --command "python train.py --config configs/exp.yaml" \
+  --exit-code "$status"
+```
+
+You can also set `CODEX_LONG_TASK_WAKEUP_VIA_DAEMON=1` instead of passing `--via-daemon`.
+
+### Run The Wakeup Daemon
+
+Start the daemon from a normal user shell, `screen`, `tmux`, systemd user service, or another
+supervisor outside Codex tool sandboxes:
+
+```bash
+codex-long-task-wakeup daemon
+```
+
+The daemon watches `${CODEX_HOME:-~/.codex}/long-task-wakeup/queue` by default. Override this with
+`--queue-dir` or `CODEX_LONG_TASK_WAKEUP_QUEUE_DIR`:
+
+```bash
+codex-long-task-wakeup daemon --queue-dir /path/to/queue
+```
+
+For tests or batch processing, process currently queued items and exit:
+
+```bash
+codex-long-task-wakeup daemon --once
+```
 
 ### Python Finally Example
 
@@ -127,7 +177,7 @@ finally:
 - exit code
 - optional message
 
-Then it runs:
+By default it runs:
 
 ```bash
 codex exec resume --all <session-id> -
@@ -136,13 +186,18 @@ codex exec resume --all <session-id> -
 The prompt is sent to the resumed Codex session through stdin. Codex can then inspect artifacts,
 metrics, checkpoints, generated files, or test reports and decide the next step.
 
+With `--via-daemon`, `run` and `done` write the same prompt into an atomic JSON queue item instead.
+`codex-long-task-wakeup daemon` later reads that item and runs `codex exec resume --all ... -`
+from the daemon's own environment. This avoids recursive `resume -> tool sandbox -> resume`
+chains, where nested Codex processes can inherit restricted filesystem or network permissions.
+
 ## Non-Interference Guarantee
 
 Task execution and Codex wakeup are intentionally separated:
 
 - `run` mode returns the wrapped task's exit code.
 - `done` mode returns `0` by default so callback failure does not break shell epilogues.
-- Callback failures are warnings on stderr, not task failures.
+- Callback failures and daemon enqueue failures are warnings on stderr, not task failures.
 - Use `--strict` only if you explicitly want callback failure to propagate.
 
 Use `--last` instead of `--session <session-id>` only when resuming the most recent Codex session
@@ -178,13 +233,16 @@ Long Task Wakeup 用一个显式 callback 解决这个问题。Codex 在长任�
 很小的命令。任务结束时，这条命令会恢复原来的 Codex session，让 Codex 检查结果、判断目标
 是否完成，并在下一步明确时继续执行。
 
-没有轮询。没有 daemon。没有后台监控。只有任务代码主动调用时，它才会启用。
+默认没有轮询、没有 daemon、没有后台监控。只有任务代码主动调用时，它才会启用。
+对于递归或多阶段工作流，同一条 callback 可以写入队列，由用户启动的 daemon 在 Codex
+工具 sandbox 外部负责恢复 session。
 
 ## 特点
 
 - **显式触发**：只有写进任务命令或代码里才会运行。
 - **适合过夜任务**：训练、评测、benchmark、部署、数据任务、大型测试。
 - **回到同一个 session**：内部使用 `codex exec resume`。
+- **需要时使用 daemon 交接**：`--via-daemon` 会把唤醒请求入队，由外部 daemon 启动 Codex。
 - **不干扰任务逻辑**：默认情况下，唤醒失败不会改变任务退出码。
 - **很小的工具面**：一个 Python 包，一个全局 CLI。
 - **不依赖日志功能**：传 task、command、exit code、cwd 和可选 message 即可。

@@ -1,13 +1,13 @@
 ---
 name: long-task-callback
-description: Explicit callback workflow for long-running Codex-started tasks. Use when Codex is about to launch or edit a long-running command, training run, benchmark, test suite, build, deployment, Slurm job, data job, or script and should arrange for that task to resume the same Codex session when it finishes. Do not use for automatic polling, daemons, or passive monitoring.
+description: Explicit callback workflow for long-running Codex-started tasks. Use when Codex is about to launch or edit a long-running command, training run, benchmark, test suite, build, deployment, Slurm job, data job, or script and should arrange for that task to resume the same Codex session when it finishes. Use the daemon handoff for recursive or multi-stage callbacks that may run inside Codex tool sandboxes.
 ---
 
 # Long Task Callback
 
 ## Rule
 
-Use an explicit callback only when requested or when a task is likely to run long enough that Codex may be inactive when it completes. Do not install hooks, start watchers, or poll.
+Use an explicit callback only when requested or when a task is likely to run long enough that Codex may be inactive when it completes. Do not install hooks, start watchers, or poll unless the user explicitly wants the wakeup daemon for recursive or multi-stage callbacks.
 
 Do not let callback behavior interfere with task behavior. The task's original exit code and control flow must remain the source of truth.
 
@@ -51,6 +51,17 @@ codex-long-task-wakeup run \
   -- python train.py --config configs/exp.yaml
 ```
 
+Daemon handoff, preferred when this callback may be invoked from inside a resumed Codex turn:
+
+```bash
+codex-long-task-wakeup run \
+  --via-daemon \
+  --session <session-id> \
+  --cwd "$PWD" \
+  --task "train model" \
+  -- python train.py --config configs/exp.yaml
+```
+
 Callback form, when Codex edits a script, shell trap, Python `finally`, or job epilogue:
 
 ```bash
@@ -65,6 +76,17 @@ codex-long-task-wakeup done \
   --exit-code "$status"
 exit "$status"
 ```
+
+Add `--via-daemon` to `done` when that callback may run inside a resumed Codex tool sandbox.
+
+Run the daemon from a normal user shell, screen, tmux, or a user service outside Codex tool sandboxes:
+
+```bash
+codex-long-task-wakeup daemon
+```
+
+The daemon watches `${CODEX_HOME:-~/.codex}/long-task-wakeup/queue` by default. Use `--queue-dir`
+or `CODEX_LONG_TASK_WAKEUP_QUEUE_DIR` when a different queue location is needed.
 
 Keep `exit "$status"` after the callback. By default `codex-long-task-wakeup done` returns 0 even when Codex cannot be resumed, so the task result remains independent of wakeup success.
 
