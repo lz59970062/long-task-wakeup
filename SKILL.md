@@ -35,10 +35,10 @@ For the standalone repository:
 python3 -m pip install "git+https://github.com/lz59970062/long-task-wakeup.git"
 ```
 
-After pip installation, install the bundled Codex skill:
+After pip installation, install the bundled Codex skill and user-level daemon together:
 
 ```bash
-codex-long-task-wakeup install-skill
+codex-long-task-wakeup setup --force --enable --now
 ```
 
 Or use the bundled installer:
@@ -81,8 +81,11 @@ exit "$status"
 For durable daemon handoff, standardize on a user-level systemd service:
 
 ```bash
-codex-long-task-wakeup install-systemd --enable --now
+codex-long-task-wakeup setup --force --enable --now
 ```
+
+Use `codex-long-task-wakeup install-systemd --enable --now` only when the skill is already installed
+and only the daemon service needs to be refreshed.
 
 The service runs outside Codex tool sandboxes and keeps `codex-long-task-wakeup daemon` alive with
 systemd restart behavior. The installer records the resolved `codex` executable path in

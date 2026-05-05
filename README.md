@@ -64,6 +64,7 @@ The help output must include:
 daemon
 install-systemd
 install-skill
+setup
 ack
 ```
 
@@ -78,7 +79,13 @@ python -m pip install --upgrade --force-reinstall --no-cache-dir \
   "git+https://github.com/lz59970062/long-task-wakeup.git"
 ```
 
-Install the bundled Codex skill into `~/.codex/skills`:
+Install the bundled Codex skill and user-level daemon together:
+
+```bash
+codex-long-task-wakeup setup --force --enable --now
+```
+
+Or install only the bundled Codex skill into `~/.codex/skills`:
 
 ```bash
 codex-long-task-wakeup install-skill
@@ -161,7 +168,7 @@ You can also set `CODEX_LONG_TASK_WAKEUP_VIA_DAEMON=1` instead of passing `--via
 The standard long-lived setup is a user-level systemd service:
 
 ```bash
-codex-long-task-wakeup install-systemd --enable --now
+codex-long-task-wakeup setup --force --enable --now
 ```
 
 This writes:
@@ -193,6 +200,12 @@ To review the generated unit before installing:
 
 ```bash
 codex-long-task-wakeup install-systemd --print
+```
+
+If the skill is already installed and you only need the daemon service, use:
+
+```bash
+codex-long-task-wakeup install-systemd --enable --now
 ```
 
 If `codex` is installed in a non-standard location, pass it explicitly:
@@ -386,6 +399,8 @@ codex-long-task-wakeup --help
 daemon
 install-systemd
 install-skill
+setup
+ack
 ```
 
 如果 `python -m long_task_callback --help` 有 `install-systemd`，但
@@ -399,7 +414,13 @@ python -m pip install --upgrade --force-reinstall --no-cache-dir \
   "git+https://github.com/lz59970062/long-task-wakeup.git"
 ```
 
-把内置 Codex skill 安装到 `~/.codex/skills`：
+同时安装内置 Codex skill 和用户级 daemon：
+
+```bash
+codex-long-task-wakeup setup --force --enable --now
+```
+
+或者只把内置 Codex skill 安装到 `~/.codex/skills`：
 
 ```bash
 codex-long-task-wakeup install-skill
@@ -481,7 +502,7 @@ codex-long-task-wakeup done \
 标准长期运行方式是用户级 systemd service：
 
 ```bash
-codex-long-task-wakeup install-systemd --enable --now
+codex-long-task-wakeup setup --force --enable --now
 ```
 
 它会写入：
@@ -509,6 +530,12 @@ systemctl --user stop codex-long-task-wakeup.service
 
 ```bash
 codex-long-task-wakeup install-systemd --print
+```
+
+如果 skill 已经装好，只需要 daemon service，可以单独运行：
+
+```bash
+codex-long-task-wakeup install-systemd --enable --now
 ```
 
 如果 `codex` 安装在非标准位置，可以显式指定：

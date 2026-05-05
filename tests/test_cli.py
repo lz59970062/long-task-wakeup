@@ -98,6 +98,40 @@ class CliTests(unittest.TestCase):
             self.assertTrue((root / "acks" / "acked.json").exists())
             self.assertFalse((root / "pending" / "acked.json").exists())
 
+    def test_setup_installs_skill_then_systemd(self) -> None:
+        args = argparse.Namespace(
+            skill_path="/tmp/skills",
+            name="codex-long-task-wakeup",
+            queue_dir="/tmp/queue",
+            interval=2.0,
+            retries=3,
+            retry_delay=30.0,
+            retry_backoff=2.0,
+            restart_sec=5.0,
+            exec_start=None,
+            codex_bin=None,
+            path="/bin",
+            force=True,
+            enable=True,
+            now=True,
+        )
+
+        with (
+            mock.patch.object(cli, "install_skill", return_value=0) as install_skill,
+            mock.patch.object(cli, "install_systemd", return_value=0) as install_systemd,
+        ):
+            self.assertEqual(cli.setup(args), 0)
+
+        skill_args = install_skill.call_args.args[0]
+        self.assertEqual(skill_args.path, "/tmp/skills")
+        self.assertTrue(skill_args.force)
+
+        systemd_args = install_systemd.call_args.args[0]
+        self.assertEqual(systemd_args.queue_dir, "/tmp/queue")
+        self.assertEqual(systemd_args.path, "/bin")
+        self.assertTrue(systemd_args.enable)
+        self.assertTrue(systemd_args.now)
+
     def _write_request(self, root: Path, request_id: str, cwd: str) -> None:
         (root / "pending").mkdir(parents=True)
         request = {

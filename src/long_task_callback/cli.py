@@ -551,6 +551,31 @@ def install_systemd(args: argparse.Namespace) -> int:
     return status
 
 
+def setup(args: argparse.Namespace) -> int:
+    skill_args = argparse.Namespace(path=args.skill_path, force=args.force)
+    skill_status = install_skill(skill_args)
+    if skill_status != 0:
+        return skill_status
+
+    systemd_args = argparse.Namespace(
+        name=args.name,
+        queue_dir=args.queue_dir,
+        interval=args.interval,
+        retries=args.retries,
+        retry_delay=args.retry_delay,
+        retry_backoff=args.retry_backoff,
+        restart_sec=args.restart_sec,
+        exec_start=args.exec_start,
+        codex_bin=args.codex_bin,
+        path=args.path,
+        force=args.force,
+        enable=args.enable,
+        now=args.now,
+        print=False,
+    )
+    return install_systemd(systemd_args)
+
+
 def ack(args: argparse.Namespace) -> int:
     root = queue_dir(args)
     ensure_daemon_dirs(root)
@@ -609,6 +634,22 @@ def main() -> int:
     install_parser.add_argument("--path", help="Skills directory to install into (defaults to ${CODEX_HOME:-~/.codex}/skills)")
     install_parser.add_argument("--force", action="store_true", help="Overwrite an existing long-task-callback skill")
 
+    setup_parser = sub.add_parser("setup", help="Install the bundled skill and user-level wakeup daemon")
+    setup_parser.add_argument("--skill-path", help="Skills directory to install into (defaults to ${CODEX_HOME:-~/.codex}/skills)")
+    setup_parser.add_argument("--name", default="codex-long-task-wakeup", help="Systemd service name")
+    setup_parser.add_argument("--queue-dir", help="Wakeup queue directory")
+    setup_parser.add_argument("--interval", type=float, default=2.0, help="Daemon polling interval in seconds")
+    setup_parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Retries after a callback is not acknowledged")
+    setup_parser.add_argument("--retry-delay", type=float, default=DEFAULT_RETRY_DELAY, help="Initial retry delay in seconds")
+    setup_parser.add_argument("--retry-backoff", type=float, default=DEFAULT_RETRY_BACKOFF, help="Retry delay multiplier")
+    setup_parser.add_argument("--restart-sec", type=float, default=5.0, help="Systemd restart delay in seconds")
+    setup_parser.add_argument("--exec-start", help="Path to codex-long-task-wakeup executable")
+    setup_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
+    setup_parser.add_argument("--path", help="PATH environment for the daemon service")
+    setup_parser.add_argument("--force", action="store_true", help="Overwrite an existing skill and service file")
+    setup_parser.add_argument("--enable", action="store_true", help="Run systemctl --user enable after writing the service")
+    setup_parser.add_argument("--now", action="store_true", help="Start or restart the service after writing it")
+
     ack_parser = sub.add_parser("ack", help="Mark a daemon callback as successfully received")
     ack_parser.add_argument("--queue-dir", help="Wakeup queue directory")
     ack_parser.add_argument("--id", required=True, help="Callback request id to acknowledge")
@@ -627,6 +668,8 @@ def main() -> int:
         return install_systemd(args)
     if args.mode == "install-skill":
         return install_skill(args)
+    if args.mode == "setup":
+        return setup(args)
     if args.mode == "ack":
         return ack(args)
     return 2
