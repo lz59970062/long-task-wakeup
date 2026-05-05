@@ -321,6 +321,49 @@ is acceptable:
 codex-long-task-wakeup done --last --cwd "$PWD" --task "long eval" --exit-code "$status"
 ```
 
+## Health Check And Troubleshooting
+
+After setup, verify the installed CLI, skill, and daemon:
+
+```bash
+codex-long-task-wakeup --version
+codex-long-task-wakeup --help
+systemctl --user status codex-long-task-wakeup.service
+journalctl --user -u codex-long-task-wakeup.service -n 100 --no-pager
+```
+
+If the callback reaches `running/` but no file appears in `acks/`, inspect the resumed Codex header
+and the daemon log. A healthy daemon resume should show `sandbox: workspace-write` and include the
+callback queue directory in the writable roots. If it shows `sandbox: read-only` or `approval:
+never` and `ack` fails with `OSError: [Errno 30] Read-only file system`, the installed CLI or
+service is stale, or the daemon was run from inside a restricted Codex tool sandbox.
+
+Refresh the install and service:
+
+```bash
+python3 -m pip install --upgrade --force-reinstall \
+  "git+https://github.com/lz59970062/long-task-wakeup.git"
+hash -r
+codex-long-task-wakeup setup --force --enable --now
+systemctl --user restart codex-long-task-wakeup.service
+```
+
+Then retry with a tiny smoke callback:
+
+```bash
+codex-long-task-wakeup done --via-daemon --last \
+  --cwd "$PWD" \
+  --task "long-task-wakeup smoke test" \
+  --command "manual smoke test" \
+  --exit-code 0 \
+  --message "Please acknowledge this callback and report whether it reached done."
+```
+
+Success means the same callback id appears in both `acks/` and `done/`. If the service is missing or
+stopped, run `codex-long-task-wakeup setup --force --enable --now`. If `codex-long-task-wakeup
+--help` does not list `setup` and `ack`, locate stale console scripts with `which -a
+codex-long-task-wakeup`.
+
 ## Codex Skill
 
 This repository also includes a Codex skill:
@@ -617,3 +660,45 @@ checkpoint、生成文件或测试报告，并判断下一步。
 ```bash
 codex-long-task-wakeup done --last --cwd "$PWD" --task "long eval" --exit-code "$status"
 ```
+
+## 健康检查与排查
+
+setup 之后先确认 CLI、skill 和 daemon：
+
+```bash
+codex-long-task-wakeup --version
+codex-long-task-wakeup --help
+systemctl --user status codex-long-task-wakeup.service
+journalctl --user -u codex-long-task-wakeup.service -n 100 --no-pager
+```
+
+如果 callback 已经进入 `running/`，但 `acks/` 没有 marker，检查恢复后的 Codex header 和
+daemon 日志。健康的 daemon resume 应该显示 `sandbox: workspace-write`，并且 writable roots
+里包含 callback 队列目录。如果看到 `sandbox: read-only` 或 `approval: never`，并且 `ack`
+因为 `OSError: [Errno 30] Read-only file system` 失败，通常说明安装的 CLI 或 systemd
+service 还是旧的，或者 daemon 是从受限的 Codex tool sandbox 里直接运行的。
+
+刷新安装和 service：
+
+```bash
+python3 -m pip install --upgrade --force-reinstall \
+  "git+https://github.com/lz59970062/long-task-wakeup.git"
+hash -r
+codex-long-task-wakeup setup --force --enable --now
+systemctl --user restart codex-long-task-wakeup.service
+```
+
+然后用一个很小的 smoke callback 重试：
+
+```bash
+codex-long-task-wakeup done --via-daemon --last \
+  --cwd "$PWD" \
+  --task "long-task-wakeup smoke test" \
+  --command "manual smoke test" \
+  --exit-code 0 \
+  --message "Please acknowledge this callback and report whether it reached done."
+```
+
+成功时，同一个 callback id 会同时出现在 `acks/` 和 `done/`。如果 service 不存在或没启动，
+运行 `codex-long-task-wakeup setup --force --enable --now`。如果 `codex-long-task-wakeup
+--help` 里没有 `setup` 和 `ack`，用 `which -a codex-long-task-wakeup` 找旧 console script。

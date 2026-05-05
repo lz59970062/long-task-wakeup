@@ -123,6 +123,17 @@ the marker exists. If the marker is missing, the daemon retries 3 times by defau
 delays; tune this with `codex-long-task-wakeup daemon --retries 3 --retry-delay 30 --retry-backoff 2`
 or the same flags on `install-systemd`.
 
+If a callback reaches `running/` but `ack` fails with `OSError: [Errno 30] Read-only file system`,
+check the resumed Codex header. If it shows `sandbox: read-only`, `approval: never`, or the queue
+directory is missing from writable roots, treat this as an installation/service issue rather than a
+task failure. Refresh with `python3 -m pip install --upgrade --force-reinstall
+"git+https://github.com/lz59970062/long-task-wakeup.git"` and then
+`codex-long-task-wakeup setup --force --enable --now`. Inspect
+`systemctl --user status codex-long-task-wakeup.service` and
+`journalctl --user -u codex-long-task-wakeup.service -n 100 --no-pager`; if the next step is still
+unclear, report the exact callback id, queue path, sandbox header, and last daemon log lines to the
+user.
+
 If user services must survive logout on the host, run `loginctl enable-linger "$USER"` once.
 
 Keep `exit "$status"` after the callback. By default `codex-long-task-wakeup done` returns 0 even when Codex cannot be resumed, so the task result remains independent of wakeup success.
