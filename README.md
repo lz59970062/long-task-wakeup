@@ -21,6 +21,8 @@ daemon so nested Codex tool sandboxes do not have to launch more Codex processes
 - **Good for overnight work**: training, evals, benchmarks, deployments, data jobs, long tests.
 - **Same-session handoff**: resumes Codex with `codex exec resume`.
 - **Daemon handoff when needed**: `--via-daemon` queues the wakeup so an external daemon launches Codex.
+- **Acknowledged callbacks**: daemon wakeups require the resumed agent to mark success with `ack`.
+- **Bounded retries**: unacknowledged daemon wakeups retry 3 times by default with increasing delays.
 - **Non-interfering**: callback failure never changes the task exit code by default.
 - **Tiny surface area**: one Python package, one CLI command.
 - **No logs required**: pass task name, command, exit code, cwd, and optional message.
@@ -62,6 +64,7 @@ The help output must include:
 daemon
 install-systemd
 install-skill
+ack
 ```
 
 If `python -m long_task_callback --help` shows `install-systemd` but
@@ -171,7 +174,11 @@ and runs `systemctl --user daemon-reload`, `enable`, and `restart`. The service 
 `codex-long-task-wakeup daemon` alive outside Codex tool sandboxes and restarts it if it exits.
 The installer also records the resolved `codex` executable path in
 `CODEX_LONG_TASK_WAKEUP_CODEX_BIN` and the current `PATH`, so the daemon can find `codex` and its
-runtime dependencies such as Node/NVM outside an interactive shell.
+runtime dependencies such as Node/NVM outside an interactive shell. Resume calls include
+`-c approvals_reviewer="auto_review"`, `-c approval_policy="on-request"`, and
+`-c sandbox_mode="workspace-write"` by default. The queued callback also adds its queue directory to
+`sandbox_workspace_write.writable_roots`, so the resumed agent can write acknowledgement markers
+instead of getting stuck in read-only mode.
 
 Inspect or manage it with:
 
@@ -217,6 +224,22 @@ For tests or batch processing, process currently queued items and exit:
 
 ```bash
 codex-long-task-wakeup daemon --once
+```
+
+When the daemon resumes Codex, the callback prompt includes an acknowledgement command:
+
+```bash
+codex-long-task-wakeup ack --queue-dir <queue-dir> --id <callback-id>
+```
+
+The resumed agent should run that command after it has inspected the long-task result and decided
+what to do next. A queued callback is moved to `done/` only after this marker exists. If Codex exits
+without an acknowledgement marker, the daemon retries the callback 3 times by default with delays of
+30s, 60s, and 120s. Tune this with:
+
+```bash
+codex-long-task-wakeup daemon --retries 3 --retry-delay 30 --retry-backoff 2
+codex-long-task-wakeup install-systemd --retries 3 --retry-delay 30 --retry-backoff 2 --enable --now
 ```
 
 If user services should survive logout on your machine, enable linger once:

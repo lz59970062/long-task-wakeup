@@ -14,8 +14,19 @@ from pathlib import Path
 
 from . import __version__
 
+DEFAULT_APPROVALS_REVIEWER = "auto_review"
+DEFAULT_APPROVAL_POLICY = "on-request"
+DEFAULT_SANDBOX_MODE = "workspace-write"
+DEFAULT_RETRIES = 3
+DEFAULT_RETRY_DELAY = 30.0
+DEFAULT_RETRY_BACKOFF = 2.0
 
-def build_prompt(args: argparse.Namespace, duration: float | None = None) -> str:
+
+def build_prompt(
+    args: argparse.Namespace,
+    duration: float | None = None,
+    acknowledgement: str | None = None,
+) -> str:
     lines = [
         "[long-task-callback]",
         "A long-running task explicitly called back into Codex.",
@@ -39,6 +50,8 @@ def build_prompt(args: argparse.Namespace, duration: float | None = None) -> str
             "Continue if the next step is clear and safe; otherwise ask the user one concise question.",
         ]
     )
+    if acknowledgement:
+        lines.extend(["", build_acknowledgement_text(acknowledgement)])
     return "\n".join(lines)
 
 
@@ -52,6 +65,10 @@ def queue_dir(args: argparse.Namespace | None = None) -> Path:
     if path:
         return Path(path).expanduser()
     return codex_home() / "long-task-wakeup" / "queue"
+
+
+def ack_path(root: Path, request_id: str) -> Path:
+    return root / "acks" / f"{request_id}.json"
 
 
 def codex_command() -> str:
@@ -90,7 +107,18 @@ def codex_bin_path(args: argparse.Namespace) -> str:
 
 
 def systemd_service_text(args: argparse.Namespace) -> str:
-    command = [args.exec_start or console_script_path(), "daemon", "--interval", str(args.interval)]
+    command = [
+        args.exec_start or console_script_path(),
+        "daemon",
+        "--interval",
+        str(args.interval),
+        "--retries",
+        str(args.retries),
+        "--retry-delay",
+        str(args.retry_delay),
+        "--retry-backoff",
+        str(args.retry_backoff),
+    ]
     if args.queue_dir:
         command.extend(["--queue-dir", str(Path(args.queue_dir).expanduser())])
     exec_start = " ".join(systemd_quote(part) for part in command)
@@ -134,6 +162,9 @@ def make_request(args: argparse.Namespace, prompt: str) -> dict[str, object]:
         "cwd": args.cwd,
         "target": target,
         "prompt": prompt,
+        "approvals_reviewer": getattr(args, "approvals_reviewer", None) or DEFAULT_APPROVALS_REVIEWER,
+        "approval_policy": getattr(args, "approval_policy", None) or DEFAULT_APPROVAL_POLICY,
+        "sandbox_mode": getattr(args, "sandbox_mode", None) or DEFAULT_SANDBOX_MODE,
     }
 
 
@@ -144,6 +175,19 @@ def enqueue_request(args: argparse.Namespace, prompt: str) -> int:
 
     request = make_request(args, prompt)
     request_id = str(request["id"])
+    request["queue_dir"] = str(root)
+    acknowledgement = " ".join(
+        shlex.quote(part)
+        for part in [
+            console_script_path(),
+            "ack",
+            "--queue-dir",
+            str(root),
+            "--id",
+            request_id,
+        ]
+    )
+    request["prompt"] = f"{prompt}\n\n{build_acknowledgement_text(acknowledgement)}"
     tmp = pending / f".{request_id}.json.tmp"
     target = pending / f"{request_id}.json"
     try:
@@ -167,6 +211,18 @@ def should_enqueue(args: argparse.Namespace) -> bool:
 
 def resume_command(request: dict[str, object]) -> list[str]:
     cmd = [codex_command(), "exec", "resume", "--all"]
+    approvals_reviewer = request.get("approvals_reviewer", DEFAULT_APPROVALS_REVIEWER)
+    if isinstance(approvals_reviewer, str) and approvals_reviewer:
+        cmd.extend(["-c", f"approvals_reviewer={json.dumps(approvals_reviewer)}"])
+    approval_policy = request.get("approval_policy", DEFAULT_APPROVAL_POLICY)
+    if isinstance(approval_policy, str) and approval_policy:
+        cmd.extend(["-c", f"approval_policy={json.dumps(approval_policy)}"])
+    sandbox_mode = request.get("sandbox_mode", DEFAULT_SANDBOX_MODE)
+    if isinstance(sandbox_mode, str) and sandbox_mode:
+        cmd.extend(["-c", f"sandbox_mode={json.dumps(sandbox_mode)}"])
+    queue_root = request.get("queue_dir")
+    if isinstance(queue_root, str) and queue_root:
+        cmd.extend(["-c", f"sandbox_workspace_write.writable_roots=[{json.dumps(queue_root)}]"])
     target = request.get("target")
     if not isinstance(target, dict):
         raise ValueError("request target must be an object")
@@ -215,7 +271,7 @@ def resume_codex(args: argparse.Namespace, prompt: str) -> int:
 
 
 def ensure_daemon_dirs(root: Path) -> None:
-    for name in ("pending", "running", "done", "failed"):
+    for name in ("pending", "running", "done", "failed", "acks"):
         (root / name).mkdir(parents=True, exist_ok=True)
 
 
@@ -233,13 +289,60 @@ def load_request(path: Path) -> dict[str, object]:
     return data
 
 
-def process_one(root: Path) -> bool:
+def build_acknowledgement_text(command: str) -> str:
+    return "\n".join(
+        [
+            "Callback acknowledgement:",
+            "After you have successfully resumed this callback and inspected the relevant result,",
+            "mark the callback as received by running this command:",
+            command,
+            "This resume is configured to make the callback queue writable and to use automatic approval review when the Codex CLI supports it.",
+            "The wakeup daemon will retry this callback until the acknowledgement marker exists or retries are exhausted.",
+        ]
+    )
+
+
+def next_attempt_at(path: Path) -> float:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return 0.0
+    value = data.get("next_attempt_at") if isinstance(data, dict) else None
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def select_pending(root: Path, now: float) -> Path | None:
+    for path in sorted((root / "pending").glob("*.json")):
+        if next_attempt_at(path) <= now:
+            return path
+    return None
+
+
+def retry_delay(args: argparse.Namespace, attempt: int) -> float:
+    delay = max(0.0, float(getattr(args, "retry_delay", DEFAULT_RETRY_DELAY)))
+    backoff = max(1.0, float(getattr(args, "retry_backoff", DEFAULT_RETRY_BACKOFF)))
+    return delay * (backoff ** max(0, attempt - 1))
+
+
+def write_request(path: Path, request: dict[str, object]) -> None:
+    tmp = path.with_name(f".{path.stem}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text(json.dumps(request, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def move_request(source: Path, destination_dir: Path) -> None:
+    destination = destination_dir / source.name
+    if destination.exists():
+        destination = destination_dir / f"{source.stem}.{int(time.time())}.json"
+    os.replace(source, destination)
+
+
+def process_one(root: Path, args: argparse.Namespace) -> bool:
     ensure_daemon_dirs(root)
-    pending = sorted((root / "pending").glob("*.json"))
-    if not pending:
+    path = select_pending(root, time.time())
+    if path is None:
         return False
 
-    path = pending[0]
     running = root / "running" / path.name
     try:
         os.replace(path, running)
@@ -248,6 +351,15 @@ def process_one(root: Path) -> bool:
 
     try:
         request = load_request(running)
+        request_id = str(request.get("id", running.stem))
+        attempts = int(request.get("attempts", 0)) + 1
+        request["attempts"] = attempts
+        request.pop("next_attempt_at", None)
+        write_request(running, request)
+        try:
+            ack_path(root, request_id).unlink()
+        except FileNotFoundError:
+            pass
         result = subprocess.run(
             resume_command(request),
             input=str(request["prompt"]),
@@ -255,20 +367,32 @@ def process_one(root: Path) -> bool:
             cwd=str(request["cwd"]),
             check=False,
         )
-        destination_dir = root / ("done" if result.returncode == 0 else "failed")
+        acked = ack_path(root, request_id).exists()
+        destination_dir = root / ("done" if acked else "failed")
         if result.returncode != 0:
             print(
                 f"codex-long-task-wakeup: warning: daemon callback {running.name} exited with {result.returncode}",
                 file=sys.stderr,
             )
+        if not acked:
+            request["last_error"] = f"missing acknowledgement marker after exit {result.returncode}"
+            max_retries = max(0, int(getattr(args, "retries", DEFAULT_RETRIES)))
+            if attempts <= max_retries:
+                delay = retry_delay(args, attempts)
+                request["next_attempt_at"] = time.time() + delay
+                write_request(running, request)
+                move_request(running, root / "pending")
+                print(
+                    f"codex-long-task-wakeup: warning: daemon callback {running.name} was not acknowledged; "
+                    f"retry {attempts}/{max_retries} in {delay:.1f}s",
+                    file=sys.stderr,
+                )
+                return True
     except Exception as exc:
         destination_dir = root / "failed"
         print(f"codex-long-task-wakeup: warning: daemon failed to process {running.name}: {exc}", file=sys.stderr)
 
-    destination = destination_dir / running.name
-    if destination.exists():
-        destination = destination_dir / f"{running.stem}.{int(time.time())}.json"
-    os.replace(running, destination)
+    move_request(running, destination_dir)
     return True
 
 
@@ -279,7 +403,7 @@ def daemon(args: argparse.Namespace) -> int:
 
     processed = 0
     while True:
-        did_work = process_one(root)
+        did_work = process_one(root, args)
         if did_work:
             processed += 1
             if args.max_items is not None and processed >= args.max_items:
@@ -335,6 +459,21 @@ def add_common_flags(parser: argparse.ArgumentParser) -> None:
         help="Queue the wakeup request for codex-long-task-wakeup daemon instead of running codex exec resume here",
     )
     parser.add_argument("--queue-dir", help="Wakeup queue directory for --via-daemon")
+    parser.add_argument(
+        "--approvals-reviewer",
+        default=os.environ.get("CODEX_LONG_TASK_WAKEUP_APPROVALS_REVIEWER", DEFAULT_APPROVALS_REVIEWER),
+        help="Codex approvals_reviewer config value used when resuming (default: auto_review)",
+    )
+    parser.add_argument(
+        "--approval-policy",
+        default=os.environ.get("CODEX_LONG_TASK_WAKEUP_APPROVAL_POLICY", DEFAULT_APPROVAL_POLICY),
+        help="Codex approval_policy config value used when resuming (default: on-request)",
+    )
+    parser.add_argument(
+        "--sandbox-mode",
+        default=os.environ.get("CODEX_LONG_TASK_WAKEUP_SANDBOX_MODE", DEFAULT_SANDBOX_MODE),
+        help="Codex sandbox_mode config value used when resuming (default: workspace-write)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print the wakeup prompt instead of resuming Codex")
     parser.add_argument(
         "--strict",
@@ -412,6 +551,23 @@ def install_systemd(args: argparse.Namespace) -> int:
     return status
 
 
+def ack(args: argparse.Namespace) -> int:
+    root = queue_dir(args)
+    ensure_daemon_dirs(root)
+    marker = ack_path(root, args.id)
+    payload = {
+        "id": args.id,
+        "marked_at": time.time(),
+    }
+    if args.message:
+        payload["message"] = args.message
+    tmp = marker.with_name(f".{marker.stem}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, marker)
+    print(f"codex-long-task-wakeup: acknowledged callback {args.id} in {root}", file=sys.stderr)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Explicit callback tool for waking Codex after a long task.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -429,11 +585,17 @@ def main() -> int:
     daemon_parser.add_argument("--interval", type=float, default=2.0, help="Polling interval in seconds")
     daemon_parser.add_argument("--once", action="store_true", help="Exit after the queue is empty")
     daemon_parser.add_argument("--max-items", type=int, help="Exit after processing this many queued requests")
+    daemon_parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Retries after a callback is not acknowledged")
+    daemon_parser.add_argument("--retry-delay", type=float, default=DEFAULT_RETRY_DELAY, help="Initial retry delay in seconds")
+    daemon_parser.add_argument("--retry-backoff", type=float, default=DEFAULT_RETRY_BACKOFF, help="Retry delay multiplier")
 
     systemd_parser = sub.add_parser("install-systemd", help="Install a user-level systemd service for the wakeup daemon")
     systemd_parser.add_argument("--name", default="codex-long-task-wakeup", help="Systemd service name")
     systemd_parser.add_argument("--queue-dir", help="Wakeup queue directory")
     systemd_parser.add_argument("--interval", type=float, default=2.0, help="Daemon polling interval in seconds")
+    systemd_parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Retries after a callback is not acknowledged")
+    systemd_parser.add_argument("--retry-delay", type=float, default=DEFAULT_RETRY_DELAY, help="Initial retry delay in seconds")
+    systemd_parser.add_argument("--retry-backoff", type=float, default=DEFAULT_RETRY_BACKOFF, help="Retry delay multiplier")
     systemd_parser.add_argument("--restart-sec", type=float, default=5.0, help="Restart delay in seconds")
     systemd_parser.add_argument("--exec-start", help="Path to codex-long-task-wakeup executable")
     systemd_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
@@ -446,6 +608,11 @@ def main() -> int:
     install_parser = sub.add_parser("install-skill", help="Install the bundled Codex skill into CODEX_HOME")
     install_parser.add_argument("--path", help="Skills directory to install into (defaults to ${CODEX_HOME:-~/.codex}/skills)")
     install_parser.add_argument("--force", action="store_true", help="Overwrite an existing long-task-callback skill")
+
+    ack_parser = sub.add_parser("ack", help="Mark a daemon callback as successfully received")
+    ack_parser.add_argument("--queue-dir", help="Wakeup queue directory")
+    ack_parser.add_argument("--id", required=True, help="Callback request id to acknowledge")
+    ack_parser.add_argument("--message", help="Optional acknowledgement note")
 
     args = parser.parse_args()
     if args.mode == "done":
@@ -460,6 +627,8 @@ def main() -> int:
         return install_systemd(args)
     if args.mode == "install-skill":
         return install_skill(args)
+    if args.mode == "ack":
+        return ack(args)
     return 2
 
 

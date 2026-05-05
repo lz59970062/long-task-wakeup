@@ -87,8 +87,12 @@ codex-long-task-wakeup install-systemd --enable --now
 The service runs outside Codex tool sandboxes and keeps `codex-long-task-wakeup daemon` alive with
 systemd restart behavior. The installer records the resolved `codex` executable path in
 `CODEX_LONG_TASK_WAKEUP_CODEX_BIN` and records the current `PATH` so Codex's runtime dependencies
-such as Node/NVM are available under systemd. Use `--codex-bin /path/to/codex` or `--path "$PATH"`
-if discovery is not correct. Inspect it with:
+such as Node/NVM are available under systemd. Resume calls also default to
+`-c approvals_reviewer="auto_review"`, `-c approval_policy="on-request"`, and
+`-c sandbox_mode="workspace-write"`. Queued callbacks also add their queue directory to
+`sandbox_workspace_write.writable_roots`, so the resumed agent can write acknowledgement markers
+instead of stalling in read-only mode. Use `--codex-bin /path/to/codex` or `--path "$PATH"` if
+discovery is not correct. Inspect it with:
 
 ```bash
 systemctl --user status codex-long-task-wakeup.service
@@ -103,6 +107,18 @@ codex-long-task-wakeup daemon
 
 The daemon watches `${CODEX_HOME:-~/.codex}/long-task-wakeup/queue` by default. Use `--queue-dir`
 or `CODEX_LONG_TASK_WAKEUP_QUEUE_DIR` when a different queue location is needed.
+
+Daemon callbacks are acknowledged by the resumed agent. The callback prompt includes a command like:
+
+```bash
+codex-long-task-wakeup ack --queue-dir <queue-dir> --id <callback-id>
+```
+
+After the agent has inspected the long-task result and decided whether to continue, stop, or ask the
+user, it must run that acknowledgement command. The daemon moves the request to `done/` only after
+the marker exists. If the marker is missing, the daemon retries 3 times by default with increasing
+delays; tune this with `codex-long-task-wakeup daemon --retries 3 --retry-delay 30 --retry-backoff 2`
+or the same flags on `install-systemd`.
 
 If user services must survive logout on the host, run `loginctl enable-linger "$USER"` once.
 
