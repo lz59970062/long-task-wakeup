@@ -107,20 +107,7 @@ def codex_bin_path(args: argparse.Namespace) -> str:
 
 
 def systemd_service_text(args: argparse.Namespace) -> str:
-    command = [
-        args.exec_start or console_script_path(),
-        "daemon",
-        "--interval",
-        str(args.interval),
-        "--retries",
-        str(args.retries),
-        "--retry-delay",
-        str(args.retry_delay),
-        "--retry-backoff",
-        str(args.retry_backoff),
-    ]
-    if args.queue_dir:
-        command.extend(["--queue-dir", str(Path(args.queue_dir).expanduser())])
+    command = daemon_command(args)
     exec_start = " ".join(systemd_quote(part) for part in command)
     codex_bin = codex_bin_path(args)
     path = args.path or os.environ.get("PATH", "")
@@ -146,6 +133,24 @@ def systemd_service_text(args: argparse.Namespace) -> str:
             "",
         ]
     )
+
+
+def daemon_command(args: argparse.Namespace) -> list[str]:
+    command = [
+        args.exec_start or console_script_path(),
+        "daemon",
+        "--interval",
+        str(args.interval),
+        "--retries",
+        str(args.retries),
+        "--retry-delay",
+        str(args.retry_delay),
+        "--retry-backoff",
+        str(args.retry_backoff),
+    ]
+    if args.queue_dir:
+        command.extend(["--queue-dir", str(Path(args.queue_dir).expanduser())])
+    return command
 
 
 def make_request(args: argparse.Namespace, prompt: str) -> dict[str, object]:
@@ -521,6 +526,75 @@ def run_systemctl(args: list[str]) -> int:
     return result.returncode
 
 
+def daemon_state_dir() -> Path:
+    return codex_home() / "long-task-wakeup"
+
+
+def read_pid(path: Path) -> int | None:
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def start_standalone_daemon(args: argparse.Namespace) -> int:
+    root = daemon_state_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    pid_path = root / "daemon.pid"
+    log_path = root / "daemon.log"
+
+    existing_pid = read_pid(pid_path)
+    if existing_pid is not None and pid_is_running(existing_pid):
+        print(f"codex-long-task-wakeup: standalone daemon already running with pid {existing_pid}")
+        print(f"codex-long-task-wakeup: log file: {log_path}")
+        return 0
+
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env["CODEX_LONG_TASK_WAKEUP_CODEX_BIN"] = codex_bin_path(args)
+    if args.path:
+        env["PATH"] = args.path
+
+    log_file = log_path.open("ab")
+    try:
+        process = subprocess.Popen(
+            daemon_command(args),
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            close_fds=True,
+            start_new_session=True,
+            env=env,
+        )
+    finally:
+        log_file.close()
+
+    pid_path.write_text(f"{process.pid}\n", encoding="utf-8")
+    time.sleep(0.2)
+    returncode = process.poll()
+    if returncode is not None:
+        print(
+            f"codex-long-task-wakeup: warning: standalone daemon exited immediately with {returncode}; see {log_path}",
+            file=sys.stderr,
+        )
+        return returncode
+
+    print(f"Started standalone wakeup daemon with pid {process.pid}")
+    print(f"Standalone daemon pid file: {pid_path}")
+    print(f"Standalone daemon log file: {log_path}")
+    return 0
+
+
 def install_systemd(args: argparse.Namespace) -> int:
     name = service_name(args.name)
     text = systemd_service_text(args)
@@ -547,6 +621,11 @@ def install_systemd(args: argparse.Namespace) -> int:
             status = run_systemctl([action, name]) or status
     else:
         print("codex-long-task-wakeup: warning: systemctl not found; service file was written but not loaded", file=sys.stderr)
+        if args.enable:
+            print("codex-long-task-wakeup: warning: --enable has no effect without systemd", file=sys.stderr)
+        if args.now:
+            print("codex-long-task-wakeup: starting standalone daemon fallback", file=sys.stderr)
+            status = start_standalone_daemon(args)
 
     return status
 

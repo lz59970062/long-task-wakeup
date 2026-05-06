@@ -179,6 +179,15 @@ This writes:
 
 and runs `systemctl --user daemon-reload`, `enable`, and `restart`. The service keeps
 `codex-long-task-wakeup daemon` alive outside Codex tool sandboxes and restarts it if it exits.
+In Docker or minimal containers where `systemctl` is not available, the same `setup --force --enable
+--now` command falls back to a standalone background daemon. In that mode `--enable` has no effect
+because there is no init system; `--now` starts the daemon immediately and writes:
+
+```text
+${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.pid
+${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.log
+```
+
 The installer also records the resolved `codex` executable path in
 `CODEX_LONG_TASK_WAKEUP_CODEX_BIN` and the current `PATH`, so the daemon can find `codex` and its
 runtime dependencies such as Node/NVM outside an interactive shell. Resume calls include
@@ -194,6 +203,13 @@ systemctl --user status codex-long-task-wakeup.service
 journalctl --user -u codex-long-task-wakeup.service -f
 systemctl --user restart codex-long-task-wakeup.service
 systemctl --user stop codex-long-task-wakeup.service
+```
+
+In Docker fallback mode, inspect the standalone files instead:
+
+```bash
+cat "${CODEX_HOME:-$HOME/.codex}/long-task-wakeup/daemon.pid"
+tail -f "${CODEX_HOME:-$HOME/.codex}/long-task-wakeup/daemon.log"
 ```
 
 To review the generated unit before installing:
@@ -337,6 +353,11 @@ and the daemon log. A healthy daemon resume should show `sandbox: workspace-writ
 callback queue directory in the writable roots. If it shows `sandbox: read-only` or `approval:
 never` and `ack` fails with `OSError: [Errno 30] Read-only file system`, the installed CLI or
 service is stale, or the daemon was run from inside a restricted Codex tool sandbox.
+
+If setup printed `systemctl not found`, this is expected in many Docker images. Confirm the fallback
+daemon is running by checking `${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.pid` and
+`${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.log`. The fallback is suitable for containers, but
+it is not a restart manager; it lives for the lifetime of the container process namespace.
 
 Refresh the install and service:
 
@@ -556,6 +577,15 @@ codex-long-task-wakeup setup --force --enable --now
 
 并执行 `systemctl --user daemon-reload`、`enable` 和 `restart`。这个 service 会在 Codex
 工具 sandbox 外部保持 `codex-long-task-wakeup daemon` 常驻，并在异常退出后自动重启。
+在 Docker 或精简容器里如果没有 `systemctl`，同一条 `setup --force --enable --now` 会自动
+退化为 standalone 后台 daemon。这个模式下 `--enable` 没有作用，因为容器里没有 init
+system；`--now` 会立即启动 daemon，并写入：
+
+```text
+${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.pid
+${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.log
+```
+
 安装器也会把解析到的 `codex` 可执行文件路径写入 `CODEX_LONG_TASK_WAKEUP_CODEX_BIN`，
 并写入当前 `PATH`，确保 daemon 在非交互式 systemd 环境里也能找到 Codex 的 Node/NVM
 等运行时依赖。
@@ -567,6 +597,13 @@ systemctl --user status codex-long-task-wakeup.service
 journalctl --user -u codex-long-task-wakeup.service -f
 systemctl --user restart codex-long-task-wakeup.service
 systemctl --user stop codex-long-task-wakeup.service
+```
+
+Docker fallback 模式下查看 standalone 文件：
+
+```bash
+cat "${CODEX_HOME:-$HOME/.codex}/long-task-wakeup/daemon.pid"
+tail -f "${CODEX_HOME:-$HOME/.codex}/long-task-wakeup/daemon.log"
 ```
 
 安装前预览 unit：
@@ -677,6 +714,11 @@ daemon 日志。健康的 daemon resume 应该显示 `sandbox: workspace-write`�
 里包含 callback 队列目录。如果看到 `sandbox: read-only` 或 `approval: never`，并且 `ack`
 因为 `OSError: [Errno 30] Read-only file system` 失败，通常说明安装的 CLI 或 systemd
 service 还是旧的，或者 daemon 是从受限的 Codex tool sandbox 里直接运行的。
+
+如果 setup 打印 `systemctl not found`，这在很多 Docker 镜像里是正常的。检查 fallback daemon
+是否运行时，看 `${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.pid` 和
+`${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.log`。fallback 适合容器，但它不是 restart
+manager；它的生命周期跟容器进程命名空间一致。
 
 刷新安装和 service：
 
