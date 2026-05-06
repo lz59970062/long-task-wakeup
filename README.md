@@ -180,7 +180,17 @@ This writes:
 and runs `systemctl --user daemon-reload`, `enable`, and `restart`. The service keeps
 `codex-long-task-wakeup daemon` alive outside Codex tool sandboxes and restarts it if it exits.
 In Docker or minimal containers where `systemctl` is not available, the same `setup --force --enable
---now` command falls back to a standalone background daemon. In that mode `--enable` has no effect
+--now` command prefers supervisor when `supervisorctl` or `supervisord` is installed. It writes:
+
+```text
+/etc/supervisor/conf.d/codex-long-task-wakeup.conf
+${CODEX_HOME:-~/.codex}/long-task-wakeup/supervisor.log
+```
+
+The supervisor program uses `autostart=true` and `autorestart=true`, which keeps the daemon running
+while `supervisord` is alive. Pair this with Docker's own `--restart unless-stopped` or Compose
+`restart: unless-stopped` for container-level restart behavior. If supervisor is not installed,
+setup falls back to a standalone background daemon. In that fallback mode `--enable` has no effect
 because there is no init system; `--now` starts the daemon immediately and writes:
 
 ```text
@@ -205,7 +215,14 @@ systemctl --user restart codex-long-task-wakeup.service
 systemctl --user stop codex-long-task-wakeup.service
 ```
 
-In Docker fallback mode, inspect the standalone files instead:
+In Docker supervisor mode, inspect supervisor first:
+
+```bash
+supervisorctl status codex-long-task-wakeup
+tail -f "${CODEX_HOME:-$HOME/.codex}/long-task-wakeup/supervisor.log"
+```
+
+If supervisor is not installed and setup used the standalone fallback, inspect:
 
 ```bash
 cat "${CODEX_HOME:-$HOME/.codex}/long-task-wakeup/daemon.pid"
@@ -354,10 +371,13 @@ callback queue directory in the writable roots. If it shows `sandbox: read-only`
 never` and `ack` fails with `OSError: [Errno 30] Read-only file system`, the installed CLI or
 service is stale, or the daemon was run from inside a restricted Codex tool sandbox.
 
-If setup printed `systemctl not found`, this is expected in many Docker images. Confirm the fallback
-daemon is running by checking `${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.pid` and
-`${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.log`. The fallback is suitable for containers, but
-it is not a restart manager; it lives for the lifetime of the container process namespace.
+If setup printed `systemctl not found`, this is expected in many Docker images. If supervisor is
+installed, confirm the daemon with `supervisorctl status codex-long-task-wakeup` and
+`${CODEX_HOME:-~/.codex}/long-task-wakeup/supervisor.log`. If supervisor is missing, setup uses the
+standalone fallback; check `${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.pid` and
+`${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.log`. For durable Docker restarts, run the
+container with Docker's `restart: unless-stopped` policy and let supervisor manage the daemon inside
+the container.
 
 Refresh the install and service:
 
@@ -577,9 +597,19 @@ codex-long-task-wakeup setup --force --enable --now
 
 并执行 `systemctl --user daemon-reload`、`enable` 和 `restart`。这个 service 会在 Codex
 工具 sandbox 外部保持 `codex-long-task-wakeup daemon` 常驻，并在异常退出后自动重启。
-在 Docker 或精简容器里如果没有 `systemctl`，同一条 `setup --force --enable --now` 会自动
-退化为 standalone 后台 daemon。这个模式下 `--enable` 没有作用，因为容器里没有 init
-system；`--now` 会立即启动 daemon，并写入：
+在 Docker 或精简容器里如果没有 `systemctl`，同一条 `setup --force --enable --now` 会优先使用
+supervisor，前提是已安装 `supervisorctl` 或 `supervisord`。它会写入：
+
+```text
+/etc/supervisor/conf.d/codex-long-task-wakeup.conf
+${CODEX_HOME:-~/.codex}/long-task-wakeup/supervisor.log
+```
+
+supervisor program 使用 `autostart=true` 和 `autorestart=true`，能在 `supervisord` 存活期间保持
+daemon 运行。容器级重启语义建议配合 Docker 的 `--restart unless-stopped` 或 Compose 的
+`restart: unless-stopped`。如果没有安装 supervisor，setup 才会退化为 standalone 后台 daemon。
+这个 fallback 模式下 `--enable` 没有作用，因为容器里没有 init system；`--now` 会立即启动
+daemon，并写入：
 
 ```text
 ${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.pid
@@ -599,7 +629,14 @@ systemctl --user restart codex-long-task-wakeup.service
 systemctl --user stop codex-long-task-wakeup.service
 ```
 
-Docker fallback 模式下查看 standalone 文件：
+Docker supervisor 模式下先看 supervisor：
+
+```bash
+supervisorctl status codex-long-task-wakeup
+tail -f "${CODEX_HOME:-$HOME/.codex}/long-task-wakeup/supervisor.log"
+```
+
+如果没有安装 supervisor，setup 使用 standalone fallback，再查看：
 
 ```bash
 cat "${CODEX_HOME:-$HOME/.codex}/long-task-wakeup/daemon.pid"
@@ -715,10 +752,12 @@ daemon 日志。健康的 daemon resume 应该显示 `sandbox: workspace-write`�
 因为 `OSError: [Errno 30] Read-only file system` 失败，通常说明安装的 CLI 或 systemd
 service 还是旧的，或者 daemon 是从受限的 Codex tool sandbox 里直接运行的。
 
-如果 setup 打印 `systemctl not found`，这在很多 Docker 镜像里是正常的。检查 fallback daemon
-是否运行时，看 `${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.pid` 和
-`${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.log`。fallback 适合容器，但它不是 restart
-manager；它的生命周期跟容器进程命名空间一致。
+如果 setup 打印 `systemctl not found`，这在很多 Docker 镜像里是正常的。如果安装了
+supervisor，用 `supervisorctl status codex-long-task-wakeup` 和
+`${CODEX_HOME:-~/.codex}/long-task-wakeup/supervisor.log` 确认 daemon。如果没有 supervisor，
+setup 会使用 standalone fallback；检查 `${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.pid`
+和 `${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.log`。需要持久重启时，容器层用 Docker
+的 `restart: unless-stopped`，容器内用 supervisor 管 daemon。
 
 刷新安装和 service：
 

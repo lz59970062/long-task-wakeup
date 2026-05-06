@@ -102,11 +102,14 @@ systemctl --user status codex-long-task-wakeup.service
 journalctl --user -u codex-long-task-wakeup.service -f
 ```
 
-If `systemctl` is unavailable, as in many Docker containers, `setup --force --enable --now` starts a
-standalone background daemon instead. In that mode, `--enable` has no effect and the daemon is not
-auto-restarted by an init system. Inspect `${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.pid` and
-`${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.log`; if the process is gone, run setup again or
-start `codex-long-task-wakeup daemon` from the container entrypoint.
+If `systemctl` is unavailable, as in many Docker containers, `setup --force --enable --now` prefers
+supervisor when `supervisorctl` or `supervisord` is installed. It writes
+`/etc/supervisor/conf.d/codex-long-task-wakeup.conf` with `autostart=true` and `autorestart=true`.
+Inspect `supervisorctl status codex-long-task-wakeup` and
+`${CODEX_HOME:-~/.codex}/long-task-wakeup/supervisor.log`. For durable container restarts, pair this
+with Docker's `restart: unless-stopped`. If supervisor is missing, setup falls back to a standalone
+background daemon; inspect `${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.pid` and
+`${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.log`.
 
 Use this foreground form only for debugging:
 

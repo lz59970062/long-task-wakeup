@@ -20,6 +20,7 @@ DEFAULT_SANDBOX_MODE = "workspace-write"
 DEFAULT_RETRIES = 3
 DEFAULT_RETRY_DELAY = 30.0
 DEFAULT_RETRY_BACKOFF = 2.0
+DEFAULT_SUPERVISOR_CONF_DIR = "/etc/supervisor/conf.d"
 
 
 def build_prompt(
@@ -88,8 +89,16 @@ def systemd_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def supervisor_quote(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+
+
 def service_name(name: str) -> str:
     return name if name.endswith(".service") else f"{name}.service"
+
+
+def program_name(name: str) -> str:
+    return name.removesuffix(".service")
 
 
 def console_script_path() -> str:
@@ -151,6 +160,54 @@ def daemon_command(args: argparse.Namespace) -> list[str]:
     if args.queue_dir:
         command.extend(["--queue-dir", str(Path(args.queue_dir).expanduser())])
     return command
+
+
+def running_in_container() -> bool:
+    if Path("/.dockerenv").exists():
+        return True
+    container = os.environ.get("container", "").strip().lower()
+    return container in {"docker", "podman", "oci", "containerd"}
+
+
+def supervisor_conf_dir() -> Path:
+    path = os.environ.get("CODEX_LONG_TASK_WAKEUP_SUPERVISOR_CONF_DIR", DEFAULT_SUPERVISOR_CONF_DIR)
+    return Path(path).expanduser()
+
+
+def supervisor_config_path(args: argparse.Namespace) -> Path:
+    return supervisor_conf_dir() / f"{program_name(args.name)}.conf"
+
+
+def supervisor_config_text(args: argparse.Namespace) -> str:
+    root = daemon_state_dir()
+    log_path = root / "supervisor.log"
+    command = " ".join(shlex.quote(part) for part in daemon_command(args))
+    environment = ",".join(
+        [
+            f"PYTHONUNBUFFERED={supervisor_quote('1')}",
+            f"CODEX_LONG_TASK_WAKEUP_CODEX_BIN={supervisor_quote(codex_bin_path(args))}",
+            f"PATH={supervisor_quote(args.path or os.environ.get('PATH', ''))}",
+        ]
+    )
+    return "\n".join(
+        [
+            f"[program:{program_name(args.name)}]",
+            f"command={command}",
+            "autostart=true",
+            "autorestart=true",
+            "startsecs=3",
+            "startretries=10",
+            "stopsignal=TERM",
+            "stopasgroup=true",
+            "killasgroup=true",
+            "redirect_stderr=true",
+            f"stdout_logfile={log_path}",
+            "stdout_logfile_maxbytes=10MB",
+            "stdout_logfile_backups=3",
+            f"environment={environment}",
+            "",
+        ]
+    )
 
 
 def make_request(args: argparse.Namespace, prompt: str) -> dict[str, object]:
@@ -526,6 +583,14 @@ def run_systemctl(args: list[str]) -> int:
     return result.returncode
 
 
+def run_supervisorctl(args: list[str]) -> int:
+    command = ["supervisorctl", *args]
+    result = subprocess.run(command, check=False)
+    if result.returncode != 0:
+        print(f"codex-long-task-wakeup: warning: {' '.join(shlex.quote(part) for part in command)} exited with {result.returncode}", file=sys.stderr)
+    return result.returncode
+
+
 def daemon_state_dir() -> Path:
     return codex_home() / "long-task-wakeup"
 
@@ -595,6 +660,43 @@ def start_standalone_daemon(args: argparse.Namespace) -> int:
     return 0
 
 
+def start_supervisord_if_available() -> int:
+    if shutil.which("supervisord") is None:
+        return 1
+    result = subprocess.run(["supervisord"], check=False)
+    if result.returncode != 0:
+        print("codex-long-task-wakeup: warning: supervisord failed to start", file=sys.stderr)
+    return result.returncode
+
+
+def install_supervisor(args: argparse.Namespace) -> int:
+    root = daemon_state_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    target = supervisor_config_path(args)
+    if target.exists() and not args.force:
+        print(f"Supervisor program already exists at {target}. Re-run with --force to overwrite.", file=sys.stderr)
+        return 1
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(supervisor_config_text(args), encoding="utf-8")
+    print(f"Installed supervisor program to {target}")
+
+    if not args.now:
+        return 0
+    if shutil.which("supervisorctl") is None:
+        print("codex-long-task-wakeup: warning: supervisorctl not found; supervisor config was written but not loaded", file=sys.stderr)
+        return 1
+
+    status = run_supervisorctl(["reread"])
+    if status != 0 and start_supervisord_if_available() == 0:
+        status = run_supervisorctl(["reread"])
+    status = run_supervisorctl(["update"]) or status
+    status = run_supervisorctl(["start", program_name(args.name)]) or status
+    if status == 0:
+        print(f"Started supervisor-managed wakeup daemon: {program_name(args.name)}")
+    return status
+
+
 def install_systemd(args: argparse.Namespace) -> int:
     name = service_name(args.name)
     text = systemd_service_text(args)
@@ -624,8 +726,12 @@ def install_systemd(args: argparse.Namespace) -> int:
         if args.enable:
             print("codex-long-task-wakeup: warning: --enable has no effect without systemd", file=sys.stderr)
         if args.now:
-            print("codex-long-task-wakeup: starting standalone daemon fallback", file=sys.stderr)
-            status = start_standalone_daemon(args)
+            if running_in_container() and (shutil.which("supervisorctl") or shutil.which("supervisord")):
+                print("codex-long-task-wakeup: starting supervisor daemon fallback", file=sys.stderr)
+                status = install_supervisor(args)
+            else:
+                print("codex-long-task-wakeup: starting standalone daemon fallback", file=sys.stderr)
+                status = start_standalone_daemon(args)
 
     return status
 

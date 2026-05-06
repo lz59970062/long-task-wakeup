@@ -132,7 +132,37 @@ class CliTests(unittest.TestCase):
         self.assertTrue(systemd_args.enable)
         self.assertTrue(systemd_args.now)
 
-    def test_install_systemd_starts_standalone_when_systemctl_missing(self) -> None:
+    def test_install_systemd_starts_supervisor_in_container(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(
+                name="codex-long-task-wakeup",
+                queue_dir="/tmp/queue",
+                interval=2.0,
+                retries=3,
+                retry_delay=30.0,
+                retry_backoff=2.0,
+                restart_sec=5.0,
+                exec_start=None,
+                codex_bin=None,
+                path="/bin",
+                force=True,
+                enable=True,
+                now=True,
+                print=False,
+            )
+
+            with (
+                mock.patch.object(cli, "systemd_user_dir", return_value=Path(tmp)),
+                mock.patch.object(cli.shutil, "which", side_effect=lambda command: "/usr/bin/supervisorctl" if command == "supervisorctl" else None),
+                mock.patch.object(cli, "running_in_container", return_value=True),
+                mock.patch.object(cli, "install_supervisor", return_value=0) as install_supervisor,
+            ):
+                self.assertEqual(cli.install_systemd(args), 0)
+
+            self.assertTrue((Path(tmp) / "codex-long-task-wakeup.service").exists())
+            install_supervisor.assert_called_once()
+
+    def test_install_systemd_starts_standalone_without_supervisor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = argparse.Namespace(
                 name="codex-long-task-wakeup",
@@ -154,12 +184,33 @@ class CliTests(unittest.TestCase):
             with (
                 mock.patch.object(cli, "systemd_user_dir", return_value=Path(tmp)),
                 mock.patch.object(cli.shutil, "which", return_value=None),
+                mock.patch.object(cli, "running_in_container", return_value=True),
                 mock.patch.object(cli, "start_standalone_daemon", return_value=0) as start_standalone,
             ):
                 self.assertEqual(cli.install_systemd(args), 0)
 
             self.assertTrue((Path(tmp) / "codex-long-task-wakeup.service").exists())
             start_standalone.assert_called_once()
+
+    def test_supervisor_config_uses_autorestart(self) -> None:
+        args = argparse.Namespace(
+            name="codex-long-task-wakeup",
+            queue_dir="/tmp/queue",
+            interval=2.0,
+            retries=3,
+            retry_delay=30.0,
+            retry_backoff=2.0,
+            exec_start="/usr/local/bin/codex-long-task-wakeup",
+            codex_bin="/usr/local/bin/codex",
+            path="/bin",
+        )
+
+        text = cli.supervisor_config_text(args)
+
+        self.assertIn("[program:codex-long-task-wakeup]", text)
+        self.assertIn("autostart=true", text)
+        self.assertIn("autorestart=true", text)
+        self.assertIn("--queue-dir /tmp/queue", text)
 
     def _write_request(self, root: Path, request_id: str, cwd: str) -> None:
         (root / "pending").mkdir(parents=True)
