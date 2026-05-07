@@ -23,6 +23,7 @@ daemon so nested Codex tool sandboxes do not have to launch more Codex processes
 - **Daemon handoff when needed**: `--via-daemon` queues the wakeup so an external daemon launches Codex.
 - **Acknowledged callbacks**: daemon wakeups require the resumed agent to mark success with `ack`.
 - **Bounded retries**: unacknowledged daemon wakeups retry 3 times by default with increasing delays.
+- **Cancelable queue items**: queued or retrying daemon callbacks can be moved to `canceled/`.
 - **Non-interfering**: callback failure never changes the task exit code by default.
 - **Tiny surface area**: one Python package, one CLI command.
 - **No logs required**: pass task name, command, exit code, cwd, and optional message.
@@ -66,6 +67,7 @@ install-systemd
 install-skill
 setup
 ack
+cancel
 ```
 
 If `python -m long_task_callback --help` shows `install-systemd` but
@@ -288,6 +290,19 @@ codex-long-task-wakeup daemon --retries 3 --retry-delay 30 --retry-backoff 2
 codex-long-task-wakeup install-systemd --retries 3 --retry-delay 30 --retry-backoff 2 --enable --now
 ```
 
+If a queued callback is no longer needed before it fires or before its retry window finishes, cancel
+it instead of deleting queue files manually:
+
+```bash
+codex-long-task-wakeup cancel --id <callback-id>
+codex-long-task-wakeup cancel --queue-dir <queue-dir> --id <callback-id>
+codex-long-task-wakeup cancel --queue-dir <queue-dir> --all --message "no longer needed"
+```
+
+Canceling moves active requests from `pending/` or `running/` to `canceled/`. If a Codex resume has
+already started, `cancel` does not kill that process; it only prevents the daemon from retrying or
+moving that request to `done/` later.
+
 If user services should survive logout on your machine, enable linger once:
 
 ```bash
@@ -442,6 +457,7 @@ Long Task Wakeup 用一个显式 callback 解决这个问题。Codex 在长任�
 - **回到同一个 session**：内部使用 `codex exec resume`。
 - **需要时使用 daemon 交接**：`--via-daemon` 会把唤醒请求入队，由外部 daemon 启动 Codex。
 - **标准守护方式**：`install-systemd --enable --now` 安装用户级 systemd service。
+- **可取消队列项**：不再需要的 daemon callback 可以移到 `canceled/`，避免继续重试。
 - **不干扰任务逻辑**：默认情况下，唤醒失败不会改变任务退出码。
 - **很小的工具面**：一个 Python 包，一个全局 CLI。
 - **不依赖日志功能**：传 task、command、exit code、cwd 和可选 message 即可。
@@ -485,6 +501,7 @@ install-systemd
 install-skill
 setup
 ack
+cancel
 ```
 
 如果 `python -m long_task_callback --help` 有 `install-systemd`，但
@@ -669,6 +686,17 @@ codex-long-task-wakeup daemon
 
 默认队列目录是 `${CODEX_HOME:-~/.codex}/long-task-wakeup/queue`。需要自定义时使用
 `--queue-dir` 或 `CODEX_LONG_TASK_WAKEUP_QUEUE_DIR`。
+
+如果某个队列里的 callback 在触发前或重试结束前已经不需要了，用 `cancel`，不要手动删除队列文件：
+
+```bash
+codex-long-task-wakeup cancel --id <callback-id>
+codex-long-task-wakeup cancel --queue-dir <queue-dir> --id <callback-id>
+codex-long-task-wakeup cancel --queue-dir <queue-dir> --all --message "no longer needed"
+```
+
+取消会把 `pending/` 或 `running/` 里的活跃请求移动到 `canceled/`。如果某个 Codex resume 已经
+启动，`cancel` 不会杀掉那个进程；它只阻止 daemon 后续继续重试，或把该请求再移动到 `done/`。
 
 如果希望用户服务在退出登录后仍然保活，在宿主机上执行一次：
 

@@ -212,6 +212,48 @@ class CliTests(unittest.TestCase):
         self.assertIn("autorestart=true", text)
         self.assertIn("--queue-dir /tmp/queue", text)
 
+    def test_cancel_moves_pending_to_canceled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            self._write_request(root, "cancel-me", tmp)
+
+            self.assertTrue(cli.cancel_one(root, "cancel-me", "not needed"))
+
+            self.assertFalse((root / "pending" / "cancel-me.json").exists())
+            canceled = root / "canceled" / "cancel-me.json"
+            self.assertTrue(canceled.exists())
+            request = json.loads(canceled.read_text(encoding="utf-8"))
+            self.assertEqual(request["id"], "cancel-me")
+            self.assertEqual(request["canceled_from"], "pending")
+            self.assertEqual(request["cancel_message"], "not needed")
+
+    def test_cancel_all_moves_pending_and_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            self._write_request(root, "pending-one", tmp)
+            (root / "running").mkdir(parents=True)
+            (root / "running" / "running-one.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "id": "running-one",
+                        "created_at": 1.0,
+                        "cwd": tmp,
+                        "target": {"kind": "last"},
+                        "prompt": "wake up",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(cli.cancel_all(root), 2)
+
+            self.assertFalse((root / "pending" / "pending-one.json").exists())
+            self.assertFalse((root / "running" / "running-one.json").exists())
+            self.assertTrue((root / "canceled" / "pending-one.json").exists())
+            self.assertTrue((root / "canceled" / "running-one.json").exists())
+
     def _write_request(self, root: Path, request_id: str, cwd: str) -> None:
         (root / "pending").mkdir(parents=True)
         request = {

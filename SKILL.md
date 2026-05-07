@@ -132,6 +132,19 @@ the marker exists. If the marker is missing, the daemon retries 3 times by defau
 delays; tune this with `codex-long-task-wakeup daemon --retries 3 --retry-delay 30 --retry-backoff 2`
 or the same flags on `install-systemd`.
 
+If the user decides a queued callback is no longer needed before it fires or before its retry window
+finishes, cancel it instead of deleting queue files manually:
+
+```bash
+codex-long-task-wakeup cancel --id <callback-id>
+codex-long-task-wakeup cancel --queue-dir <queue-dir> --id <callback-id>
+codex-long-task-wakeup cancel --queue-dir <queue-dir> --all --message "no longer needed"
+```
+
+`cancel` moves active requests from `pending/` or `running/` to `canceled/`. It does not kill an
+already-started Codex resume process, but it prevents the daemon from retrying or later marking that
+request as done.
+
 If a callback reaches `running/` but `ack` fails with `OSError: [Errno 30] Read-only file system`,
 check the resumed Codex header. If it shows `sandbox: read-only`, `approval: never`, or the queue
 directory is missing from writable roots, treat this as an installation/service issue rather than a

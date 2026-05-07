@@ -72,6 +72,10 @@ def ack_path(root: Path, request_id: str) -> Path:
     return root / "acks" / f"{request_id}.json"
 
 
+def request_path(root: Path, state: str, request_id: str) -> Path:
+    return root / state / f"{request_id}.json"
+
+
 def codex_command() -> str:
     return os.environ.get("CODEX_LONG_TASK_WAKEUP_CODEX_BIN", "codex")
 
@@ -333,7 +337,7 @@ def resume_codex(args: argparse.Namespace, prompt: str) -> int:
 
 
 def ensure_daemon_dirs(root: Path) -> None:
-    for name in ("pending", "running", "done", "failed", "acks"):
+    for name in ("pending", "running", "done", "failed", "canceled", "acks"):
         (root / name).mkdir(parents=True, exist_ok=True)
 
 
@@ -387,16 +391,69 @@ def retry_delay(args: argparse.Namespace, attempt: int) -> float:
 
 
 def write_request(path: Path, request: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.stem}.{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(request, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(tmp, path)
 
 
 def move_request(source: Path, destination_dir: Path) -> None:
+    destination_dir.mkdir(parents=True, exist_ok=True)
     destination = destination_dir / source.name
     if destination.exists():
         destination = destination_dir / f"{source.stem}.{int(time.time())}.json"
     os.replace(source, destination)
+
+
+def cancel_one(root: Path, request_id: str, message: str | None = None) -> bool:
+    ensure_daemon_dirs(root)
+    canceled = request_path(root, "canceled", request_id)
+    for state in ("pending", "running"):
+        source = request_path(root, state, request_id)
+        if not source.exists():
+            continue
+        try:
+            data = json.loads(source.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                data = {}
+        except Exception:
+            data = {}
+        data.update(
+            {
+                "id": request_id,
+                "canceled_at": time.time(),
+                "canceled_from": state,
+            }
+        )
+        if message:
+            data["cancel_message"] = message
+        write_request(canceled, data)
+        try:
+            source.unlink()
+        except FileNotFoundError:
+            pass
+        print(f"codex-long-task-wakeup: canceled callback {request_id} from {state} in {root}", file=sys.stderr)
+        return True
+
+    if canceled.exists():
+        print(f"codex-long-task-wakeup: callback {request_id} is already canceled in {root}", file=sys.stderr)
+        return True
+
+    print(f"codex-long-task-wakeup: warning: active callback {request_id} not found in {root}", file=sys.stderr)
+    return False
+
+
+def cancel_all(root: Path, message: str | None = None) -> int:
+    ensure_daemon_dirs(root)
+    request_ids: set[str] = set()
+    for state in ("pending", "running"):
+        request_ids.update(path.stem for path in (root / state).glob("*.json"))
+    canceled = 0
+    for request_id in sorted(request_ids):
+        if cancel_one(root, request_id, message):
+            canceled += 1
+    print(f"codex-long-task-wakeup: canceled {canceled} active callback(s) in {root}", file=sys.stderr)
+    return canceled
 
 
 def process_one(root: Path, args: argparse.Namespace) -> bool:
@@ -442,6 +499,12 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
             if attempts <= max_retries:
                 delay = retry_delay(args, attempts)
                 request["next_attempt_at"] = time.time() + delay
+                if not running.exists():
+                    print(
+                        f"codex-long-task-wakeup: callback {request_id} disappeared from running; assuming it was canceled",
+                        file=sys.stderr,
+                    )
+                    return True
                 write_request(running, request)
                 move_request(running, root / "pending")
                 print(
@@ -454,6 +517,9 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
         destination_dir = root / "failed"
         print(f"codex-long-task-wakeup: warning: daemon failed to process {running.name}: {exc}", file=sys.stderr)
 
+    if not running.exists():
+        print(f"codex-long-task-wakeup: callback {running.stem} disappeared from running; assuming it was canceled", file=sys.stderr)
+        return True
     move_request(running, destination_dir)
     return True
 
@@ -778,6 +844,14 @@ def ack(args: argparse.Namespace) -> int:
     return 0
 
 
+def cancel(args: argparse.Namespace) -> int:
+    root = queue_dir(args)
+    if args.all:
+        cancel_all(root, args.message)
+        return 0
+    return 0 if cancel_one(root, args.id, args.message) else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Explicit callback tool for waking Codex after a long task.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -840,6 +914,13 @@ def main() -> int:
     ack_parser.add_argument("--id", required=True, help="Callback request id to acknowledge")
     ack_parser.add_argument("--message", help="Optional acknowledgement note")
 
+    cancel_parser = sub.add_parser("cancel", help="Cancel queued callbacks before they retry or complete")
+    cancel_parser.add_argument("--queue-dir", help="Wakeup queue directory")
+    cancel_target = cancel_parser.add_mutually_exclusive_group(required=True)
+    cancel_target.add_argument("--id", help="Callback request id to cancel")
+    cancel_target.add_argument("--all", action="store_true", help="Cancel all pending and running callbacks")
+    cancel_parser.add_argument("--message", help="Optional cancellation note")
+
     args = parser.parse_args()
     if args.mode == "done":
         return done(args)
@@ -857,6 +938,8 @@ def main() -> int:
         return setup(args)
     if args.mode == "ack":
         return ack(args)
+    if args.mode == "cancel":
+        return cancel(args)
     return 2
 
 
