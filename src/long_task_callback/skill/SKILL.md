@@ -49,14 +49,32 @@ scripts/install_from_git.sh https://github.com/lz59970062/long-task-wakeup.git
 
 ## Wiring Patterns
 
-Prefer an explicit `--session <session-id>` when available. Use `--last` only when resuming the most recent Codex session is acceptable.
+Run the callback tool from the Codex-owned process environment and omit the target flag by default.
+The CLI must capture `CODEX_THREAD_ID` when the task is launched, bind the callback to that exact
+session, and include a `Callback routing` block in every callback prompt showing the bound session
+and binding source. This is the normal safe path.
+
+Pass `--session <session-id>` only to override the automatically captured session deliberately.
+Never use `--last` automatically. Use it only when the user explicitly accepts that the callback may
+resume an unrelated recently active thread. If `CODEX_THREAD_ID` is unavailable and no explicit
+`--session` was supplied, the CLI must fail callback setup instead of falling back to `--last`.
+
+Install the Bash pending-status hook once when the user wants terminal-startup reminders:
+
+```bash
+codex-long-task-wakeup install-shell-hook
+```
+
+Keep the hook idempotent, run it only once per interactive shell environment, use a two-second
+timeout, stay silent when the queue is empty, and list only `pending` and `running` callbacks. Keep
+it informational: never resume, acknowledge, cancel, or reroute a callback from `.bashrc`. Inspect
+failed callbacks explicitly with `codex-long-task-wakeup status --state failed`.
 
 Daemon wrapper form, when Codex launches the command:
 
 ```bash
 codex-long-task-wakeup run \
   --via-daemon \
-  --session <session-id> \
   --cwd "$PWD" \
   --task "train model" \
   -- python train.py --config configs/exp.yaml
@@ -70,7 +88,6 @@ python train.py --config configs/exp.yaml
 status=$?
 codex-long-task-wakeup done \
   --via-daemon \
-  --session <session-id> \
   --cwd "$PWD" \
   --task "train model" \
   --command "python train.py --config configs/exp.yaml" \
@@ -127,10 +144,38 @@ codex-long-task-wakeup ack --queue-dir <queue-dir> --id <callback-id>
 ```
 
 After the agent has inspected the long-task result and decided whether to continue, stop, or ask the
-user, it must run that acknowledgement command. The daemon moves the request to `done/` only after
-the marker exists. If the marker is missing, the daemon retries 3 times by default with increasing
-delays; tune this with `codex-long-task-wakeup daemon --retries 3 --retry-delay 30 --retry-backoff 2`
-or the same flags on `install-systemd`.
+user, it must run that acknowledgement command. Acknowledgements are monotonic. An acknowledged
+resume may remain in `running/` until its Codex process exits so its per-session delivery lease stays
+active; the daemon may deliver callbacks for other sessions, but must not overlap another callback
+for the same session. In CLI 0.4.2 or newer this lease is global across queue directories under the
+same `CODEX_HOME`; never configure different `CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR` values for
+daemons that can target the same session. A dedicated delivery worker owns the per-request and global
+target locks and enforces the timeout; Codex and its descendants must not inherit the locks. If the
+marker is missing, the daemon retries 3 times by
+default with increasing delays; tune this with `codex-long-task-wakeup daemon --retries 3
+--retry-delay 30 --retry-backoff 2` or the same flags on `install-systemd`.
+
+`run --via-daemon` must use the durable lifecycle built into CLI 0.4.1 or newer. It persists one
+stable callback id in `active/` before starting the wrapped command. If the wrapper disappears, the
+daemon recovers that id with `outcome: unknown`; the child may still be running. On every unknown
+outcome, inspect the process table, logs, checkpoints, output manifests, and other artifacts before
+deciding whether to rerun. Never infer task failure from wrapper loss alone. If the record already
+contains a completed exit code, trust the preserved completed outcome.
+
+Treat delivery as at-least-once, not exactly-once. Stable ids, acknowledgements, and delivery locks
+reduce duplicates, but a host failure before the acknowledgement is durable can still retry a
+received prompt. Make continuation actions idempotent and check whether the next task is already
+running or complete before launching it. Reboot recovery requires a persistent queue and a daemon
+service that starts after reboot.
+
+Before restarting a managed systemd service or container, drain `running/` callbacks when possible.
+Service managers generally terminate delivery workers with the daemon, so an interrupted delivery
+without a durable acknowledgement is eligible for at-least-once replay after restart.
+
+If pre-arming emits `UNARMED WARNING`, report the degraded guarantee. Default mode preserves the
+wrapped command and falls back to post-exit best effort; use `--strict` only when the task must not
+start without durable callback protection. `status --state active` is diagnostic; keep the shell
+startup hook limited to `pending` and `running`.
 
 If the user decides a queued callback is no longer needed before it fires or before its retry window
 finishes, cancel it instead of deleting queue files manually:
@@ -141,9 +186,9 @@ codex-long-task-wakeup cancel --queue-dir <queue-dir> --id <callback-id>
 codex-long-task-wakeup cancel --queue-dir <queue-dir> --all --message "no longer needed"
 ```
 
-`cancel` moves active requests from `pending/` or `running/` to `canceled/`. It does not kill an
-already-started Codex resume process, but it prevents the daemon from retrying or later marking that
-request as done.
+`cancel` publishes a tombstone for active requests in `active/`, `pending/`, or `running/`. It does
+not kill an already-started wrapped task or Codex resume process, but it suppresses callback
+finalization and later retries.
 
 If a callback reaches `running/` but `ack` fails with `OSError: [Errno 30] Read-only file system`,
 check the resumed Codex header. If it shows `sandbox: read-only`, `approval: never`, or the queue

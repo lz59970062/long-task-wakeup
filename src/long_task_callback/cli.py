@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.resources as resources
 import json
 import os
+import signal
 import shlex
 import shutil
 import subprocess
 import sys
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - the durable run lifecycle is POSIX-only
+    fcntl = None
 
 from . import __version__
 
@@ -20,7 +28,29 @@ DEFAULT_SANDBOX_MODE = "workspace-write"
 DEFAULT_RETRIES = 3
 DEFAULT_RETRY_DELAY = 30.0
 DEFAULT_RETRY_BACKOFF = 2.0
+DEFAULT_RESUME_TIMEOUT = 3600.0
 DEFAULT_SUPERVISOR_CONF_DIR = "/etc/supervisor/conf.d"
+CODEX_THREAD_ID_ENV = "CODEX_THREAD_ID"
+SHELL_HOOK_BEGIN = "# >>> codex-long-task-wakeup pending status >>>"
+SHELL_HOOK_END = "# <<< codex-long-task-wakeup pending status <<<"
+ACTIVE_STATE = "active"
+LOCKS_STATE = "locks"
+TARGET_LOCK_DIR_ENV = "CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR"
+
+
+@dataclass
+class BackgroundResume:
+    process: subprocess.Popen[str]
+    target_key: str
+    deadline: float
+    request_id: str
+
+
+_BACKGROUND_RESUMES: dict[int, BackgroundResume] = {}
+
+
+class TargetLeaseUnavailable(RuntimeError):
+    """Another queue is already delivering a callback to the same target."""
 
 
 def build_prompt(
@@ -160,6 +190,8 @@ def daemon_command(args: argparse.Namespace) -> list[str]:
         str(args.retry_delay),
         "--retry-backoff",
         str(args.retry_backoff),
+        "--resume-timeout",
+        str(getattr(args, "resume_timeout", DEFAULT_RESUME_TIMEOUT)),
     ]
     if args.queue_dir:
         command.extend(["--queue-dir", str(Path(args.queue_dir).expanduser())])
@@ -214,19 +246,78 @@ def supervisor_config_text(args: argparse.Namespace) -> str:
     )
 
 
-def make_request(args: argparse.Namespace, prompt: str) -> dict[str, object]:
+def resolve_target(args: argparse.Namespace) -> tuple[dict[str, str], str]:
     if args.session:
-        target = {"kind": "session", "value": args.session}
-    elif args.last:
-        target = {"kind": "last"}
+        return {"kind": "session", "value": args.session}, "--session"
+    if args.last:
+        return {"kind": "last"}, "--last"
+
+    session = os.environ.get(CODEX_THREAD_ID_ENV, "").strip()
+    if session:
+        return {"kind": "session", "value": session}, CODEX_THREAD_ID_ENV
+
+    raise SystemExit(
+        f"Cannot determine the callback session: {CODEX_THREAD_ID_ENV} is unset. "
+        "Run from Codex or pass --session <id>; use --last only as an explicit unsafe fallback."
+    )
+
+
+def bind_target(args: argparse.Namespace) -> tuple[dict[str, str], str]:
+    cached_target = getattr(args, "_callback_target", None)
+    cached_source = getattr(args, "_callback_target_source", None)
+    if isinstance(cached_target, dict) and isinstance(cached_source, str):
+        return cached_target, cached_source
+
+    target, source = resolve_target(args)
+    args._callback_target = target
+    args._callback_target_source = source
+    if target["kind"] == "session":
+        print(
+            f"codex-long-task-wakeup: callback bound to session {target['value']} via {source}",
+            file=sys.stderr,
+        )
     else:
-        raise SystemExit("Pass --session <id> for the target Codex session, or --last as an explicit fallback.")
+        print(
+            "codex-long-task-wakeup: warning: --last is not session-safe and may wake an unrelated active thread",
+            file=sys.stderr,
+        )
+    return target, source
+
+
+def routing_text(request: dict[str, object]) -> str:
+    target = request["target"]
+    source = request["target_source"]
+    if isinstance(target, dict) and target.get("kind") == "session":
+        return "\n".join(
+            [
+                "Callback routing:",
+                f"- Bound session: {target['value']}",
+                f"- Binding source: {source}",
+                "- Resume only this session; never redirect this callback to --last or another active thread.",
+            ]
+        )
+    return "\n".join(
+        [
+            "Callback routing warning:",
+            "- Target: most recently active Codex session (--last)",
+            "- This unsafe fallback was explicitly requested and may reach an unrelated thread.",
+        ]
+    )
+
+
+def attach_routing_text(prompt: str, request: dict[str, object]) -> str:
+    return f"{prompt}\n\n{routing_text(request)}"
+
+
+def make_request(args: argparse.Namespace, prompt: str) -> dict[str, object]:
+    target, target_source = bind_target(args)
     return {
         "version": 1,
         "id": uuid.uuid4().hex,
         "created_at": time.time(),
         "cwd": args.cwd,
         "target": target,
+        "target_source": target_source,
         "prompt": prompt,
         "approvals_reviewer": getattr(args, "approvals_reviewer", None) or DEFAULT_APPROVALS_REVIEWER,
         "approval_policy": getattr(args, "approval_policy", None) or DEFAULT_APPROVAL_POLICY,
@@ -234,14 +325,10 @@ def make_request(args: argparse.Namespace, prompt: str) -> dict[str, object]:
     }
 
 
-def enqueue_request(args: argparse.Namespace, prompt: str) -> int:
-    root = queue_dir(args)
-    pending = root / "pending"
-    pending.mkdir(parents=True, exist_ok=True)
-
-    request = make_request(args, prompt)
+def prepare_request_for_queue(root: Path, request: dict[str, object], prompt: str) -> dict[str, object]:
     request_id = str(request["id"])
     request["queue_dir"] = str(root)
+    request["lifecycle_state"] = "pending"
     acknowledgement = " ".join(
         shlex.quote(part)
         for part in [
@@ -253,22 +340,30 @@ def enqueue_request(args: argparse.Namespace, prompt: str) -> int:
             request_id,
         ]
     )
-    request["prompt"] = f"{prompt}\n\n{build_acknowledgement_text(acknowledgement)}"
-    tmp = pending / f".{request_id}.json.tmp"
-    target = pending / f"{request_id}.json"
+    routed_prompt = attach_routing_text(prompt, request)
+    request["prompt"] = f"{routed_prompt}\n\n{build_acknowledgement_text(acknowledgement)}"
+    return request
+
+
+def enqueue_existing_request(root: Path, request: dict[str, object], prompt: str) -> int:
+    ensure_daemon_dirs(root)
+    request = prepare_request_for_queue(root, request, prompt)
+    request_id = str(request["id"])
+    target = request_path(root, "pending", request_id)
     try:
-        tmp.write_text(json.dumps(request, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(tmp, target)
+        write_request(target, request)
     except OSError as exc:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
         print(f"codex-long-task-wakeup: warning: failed to enqueue callback: {exc}", file=sys.stderr)
         return 1
 
     print(f"codex-long-task-wakeup: queued callback {request_id} in {root}", file=sys.stderr)
     return 0
+
+
+def enqueue_request(args: argparse.Namespace, prompt: str) -> int:
+    root = queue_dir(args)
+    request = make_request(args, prompt)
+    return enqueue_existing_request(root, request, prompt)
 
 
 def should_enqueue(args: argparse.Namespace) -> bool:
@@ -307,19 +402,20 @@ def resume_command(request: dict[str, object]) -> list[str]:
 
 
 def resume_codex(args: argparse.Namespace, prompt: str) -> int:
-    if args.dry_run:
-        print(prompt)
-        return 0
     if should_enqueue(args):
         return enqueue_request(args, prompt)
 
     request = make_request(args, prompt)
+    routed_prompt = attach_routing_text(prompt, request)
+    if args.dry_run:
+        print(routed_prompt)
+        return 0
     cmd = resume_command(request)
 
     try:
         result = subprocess.run(
             cmd,
-            input=prompt,
+            input=routed_prompt,
             text=True,
             cwd=args.cwd,
             check=False,
@@ -337,8 +433,19 @@ def resume_codex(args: argparse.Namespace, prompt: str) -> int:
 
 
 def ensure_daemon_dirs(root: Path) -> None:
-    for name in ("pending", "running", "done", "failed", "canceled", "acks"):
-        (root / name).mkdir(parents=True, exist_ok=True)
+    root_existed = root.exists()
+    root.mkdir(parents=True, exist_ok=True)
+    if not root_existed:
+        fsync_directory(root.parent)
+    created = False
+    for name in (ACTIVE_STATE, LOCKS_STATE, "pending", "running", "done", "failed", "canceled", "acks"):
+        path = root / name
+        if path.exists():
+            continue
+        path.mkdir(parents=True, exist_ok=True)
+        created = True
+    if created:
+        fsync_directory(root)
 
 
 def load_request(path: Path) -> dict[str, object]:
@@ -347,6 +454,8 @@ def load_request(path: Path) -> dict[str, object]:
         raise ValueError("request must be a JSON object")
     if data.get("version") != 1:
         raise ValueError("unsupported request version")
+    if not isinstance(data.get("id"), str) or data["id"] != path.stem:
+        raise ValueError("request id must match its filename")
     if not isinstance(data.get("cwd"), str):
         raise ValueError("request cwd must be a string")
     if not isinstance(data.get("prompt"), str):
@@ -377,10 +486,125 @@ def next_attempt_at(path: Path) -> float:
     return float(value) if isinstance(value, (int, float)) else 0.0
 
 
+def callback_target_key(request: dict[str, object]) -> str | None:
+    target = request.get("target")
+    if not isinstance(target, dict):
+        return None
+    kind = target.get("kind")
+    value = target.get("value")
+    if kind == "session" and isinstance(value, str) and value:
+        return f"session:{value}"
+    if kind == "last":
+        return "last"
+    return None
+
+
+def target_lock_dir() -> Path:
+    override = os.environ.get(TARGET_LOCK_DIR_ENV)
+    if override:
+        return Path(override).expanduser()
+    return codex_home() / "long-task-wakeup" / "target-locks"
+
+
+def target_lock_path(request: dict[str, object]) -> Path | None:
+    key = callback_target_key(request)
+    if key is None:
+        return None
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return target_lock_dir() / f"{digest}.lock"
+
+
+def acquire_path_lock(path: Path, *, blocking: bool) -> tuple[object, Path] | None:
+    if fcntl is None:  # pragma: no cover - supported deployments are POSIX
+        raise RuntimeError("durable callback ownership requires POSIX flock support")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+", encoding="utf-8")
+    os.set_inheritable(handle.fileno(), False)
+    operation = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+    try:
+        fcntl.flock(handle.fileno(), operation)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle, path
+
+
+def acquire_target_lock(
+    request: dict[str, object],
+    *,
+    blocking: bool,
+) -> tuple[object, Path] | None:
+    path = target_lock_path(request)
+    if path is None:
+        return None
+    return acquire_path_lock(path, blocking=blocking)
+
+
+def target_lock_is_held(request: dict[str, object]) -> bool:
+    path = target_lock_path(request)
+    if path is None:
+        return False
+    if not path.exists():
+        return False
+    lock = acquire_path_lock(path, blocking=False)
+    if lock is None:
+        return True
+    release_owner_lock(lock, remove=False)
+    return False
+
+
+def reap_background_resumes() -> None:
+    now = time.monotonic()
+    for pid, delivery in list(_BACKGROUND_RESUMES.items()):
+        if delivery.process.poll() is not None:
+            finish_delivery_worker(delivery.process)
+            _BACKGROUND_RESUMES.pop(pid, None)
+            continue
+        if now >= delivery.deadline:
+            print(
+                f"codex-long-task-wakeup: warning: acknowledged resume {delivery.request_id} "
+                "exceeded its timeout; terminating the resume process",
+                file=sys.stderr,
+            )
+            stop_resume_process(delivery.process)
+            _BACKGROUND_RESUMES.pop(pid, None)
+
+
+def target_has_live_resume(root: Path, request: dict[str, object]) -> bool:
+    reap_background_resumes()
+    key = callback_target_key(request)
+    if key is None:
+        return False
+    if target_lock_is_held(request):
+        return True
+    if any(delivery.target_key == key for delivery in _BACKGROUND_RESUMES.values()):
+        return True
+    for state in ("running", "canceled"):
+        for path in (root / state).glob("*.json"):
+            try:
+                live_request = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if (
+                isinstance(live_request, dict)
+                and callback_target_key(live_request) == key
+                and delivery_lock_is_held(root, path.stem)
+            ):
+                return True
+    return False
+
+
 def select_pending(root: Path, now: float) -> Path | None:
     for path in sorted((root / "pending").glob("*.json")):
-        if next_attempt_at(path) <= now:
+        if next_attempt_at(path) > now:
+            continue
+        try:
+            request = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
             return path
+        if isinstance(request, dict) and target_has_live_resume(root, request):
+            continue
+        return path
     return None
 
 
@@ -390,25 +614,569 @@ def retry_delay(args: argparse.Namespace, attempt: int) -> float:
     return delay * (backoff ** max(0, attempt - 1))
 
 
+def terminate_process_group(process: subprocess.Popen[str], grace: float = 5.0) -> None:
+    if process.poll() is not None:
+        process.wait()
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        process.wait()
+        return
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+
+def delivery_worker_main() -> int:
+    """Own one Codex resume and its locks without leaking them into Codex."""
+    encoded_fds = os.environ.get("CODEX_LONG_TASK_DELIVERY_LOCK_FDS")
+    if encoded_fds:
+        lock_fds = [int(value) for value in json.loads(encoded_fds)]
+    else:  # Backward compatibility with delivery workers launched by 0.4.1.
+        lock_fds = [int(os.environ["CODEX_LONG_TASK_DELIVERY_LOCK_FD"])]
+    payload = json.load(sys.stdin)
+    command = payload["command"]
+    prompt = str(payload["prompt"])
+    timeout = max(1.0, float(payload["timeout"]))
+    result: dict[str, object] = {"returncode": 127}
+    process: subprocess.Popen[str] | None = None
+
+    class WorkerInterrupted(Exception):
+        def __init__(self, signum: int) -> None:
+            self.signum = signum
+
+    def interrupt(signum: int, _frame: object) -> None:
+        raise WorkerInterrupted(signum)
+
+    signal.signal(signal.SIGTERM, interrupt)
+    signal.signal(signal.SIGINT, interrupt)
+    try:
+        if Path(str(payload["ack_path"])).exists():
+            result = {"returncode": 0, "skipped": "already_acknowledged"}
+        elif Path(str(payload["canceled_path"])).exists():
+            result = {"returncode": 0, "skipped": "canceled"}
+        else:
+            process = subprocess.Popen(
+                [str(part) for part in command],
+                stdin=subprocess.PIPE,
+                stdout=sys.stderr,
+                stderr=sys.stderr,
+                text=True,
+                cwd=str(payload["cwd"]),
+                close_fds=True,
+                start_new_session=True,
+            )
+            try:
+                process.communicate(input=prompt, timeout=timeout)
+                result = {"returncode": int(process.returncode)}
+            except subprocess.TimeoutExpired:
+                terminate_process_group(process)
+                result = {"returncode": 124, "timed_out": True}
+    except WorkerInterrupted as exc:
+        if process is not None:
+            terminate_process_group(process)
+        result = {"returncode": 128 + exc.signum, "interrupted": exc.signum}
+    except BaseException as exc:
+        if process is not None:
+            terminate_process_group(process)
+        result = {"returncode": 127, "error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        for lock_fd in lock_fds:
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+
+    try:
+        sys.stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+    except BrokenPipeError:
+        pass
+    return 0
+
+
+def delivery_worker_command() -> list[str]:
+    code = "from long_task_callback.cli import delivery_worker_main; raise SystemExit(delivery_worker_main())"
+    return [sys.executable, "-c", code]
+
+
+def finish_delivery_worker(process: subprocess.Popen[str]) -> int:
+    process.wait()
+    output = ""
+    if process.stdout is not None:
+        output = process.stdout.read()
+        process.stdout.close()
+    for line in reversed(output.splitlines()):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        returncode = payload.get("returncode") if isinstance(payload, dict) else None
+        if isinstance(returncode, int):
+            return returncode
+    return process.returncode if process.returncode != 0 else 127
+
+
+def stop_resume_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is None:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=7.0)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        process.wait()
+    finish_delivery_worker(process)
+
+
+def run_resume_until_exit_or_ack(
+    root: Path,
+    request_id: str,
+    request: dict[str, object],
+    args: argparse.Namespace,
+) -> tuple[subprocess.CompletedProcess[str] | None, bool, bool]:
+    command = resume_command(request)
+    delivery_lock = acquire_owner_lock(root, delivery_lock_id(request_id), blocking=False)
+    if delivery_lock is None:
+        return None, ack_path(root, request_id).exists(), True
+    if ack_path(root, request_id).exists():
+        release_owner_lock(delivery_lock, remove=False)
+        return subprocess.CompletedProcess(command, 0), True, False
+    if is_canceled(root, request_id):
+        release_owner_lock(delivery_lock, remove=False)
+        return None, False, False
+    target_lock = acquire_target_lock(request, blocking=False)
+    if target_lock is None:
+        release_owner_lock(delivery_lock, remove=False)
+        raise TargetLeaseUnavailable(callback_target_key(request) or "unknown target")
+    if ack_path(root, request_id).exists():
+        release_owner_lock(delivery_lock, remove=False)
+        release_owner_lock(target_lock, remove=False)
+        return subprocess.CompletedProcess(command, 0), True, False
+    if is_canceled(root, request_id):
+        release_owner_lock(delivery_lock, remove=False)
+        release_owner_lock(target_lock, remove=False)
+        return None, False, False
+    delivery_handle, _ = delivery_lock
+    target_handle, _ = target_lock
+    timeout = max(1.0, float(getattr(args, "resume_timeout", DEFAULT_RESUME_TIMEOUT)))
+    deadline = time.monotonic() + timeout
+    payload = {
+        "command": command,
+        "prompt": str(request["prompt"]),
+        "cwd": str(request["cwd"]),
+        "timeout": timeout,
+        "ack_path": str(ack_path(root, request_id)),
+        "canceled_path": str(request_path(root, "canceled", request_id)),
+    }
+    env = os.environ.copy()
+    lock_fds = (delivery_handle.fileno(), target_handle.fileno())
+    env["CODEX_LONG_TASK_DELIVERY_LOCK_FDS"] = json.dumps(lock_fds)
+    env["CODEX_LONG_TASK_DELIVERY_LOCK_FD"] = str(delivery_handle.fileno())
+    try:
+        process = subprocess.Popen(
+            delivery_worker_command(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            close_fds=True,
+            pass_fds=lock_fds,
+            env=env,
+        )
+    except BaseException:
+        release_owner_lock(delivery_lock, remove=False)
+        release_owner_lock(target_lock, remove=False)
+        raise
+    close_parent_lock_copy(delivery_lock)
+    close_parent_lock_copy(target_lock)
+    try:
+        if process.stdin is not None:
+            try:
+                process.stdin.write(json.dumps(payload, ensure_ascii=False))
+                process.stdin.flush()
+            except BrokenPipeError:
+                pass
+            finally:
+                process.stdin.close()
+
+        while True:
+            acked = ack_path(root, request_id).exists()
+            canceled = is_canceled(root, request_id)
+            returncode = process.poll()
+            if acked or canceled:
+                if returncode is None:
+                    key = callback_target_key(request)
+                    if key is not None:
+                        _BACKGROUND_RESUMES[process.pid] = BackgroundResume(
+                            process=process,
+                            target_key=key,
+                            deadline=deadline,
+                            request_id=request_id,
+                        )
+                else:
+                    child_returncode = finish_delivery_worker(process)
+                    return subprocess.CompletedProcess(command, child_returncode), acked, False
+                result = subprocess.CompletedProcess(command, returncode if returncode is not None else 0) if acked else None
+                return result, acked, returncode is None
+            if returncode is not None:
+                child_returncode = finish_delivery_worker(process)
+                return subprocess.CompletedProcess(command, child_returncode), ack_path(root, request_id).exists(), False
+            if time.monotonic() >= deadline:
+                stop_resume_process(process)
+                return subprocess.CompletedProcess(command, 124), ack_path(root, request_id).exists(), False
+            time.sleep(0.1)
+    except BaseException:
+        stop_resume_process(process)
+        raise
+
+
+def fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def write_request(path: Path, request: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.stem}.{uuid.uuid4().hex}.tmp")
-    tmp.write_text(json.dumps(request, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        with tmp.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(request, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        fsync_directory(path.parent)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
-def move_request(source: Path, destination_dir: Path) -> None:
+def move_request(source: Path, destination_dir: Path) -> Path:
     destination_dir.mkdir(parents=True, exist_ok=True)
     destination = destination_dir / source.name
+    if source == destination:
+        return destination
     if destination.exists():
-        destination = destination_dir / f"{source.stem}.{int(time.time())}.json"
+        try:
+            source_data = json.loads(source.read_text(encoding="utf-8"))
+            destination_data = json.loads(destination.read_text(encoding="utf-8"))
+            source_id = source_data.get("id") if isinstance(source_data, dict) else None
+            destination_id = destination_data.get("id") if isinstance(destination_data, dict) else None
+        except Exception as exc:
+            raise FileExistsError(f"cannot validate callback collision at {destination}") from exc
+        if (
+            not isinstance(source_id, str)
+            or not isinstance(source_data, dict)
+            or not isinstance(destination_data, dict)
+            or source_data.get("version") != 1
+            or destination_data.get("version") != 1
+            or source_id != destination_id
+            or source_id != source.stem
+            or source_data != destination_data
+        ):
+            raise FileExistsError(f"refusing to collapse divergent callback records at {destination}")
+        try:
+            source.unlink()
+        except FileNotFoundError:
+            pass
+        else:
+            fsync_directory(source.parent)
+        return destination
     os.replace(source, destination)
+    if destination_dir != source.parent:
+        fsync_directory(destination_dir)
+    fsync_directory(source.parent)
+    return destination
+
+
+def owner_lock_path(root: Path, request_id: str) -> Path:
+    return root / LOCKS_STATE / f"{request_id}.lock"
+
+
+def acquire_owner_lock(root: Path, request_id: str, *, blocking: bool) -> tuple[object, Path] | None:
+    if fcntl is None:  # pragma: no cover - supported deployments are POSIX
+        raise RuntimeError("durable callback ownership requires POSIX flock support")
+    ensure_daemon_dirs(root)
+    path = owner_lock_path(root, request_id)
+    handle = path.open("a+", encoding="utf-8")
+    os.set_inheritable(handle.fileno(), False)
+    operation = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+    try:
+        fcntl.flock(handle.fileno(), operation)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle, path
+
+
+def release_owner_lock(lock: tuple[object, Path] | None, *, remove: bool) -> None:
+    if lock is None:
+        return
+    handle, path = lock
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+    if remove:
+        try:
+            path.unlink()
+            fsync_directory(path.parent)
+        except FileNotFoundError:
+            pass
+
+
+def delivery_lock_id(request_id: str) -> str:
+    return f"delivery-{request_id}"
+
+
+def delivery_lock_is_held(root: Path, request_id: str) -> bool:
+    lock = acquire_owner_lock(root, delivery_lock_id(request_id), blocking=False)
+    if lock is None:
+        return True
+    release_owner_lock(lock, remove=False)
+    return False
+
+
+def close_parent_lock_copy(lock: tuple[object, Path]) -> None:
+    """Close without LOCK_UN after pass_fds transfers the lock to a child."""
+    handle, _ = lock
+    handle.close()
+
+
+def current_boot_id() -> str | None:
+    try:
+        value = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def active_prompt(args: argparse.Namespace) -> str:
+    command = args.command or " ".join(args.wrapped_command)
+    return "\n".join(
+        [
+            "[long-task-callback-active]",
+            f"Task: {args.task}",
+            f"Working directory: {args.cwd}",
+            f"Command: {command}",
+            "State: armed before task launch; this record is not dispatchable.",
+        ]
+    )
+
+
+def make_active_request(args: argparse.Namespace, started_at: float) -> dict[str, object]:
+    request = make_request(args, active_prompt(args))
+    request.update(
+        {
+            "queue_dir": str(queue_dir(args)),
+            "lifecycle_state": ACTIVE_STATE,
+            "task": args.task,
+            "command": args.command or " ".join(args.wrapped_command),
+            "started_at": started_at,
+            "wrapper_pid": os.getpid(),
+            "boot_id": current_boot_id(),
+            "launch_phase": "prelaunch",
+        }
+    )
+    return request
+
+
+def request_already_transitioned(root: Path, request_id: str) -> bool:
+    return any(request_path(root, state, request_id).exists() for state in ("pending", "running", "done", "failed", "canceled"))
+
+
+def is_canceled(root: Path, request_id: str) -> bool:
+    return request_path(root, "canceled", request_id).exists()
+
+
+def remove_live_request_copies(root: Path, request_id: str) -> None:
+    """Remove dispatchable copies after a durable cancellation tombstone exists."""
+    for _ in range(2):
+        removed = False
+        for state in (ACTIVE_STATE, "pending", "running"):
+            path = request_path(root, state, request_id)
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            fsync_directory(path.parent)
+            removed = True
+        if not removed:
+            break
+
+
+def discard_unlaunched_active(root: Path, request_id: str) -> None:
+    path = request_path(root, ACTIVE_STATE, request_id)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        print(f"codex-long-task-wakeup: warning: could not remove unlaunched callback {request_id}: {exc}", file=sys.stderr)
+        return
+    try:
+        fsync_directory(path.parent)
+    except OSError as exc:
+        print(
+            f"codex-long-task-wakeup: warning: removed unlaunched active callback {request_id} "
+            f"but could not sync its directory: {exc}",
+            file=sys.stderr,
+        )
+
+
+def best_effort_disarm(
+    root: Path,
+    request_id: str,
+    lock: tuple[object, Path] | None,
+) -> None:
+    try:
+        discard_unlaunched_active(root, request_id)
+    except Exception as exc:
+        print(f"codex-long-task-wakeup: warning: pre-arm record cleanup failed: {exc}", file=sys.stderr)
+    try:
+        release_owner_lock(lock, remove=True)
+    except Exception as exc:
+        print(f"codex-long-task-wakeup: warning: pre-arm lock cleanup failed: {exc}", file=sys.stderr)
+
+
+def transition_active_to_pending(root: Path, request: dict[str, object], prompt: str) -> int:
+    request_id = str(request["id"])
+    source = request_path(root, ACTIVE_STATE, request_id)
+    if is_canceled(root, request_id):
+        remove_live_request_copies(root, request_id)
+        print(f"codex-long-task-wakeup: callback {request_id} was canceled; suppressing finalization", file=sys.stderr)
+        return 0
+    if not source.exists():
+        if request_already_transitioned(root, request_id):
+            return 0
+        print(
+            f"codex-long-task-wakeup: warning: active callback {request_id} disappeared before finalization",
+            file=sys.stderr,
+        )
+        return 1
+    prepare_request_for_queue(root, request, prompt)
+    if is_canceled(root, request_id):
+        remove_live_request_copies(root, request_id)
+        return 0
+    write_request(source, request)
+    if is_canceled(root, request_id):
+        remove_live_request_copies(root, request_id)
+        return 0
+    try:
+        move_request(source, root / "pending")
+    except FileNotFoundError:
+        if is_canceled(root, request_id) or request_already_transitioned(root, request_id):
+            if is_canceled(root, request_id):
+                remove_live_request_copies(root, request_id)
+            return 0
+        raise
+    if is_canceled(root, request_id):
+        remove_live_request_copies(root, request_id)
+        return 0
+    print(f"codex-long-task-wakeup: queued callback {request_id} in {root}", file=sys.stderr)
+    return 0
+
+
+def recovery_prompt(request: dict[str, object], now: float) -> str:
+    started_at = request.get("started_at")
+    duration = now - float(started_at) if isinstance(started_at, (int, float)) else None
+    recovered_args = argparse.Namespace(
+        task=str(request.get("task") or request_task(request)),
+        cwd=str(request["cwd"]),
+        command=str(request.get("command") or ""),
+        exit_code=None,
+        message=(
+            "The long-task wrapper disappeared before recording task completion. "
+            "The task outcome and exit status are unknown, and the wrapped child may still be running. "
+            "Inspect process state and artifacts before retrying or launching the next stage."
+        ),
+    )
+    return build_prompt(recovered_args, duration)
+
+
+def recover_active(root: Path) -> int:
+    ensure_daemon_dirs(root)
+    recovered = 0
+    for path in sorted((root / ACTIVE_STATE).glob("*.json")):
+        request_id = path.stem
+        lock = acquire_owner_lock(root, request_id, blocking=False)
+        if lock is None:
+            continue
+        remove_lock = False
+        try:
+            if not path.exists():
+                continue
+            if is_canceled(root, request_id):
+                remove_live_request_copies(root, request_id)
+                remove_lock = True
+                continue
+            request = load_request(path)
+            if request.get("launch_phase") == "prelaunch":
+                discard_unlaunched_active(root, request_id)
+                remove_lock = True
+                print(
+                    f"codex-long-task-wakeup: discarded callback {request_id}; wrapped task was not launch-committed",
+                    file=sys.stderr,
+                )
+                continue
+            if request.get("outcome") == "completed" and isinstance(request.get("exit_code"), int):
+                move_request(path, root / "pending")
+                recovered += 1
+                remove_lock = True
+                print(
+                    f"codex-long-task-wakeup: recovered completed callback {request_id} with its recorded exit code",
+                    file=sys.stderr,
+                )
+                continue
+            request["lifecycle_state"] = "recovered_unknown"
+            request["recovered_at"] = time.time()
+            request["recovery_reason"] = "wrapper_owner_lock_released_before_completion"
+            request["outcome"] = "unknown"
+            prompt = recovery_prompt(request, float(request["recovered_at"]))
+            if transition_active_to_pending(root, request, prompt) == 0:
+                recovered += 1
+                remove_lock = True
+                print(
+                    f"codex-long-task-wakeup: recovered orphaned active callback {request_id} with unknown outcome",
+                    file=sys.stderr,
+                )
+        except Exception as exc:
+            print(
+                f"codex-long-task-wakeup: warning: failed to recover active callback {request_id}: {exc}",
+                file=sys.stderr,
+            )
+        finally:
+            release_owner_lock(lock, remove=remove_lock)
+    return recovered
 
 
 def cancel_one(root: Path, request_id: str, message: str | None = None) -> bool:
     ensure_daemon_dirs(root)
     canceled = request_path(root, "canceled", request_id)
-    for state in ("pending", "running"):
+    if canceled.exists():
+        remove_live_request_copies(root, request_id)
+        print(f"codex-long-task-wakeup: callback {request_id} is already canceled in {root}", file=sys.stderr)
+        return True
+
+    for state in (ACTIVE_STATE, "pending", "running"):
         source = request_path(root, state, request_id)
         if not source.exists():
             continue
@@ -427,16 +1195,11 @@ def cancel_one(root: Path, request_id: str, message: str | None = None) -> bool:
         )
         if message:
             data["cancel_message"] = message
+        # Publish the tombstone first. The wrapper finalizer and daemon both
+        # honor it, so cancellation wins even if a state transition races us.
         write_request(canceled, data)
-        try:
-            source.unlink()
-        except FileNotFoundError:
-            pass
+        remove_live_request_copies(root, request_id)
         print(f"codex-long-task-wakeup: canceled callback {request_id} from {state} in {root}", file=sys.stderr)
-        return True
-
-    if canceled.exists():
-        print(f"codex-long-task-wakeup: callback {request_id} is already canceled in {root}", file=sys.stderr)
         return True
 
     print(f"codex-long-task-wakeup: warning: active callback {request_id} not found in {root}", file=sys.stderr)
@@ -446,7 +1209,7 @@ def cancel_one(root: Path, request_id: str, message: str | None = None) -> bool:
 def cancel_all(root: Path, message: str | None = None) -> int:
     ensure_daemon_dirs(root)
     request_ids: set[str] = set()
-    for state in ("pending", "running"):
+    for state in (ACTIVE_STATE, "pending", "running"):
         request_ids.update(path.stem for path in (root / state).glob("*.json"))
     canceled = 0
     for request_id in sorted(request_ids):
@@ -462,31 +1225,53 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
     if path is None:
         return False
 
-    running = root / "running" / path.name
+    request_id = path.stem
+    if is_canceled(root, request_id):
+        remove_live_request_copies(root, request_id)
+        return True
     try:
-        os.replace(path, running)
+        running = move_request(path, root / "running")
     except FileNotFoundError:
+        return True
+    except Exception as exc:
+        print(f"codex-long-task-wakeup: warning: could not claim {path.name}: {exc}", file=sys.stderr)
+        return True
+    if is_canceled(root, request_id):
+        remove_live_request_copies(root, request_id)
         return True
 
     try:
         request = load_request(running)
         request_id = str(request.get("id", running.stem))
+        if ack_path(root, request_id).exists():
+            move_request(running, root / "done")
+            return True
         attempts = int(request.get("attempts", 0)) + 1
         request["attempts"] = attempts
         request.pop("next_attempt_at", None)
         write_request(running, request)
         try:
-            ack_path(root, request_id).unlink()
-        except FileNotFoundError:
-            pass
-        result = subprocess.run(
-            resume_command(request),
-            input=str(request["prompt"]),
-            text=True,
-            cwd=str(request["cwd"]),
-            check=False,
-        )
-        acked = ack_path(root, request_id).exists()
+            result, acked, resume_still_running = run_resume_until_exit_or_ack(root, request_id, request, args)
+        except TargetLeaseUnavailable as exc:
+            # A daemon for another queue won the cross-queue race after this
+            # request was selected. Put it back without consuming a retry.
+            request["attempts"] = max(0, attempts - 1)
+            request["last_deferred_reason"] = f"target lease held: {exc}"
+            if not running.exists() or is_canceled(root, request_id):
+                return True
+            write_request(running, request)
+            move_request(running, root / "pending")
+            return True
+        if resume_still_running:
+            return True
+        if result is None:
+            return True
+        if result.returncode == 124 and not acked:
+            request["last_error"] = "Codex resume timed out"
+            print(
+                f"codex-long-task-wakeup: warning: daemon callback {running.name} timed out",
+                file=sys.stderr,
+            )
         destination_dir = root / ("done" if acked else "failed")
         if result.returncode != 0:
             print(
@@ -494,7 +1279,7 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
                 file=sys.stderr,
             )
         if not acked:
-            request["last_error"] = f"missing acknowledgement marker after exit {result.returncode}"
+            request.setdefault("last_error", f"missing acknowledgement marker after exit {result.returncode}")
             max_retries = max(0, int(getattr(args, "retries", DEFAULT_RETRIES)))
             if attempts <= max_retries:
                 delay = retry_delay(args, attempts)
@@ -520,26 +1305,85 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
     if not running.exists():
         print(f"codex-long-task-wakeup: callback {running.stem} disappeared from running; assuming it was canceled", file=sys.stderr)
         return True
-    move_request(running, destination_dir)
+    try:
+        finalized = move_request(running, destination_dir)
+        # Close the final-attempt race with ack(): the marker may become
+        # durable after ack() looked for failed/<id>, but just before this
+        # process moved running/<id> there.  Once failed/ is visible, either
+        # this reconciliation or ack() itself will converge it to done/.
+        if destination_dir == root / "failed" and ack_path(root, request_id).exists():
+            try:
+                move_request(finalized, root / "done")
+            except FileNotFoundError:
+                pass
+    except FileNotFoundError:
+        return True
+    except Exception as exc:
+        print(f"codex-long-task-wakeup: warning: could not finalize {running.name}: {exc}", file=sys.stderr)
     return True
+
+
+def recover_running(root: Path) -> None:
+    ensure_daemon_dirs(root)
+    for path in sorted((root / "running").glob("*.json")):
+        if delivery_lock_is_held(root, path.stem):
+            continue
+        try:
+            request = load_request(path)
+            request_id = str(request.get("id", path.stem))
+            destination = root / ("done" if ack_path(root, request_id).exists() else "pending")
+            move_request(path, destination)
+        except FileNotFoundError:
+            if is_canceled(root, path.stem):
+                continue
+            print(
+                f"codex-long-task-wakeup: running callback {path.stem} changed state during recovery",
+                file=sys.stderr,
+            )
+        except Exception as exc:
+            print(f"codex-long-task-wakeup: warning: failed to recover {path.name}: {exc}", file=sys.stderr)
+            if not path.exists():
+                continue
+            try:
+                move_request(path, root / "failed")
+            except FileNotFoundError:
+                continue
+            except Exception as move_exc:
+                print(
+                    f"codex-long-task-wakeup: warning: could not quarantine {path.name}: {move_exc}",
+                    file=sys.stderr,
+                )
 
 
 def daemon(args: argparse.Namespace) -> int:
     root = queue_dir(args)
     ensure_daemon_dirs(root)
-    print(f"codex-long-task-wakeup: daemon watching {root}", file=sys.stderr)
+    daemon_lock = acquire_owner_lock(root, "daemon-singleton", blocking=False)
+    if daemon_lock is None:
+        print(f"codex-long-task-wakeup: another daemon already owns {root}", file=sys.stderr)
+        return 1
+    try:
+        recover_running(root)
+        print(f"codex-long-task-wakeup: daemon watching {root}", file=sys.stderr)
 
-    processed = 0
-    while True:
-        did_work = process_one(root, args)
-        if did_work:
-            processed += 1
-            if args.max_items is not None and processed >= args.max_items:
+        processed = 0
+        while True:
+            reap_background_resumes()
+            recover_running(root)
+            recover_active(root)
+            did_work = process_one(root, args)
+            if did_work:
+                processed += 1
+                if args.max_items is not None and processed >= args.max_items:
+                    return 0
+                continue
+            if args.once:
                 return 0
-            continue
-        if args.once:
-            return 0
-        time.sleep(args.interval)
+            time.sleep(args.interval)
+    finally:
+        # Keep the singleton inode stable. Unlinking a lock file after unlock
+        # can let two newly starting daemons lock different inodes.
+        release_owner_lock(daemon_lock, remove=False)
 
 
 def done(args: argparse.Namespace) -> int:
@@ -547,12 +1391,143 @@ def done(args: argparse.Namespace) -> int:
     return callback_code if args.strict else 0
 
 
+def run_unarmed_via_daemon(args: argparse.Namespace, started: float, reason: str) -> int:
+    print(
+        "codex-long-task-wakeup: UNARMED WARNING: durable pre-launch callback persistence failed; "
+        f"running with legacy post-exit best effort ({reason})",
+        file=sys.stderr,
+    )
+    exit_code = 1
+    task_returned = False
+    try:
+        completed = subprocess.run(
+            args.wrapped_command,
+            cwd=args.cwd,
+            shell=False,
+            check=False,
+            close_fds=True,
+        )
+        exit_code = completed.returncode
+        task_returned = True
+        return exit_code
+    finally:
+        duration = time.time() - started
+        callback_args = args
+        if task_returned:
+            args.exit_code = exit_code
+        else:
+            callback_args = argparse.Namespace(**vars(args))
+            callback_args.exit_code = None
+            interruption = "The unarmed wrapper did not observe a child return code; task outcome is unknown."
+            callback_args.message = (
+                f"{args.message}\n\n{interruption}" if getattr(args, "message", None) else interruption
+            )
+        callback_code = enqueue_request(callback_args, build_prompt(callback_args, duration))
+        if task_returned and args.strict and exit_code == 0 and callback_code != 0:
+            raise SystemExit(callback_code)
+
+
+def run_via_daemon(args: argparse.Namespace) -> int:
+    started = time.time()
+    root = queue_dir(args)
+    request = make_active_request(args, started)
+    request_id = str(request["id"])
+    try:
+        lock = acquire_owner_lock(root, request_id, blocking=True)
+    except (OSError, RuntimeError) as exc:
+        if args.strict:
+            print(f"codex-long-task-wakeup: refusing to launch unarmed task: {exc}", file=sys.stderr)
+            return 125
+        return run_unarmed_via_daemon(args, started, str(exc))
+    if lock is None:
+        reason = "failed to acquire callback owner lock"
+        if args.strict:
+            print(f"codex-long-task-wakeup: refusing to launch unarmed task: {reason}", file=sys.stderr)
+            return 125
+        return run_unarmed_via_daemon(args, started, reason)
+    try:
+        active_path = request_path(root, ACTIVE_STATE, request_id)
+        write_request(active_path, request)
+        request["launch_phase"] = "launch_committed"
+        request["launch_committed_at"] = time.time()
+        write_request(active_path, request)
+    except OSError as exc:
+        best_effort_disarm(root, request_id, lock)
+        if args.strict:
+            print(
+                f"codex-long-task-wakeup: refusing to launch unarmed task because active callback persistence failed: {exc}",
+                file=sys.stderr,
+            )
+            return 125
+        return run_unarmed_via_daemon(args, started, str(exc))
+
+    print(f"codex-long-task-wakeup: armed callback {request_id} before task launch", file=sys.stderr)
+    exit_code = 1
+    task_returned = False
+    try:
+        completed = subprocess.run(
+            args.wrapped_command,
+            cwd=args.cwd,
+            shell=False,
+            check=False,
+            close_fds=True,
+        )
+        exit_code = completed.returncode
+        task_returned = True
+        return exit_code
+    finally:
+        args.command = args.command or " ".join(args.wrapped_command)
+        duration = time.time() - started
+        request["duration_seconds"] = duration
+        if task_returned:
+            args.exit_code = exit_code
+            prompt = build_prompt(args, duration)
+            request["completed_at"] = time.time()
+            request["exit_code"] = exit_code
+            request["outcome"] = "completed"
+        else:
+            interrupted_args = argparse.Namespace(**vars(args))
+            interrupted_args.exit_code = None
+            interruption = (
+                "The callback wrapper stopped waiting before it observed a child return code. "
+                "The task outcome is unknown and the wrapped child or descendants may still be running. "
+                "Inspect processes and artifacts before retrying."
+            )
+            interrupted_args.message = (
+                f"{args.message}\n\n{interruption}" if getattr(args, "message", None) else interruption
+            )
+            prompt = build_prompt(interrupted_args, duration)
+            request["interrupted_at"] = time.time()
+            request.pop("exit_code", None)
+            request["outcome"] = "unknown"
+            request["recovery_reason"] = "wrapper_did_not_observe_child_return"
+        callback_code = 1
+        try:
+            callback_code = transition_active_to_pending(root, request, prompt)
+        except Exception as exc:
+            print(f"codex-long-task-wakeup: warning: failed to finalize callback {request_id}: {exc}", file=sys.stderr)
+        finally:
+            try:
+                release_owner_lock(lock, remove=True)
+            except Exception as exc:
+                callback_code = 1
+                print(f"codex-long-task-wakeup: warning: failed to clean callback lock {request_id}: {exc}", file=sys.stderr)
+        if task_returned and args.strict and exit_code == 0 and callback_code != 0:
+            raise SystemExit(callback_code)
+
+
 def run(args: argparse.Namespace) -> int:
     if not args.wrapped_command:
         raise SystemExit("run mode requires a command after --")
 
+    args.command = args.command or shlex.join(args.wrapped_command)
+    bind_target(args)
+    if should_enqueue(args):
+        return run_via_daemon(args)
+
     started = time.time()
     exit_code = 1
+    task_returned = False
     try:
         completed = subprocess.run(
             args.wrapped_command,
@@ -561,21 +1536,38 @@ def run(args: argparse.Namespace) -> int:
             check=False,
         )
         exit_code = completed.returncode
+        task_returned = True
         return exit_code
     finally:
-        args.exit_code = exit_code
         args.command = args.command or " ".join(args.wrapped_command)
         duration = time.time() - started
-        prompt = build_prompt(args, duration)
-        callback_code = resume_codex(args, prompt)
-        if args.strict and exit_code == 0 and callback_code != 0:
+        callback_args = args
+        if task_returned:
+            args.exit_code = exit_code
+        else:
+            callback_args = argparse.Namespace(**vars(args))
+            callback_args.exit_code = None
+            interruption = "The callback wrapper did not observe a child return code; task outcome is unknown."
+            callback_args.message = (
+                f"{args.message}\n\n{interruption}" if getattr(args, "message", None) else interruption
+            )
+        prompt = build_prompt(callback_args, duration)
+        callback_code = resume_codex(callback_args, prompt)
+        if task_returned and args.strict and exit_code == 0 and callback_code != 0:
             raise SystemExit(callback_code)
 
 
 def add_common_flags(parser: argparse.ArgumentParser) -> None:
-    target = parser.add_mutually_exclusive_group(required=True)
-    target.add_argument("--session", help="Codex session id to resume")
-    target.add_argument("--last", action="store_true", help="Resume the most recent Codex session")
+    target = parser.add_mutually_exclusive_group()
+    target.add_argument(
+        "--session",
+        help=f"Codex session id to resume (default: ${CODEX_THREAD_ID_ENV} from the launching Codex thread)",
+    )
+    target.add_argument(
+        "--last",
+        action="store_true",
+        help="Unsafely resume the most recent Codex session instead of binding the launching thread",
+    )
     parser.add_argument("--cwd", default=os.getcwd(), help="Working directory for resumed Codex")
     parser.add_argument("--task", default="long task", help="Human-readable task name")
     parser.add_argument("--command", help="Original command text")
@@ -763,6 +1755,14 @@ def install_supervisor(args: argparse.Namespace) -> int:
     return status
 
 
+def start_daemon_fallback(args: argparse.Namespace) -> int:
+    if running_in_container() and (shutil.which("supervisorctl") or shutil.which("supervisord")):
+        print("codex-long-task-wakeup: starting supervisor daemon fallback", file=sys.stderr)
+        return install_supervisor(args)
+    print("codex-long-task-wakeup: starting standalone daemon fallback", file=sys.stderr)
+    return start_standalone_daemon(args)
+
+
 def install_systemd(args: argparse.Namespace) -> int:
     name = service_name(args.name)
     text = systemd_service_text(args)
@@ -787,17 +1787,20 @@ def install_systemd(args: argparse.Namespace) -> int:
         if args.now:
             action = "restart" if args.enable else "start"
             status = run_systemctl([action, name]) or status
+            if status != 0:
+                print(
+                    "codex-long-task-wakeup: warning: systemd user service could not be started; using fallback daemon",
+                    file=sys.stderr,
+                )
+                fallback_status = start_daemon_fallback(args)
+                if fallback_status == 0:
+                    return 0
     else:
         print("codex-long-task-wakeup: warning: systemctl not found; service file was written but not loaded", file=sys.stderr)
         if args.enable:
             print("codex-long-task-wakeup: warning: --enable has no effect without systemd", file=sys.stderr)
         if args.now:
-            if running_in_container() and (shutil.which("supervisorctl") or shutil.which("supervisord")):
-                print("codex-long-task-wakeup: starting supervisor daemon fallback", file=sys.stderr)
-                status = install_supervisor(args)
-            else:
-                print("codex-long-task-wakeup: starting standalone daemon fallback", file=sys.stderr)
-                status = start_standalone_daemon(args)
+            status = start_daemon_fallback(args)
 
     return status
 
@@ -815,6 +1818,7 @@ def setup(args: argparse.Namespace) -> int:
         retries=args.retries,
         retry_delay=args.retry_delay,
         retry_backoff=args.retry_backoff,
+        resume_timeout=getattr(args, "resume_timeout", DEFAULT_RESUME_TIMEOUT),
         restart_sec=args.restart_sec,
         exec_start=args.exec_start,
         codex_bin=args.codex_bin,
@@ -837,9 +1841,13 @@ def ack(args: argparse.Namespace) -> int:
     }
     if args.message:
         payload["message"] = args.message
-    tmp = marker.with_name(f".{marker.stem}.{uuid.uuid4().hex}.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, marker)
+    write_request(marker, payload)
+    failed = request_path(root, "failed", args.id)
+    if failed.exists():
+        try:
+            move_request(failed, root / "done")
+        except FileNotFoundError:
+            pass
     print(f"codex-long-task-wakeup: acknowledged callback {args.id} in {root}", file=sys.stderr)
     return 0
 
@@ -850,6 +1858,111 @@ def cancel(args: argparse.Namespace) -> int:
         cancel_all(root, args.message)
         return 0
     return 0 if cancel_one(root, args.id, args.message) else 1
+
+
+def request_task(request: dict[str, object]) -> str:
+    prompt = request.get("prompt")
+    if isinstance(prompt, str):
+        for line in prompt.splitlines():
+            if line.startswith("Task: "):
+                return line.removeprefix("Task: ").strip() or "long task"
+    return "long task"
+
+
+def request_target(request: dict[str, object]) -> str:
+    target = request.get("target")
+    if not isinstance(target, dict):
+        return "unknown target"
+    if target.get("kind") == "session":
+        value = str(target.get("value", "unknown"))
+        return f"session {value}"
+    if target.get("kind") == "last":
+        return "unsafe --last"
+    return "unknown target"
+
+
+def queued_items(root: Path, states: list[str]) -> list[tuple[str, Path, dict[str, object]]]:
+    items: list[tuple[str, Path, dict[str, object]]] = []
+    for state in states:
+        for path in sorted((root / state).glob("*.json")):
+            try:
+                request = load_request(path)
+            except Exception as exc:
+                request = {"id": path.stem, "prompt": "Task: unreadable callback", "last_error": str(exc)}
+            items.append((state, path, request))
+    items.sort(key=lambda item: float(item[2].get("created_at", 0.0)))
+    return items
+
+
+def status(args: argparse.Namespace) -> int:
+    root = queue_dir(args)
+    states = args.state or ["pending", "running"]
+    items = queued_items(root, states)
+    if not items:
+        if not args.quiet_empty:
+            print(f"No pending long-task callbacks in {root}")
+        return 0
+
+    counts = {state: sum(1 for item in items if item[0] == state) for state in states}
+    summary = ", ".join(f"{state}={count}" for state, count in counts.items() if count)
+    print(f"[long-task-callback] {len(items)} item(s) need attention ({summary})")
+    limit = max(1, args.limit)
+    for state, path, request in items[:limit]:
+        request_id = str(request.get("id", path.stem))
+        line = f"  - [{state}] {request_task(request)} | {request_target(request)} | id {request_id}"
+        if state == "running" and ack_path(root, request_id).exists():
+            line += " | acknowledged; resumed Codex process still active"
+        error = request.get("last_error")
+        if isinstance(error, str) and error:
+            line += f" | {error}"
+        print(line)
+    if len(items) > limit:
+        print(f"  ... {len(items) - limit} more item(s)")
+    print("  Inspect: codex-long-task-wakeup status --state pending --state running")
+    return 0
+
+
+def shell_hook_text(command: str) -> str:
+    quoted = shlex.quote(command)
+    return "\n".join(
+        [
+            SHELL_HOOK_BEGIN,
+            'if [[ -z "${CODEX_LONG_TASK_STATUS_SHOWN:-}" ]]; then',
+            "    export CODEX_LONG_TASK_STATUS_SHOWN=1",
+            "    if command -v timeout >/dev/null 2>&1; then",
+            f"        timeout 2s {quoted} status --shell-hook --quiet-empty 2>/dev/null || true",
+            "    else",
+            f"        {quoted} status --shell-hook --quiet-empty 2>/dev/null || true",
+            "    fi",
+            "fi",
+            SHELL_HOOK_END,
+        ]
+    )
+
+
+def install_shell_hook(args: argparse.Namespace) -> int:
+    rc_file = Path(args.rc_file or "~/.bashrc").expanduser()
+    command = args.command or console_script_path()
+    block = shell_hook_text(command)
+    existing = rc_file.read_text(encoding="utf-8") if rc_file.exists() else ""
+
+    start = existing.find(SHELL_HOOK_BEGIN)
+    end = existing.find(SHELL_HOOK_END)
+    if start >= 0 and end >= start:
+        end += len(SHELL_HOOK_END)
+        updated = existing[:start].rstrip() + "\n\n" + block + existing[end:]
+    else:
+        updated = existing.rstrip() + "\n\n" + block + "\n"
+
+    rc_file.parent.mkdir(parents=True, exist_ok=True)
+    mode = rc_file.stat().st_mode if rc_file.exists() else None
+    tmp = rc_file.with_name(f".{rc_file.name}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text(updated, encoding="utf-8")
+    if mode is not None:
+        tmp.chmod(mode)
+    os.replace(tmp, rc_file)
+    print(f"Installed long-task pending-status hook in {rc_file}")
+    return 0
 
 
 def main() -> int:
@@ -872,6 +1985,7 @@ def main() -> int:
     daemon_parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Retries after a callback is not acknowledged")
     daemon_parser.add_argument("--retry-delay", type=float, default=DEFAULT_RETRY_DELAY, help="Initial retry delay in seconds")
     daemon_parser.add_argument("--retry-backoff", type=float, default=DEFAULT_RETRY_BACKOFF, help="Retry delay multiplier")
+    daemon_parser.add_argument("--resume-timeout", type=float, default=DEFAULT_RESUME_TIMEOUT, help="Maximum seconds for one Codex resume before retrying")
 
     systemd_parser = sub.add_parser("install-systemd", help="Install a user-level systemd service for the wakeup daemon")
     systemd_parser.add_argument("--name", default="codex-long-task-wakeup", help="Systemd service name")
@@ -880,6 +1994,7 @@ def main() -> int:
     systemd_parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Retries after a callback is not acknowledged")
     systemd_parser.add_argument("--retry-delay", type=float, default=DEFAULT_RETRY_DELAY, help="Initial retry delay in seconds")
     systemd_parser.add_argument("--retry-backoff", type=float, default=DEFAULT_RETRY_BACKOFF, help="Retry delay multiplier")
+    systemd_parser.add_argument("--resume-timeout", type=float, default=DEFAULT_RESUME_TIMEOUT, help="Maximum seconds for one Codex resume before retrying")
     systemd_parser.add_argument("--restart-sec", type=float, default=5.0, help="Restart delay in seconds")
     systemd_parser.add_argument("--exec-start", help="Path to codex-long-task-wakeup executable")
     systemd_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
@@ -901,6 +2016,7 @@ def main() -> int:
     setup_parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Retries after a callback is not acknowledged")
     setup_parser.add_argument("--retry-delay", type=float, default=DEFAULT_RETRY_DELAY, help="Initial retry delay in seconds")
     setup_parser.add_argument("--retry-backoff", type=float, default=DEFAULT_RETRY_BACKOFF, help="Retry delay multiplier")
+    setup_parser.add_argument("--resume-timeout", type=float, default=DEFAULT_RESUME_TIMEOUT, help="Maximum seconds for one Codex resume before retrying")
     setup_parser.add_argument("--restart-sec", type=float, default=5.0, help="Systemd restart delay in seconds")
     setup_parser.add_argument("--exec-start", help="Path to codex-long-task-wakeup executable")
     setup_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
@@ -918,8 +2034,24 @@ def main() -> int:
     cancel_parser.add_argument("--queue-dir", help="Wakeup queue directory")
     cancel_target = cancel_parser.add_mutually_exclusive_group(required=True)
     cancel_target.add_argument("--id", help="Callback request id to cancel")
-    cancel_target.add_argument("--all", action="store_true", help="Cancel all pending and running callbacks")
+    cancel_target.add_argument("--all", action="store_true", help="Cancel all active, pending, and running callbacks")
     cancel_parser.add_argument("--message", help="Optional cancellation note")
+
+    status_parser = sub.add_parser("status", help="List queued callbacks that still need handling")
+    status_parser.add_argument("--queue-dir", help="Wakeup queue directory")
+    status_parser.add_argument(
+        "--state",
+        action="append",
+        choices=[ACTIVE_STATE, "pending", "running", "failed"],
+        help="Queue state to include; repeat as needed (default: pending and running)",
+    )
+    status_parser.add_argument("--limit", type=int, default=5, help="Maximum items to print")
+    status_parser.add_argument("--quiet-empty", action="store_true", help="Print nothing when no items exist")
+    status_parser.add_argument("--shell-hook", action="store_true", help="Use compact terminal-startup output")
+
+    shell_hook_parser = sub.add_parser("install-shell-hook", help="Install an idempotent pending-status check in Bash startup")
+    shell_hook_parser.add_argument("--rc-file", help="Bash rc file (default: ~/.bashrc)")
+    shell_hook_parser.add_argument("--command", help="Executable path embedded in the hook")
 
     args = parser.parse_args()
     if args.mode == "done":
@@ -940,6 +2072,10 @@ def main() -> int:
         return ack(args)
     if args.mode == "cancel":
         return cancel(args)
+    if args.mode == "status":
+        return status(args)
+    if args.mode == "install-shell-hook":
+        return install_shell_hook(args)
     return 2
 
 

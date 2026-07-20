@@ -281,9 +281,17 @@ codex-long-task-wakeup ack --queue-dir <queue-dir> --id <callback-id>
 ```
 
 The resumed agent should run that command after it has inspected the long-task result and decided
-what to do next. A queued callback is moved to `done/` only after this marker exists. If Codex exits
-without an acknowledgement marker, the daemon retries the callback 3 times by default with delays of
-30s, 60s, and 120s. Tune this with:
+what to do next. The acknowledgement marker is monotonic: the daemon never removes it. While the
+resumed Codex process is still alive, the request can remain in `running/` as a per-target delivery
+lease; callbacks for other sessions may proceed, but another callback for the same session waits.
+Since 0.4.2 that target lease is global across every queue directory under the same `CODEX_HOME`, so
+independent daemons watching a default and a dedicated queue cannot resume the same session at the
+same time. The request moves to `done/` after the acknowledged resume process exits. A dedicated
+delivery worker owns both the per-request and global target leases plus the timeout; the Codex
+process and its descendants do not inherit the locks. This lets a directly crashed daemon restart
+without duplicating a still-live delivery. If Codex
+exits without an acknowledgement marker, the daemon retries the callback 3 times by default with
+delays of 30s, 60s, and 120s. Tune this with:
 
 ```bash
 codex-long-task-wakeup daemon --retries 3 --retry-delay 30 --retry-backoff 2
@@ -299,9 +307,46 @@ codex-long-task-wakeup cancel --queue-dir <queue-dir> --id <callback-id>
 codex-long-task-wakeup cancel --queue-dir <queue-dir> --all --message "no longer needed"
 ```
 
-Canceling moves active requests from `pending/` or `running/` to `canceled/`. If a Codex resume has
-already started, `cancel` does not kill that process; it only prevents the daemon from retrying or
-moving that request to `done/` later.
+Canceling publishes a durable tombstone for requests in `active/`, `pending/`, or `running/`, then
+removes dispatchable copies. If the wrapped task or a Codex resume has already started, `cancel`
+does not kill that process; it only suppresses callback finalization and later retries.
+
+### Durable `run --via-daemon` lifecycle
+
+Version 0.4.1 arms one stable callback id in `active/` before launching the wrapped command. A
+close-on-exec owner lock distinguishes a healthy wrapper from an orphaned record. Normal completion
+updates that same id with the real exit code and moves it to `pending/`. If the wrapper is killed,
+the daemon recovers the same id with `outcome: unknown` and an explicit warning that the wrapped
+child may still be running. Always inspect processes and artifacts before rerunning an
+unknown-outcome task.
+
+If completion was recorded but the final state move was interrupted, recovery preserves the known
+exit code instead of downgrading it to unknown. File replacement and state transitions sync both the
+record and relevant queue directories. Reboot recovery still requires the queue to live on
+persistent storage and the daemon service to start after reboot.
+
+Version 0.4.2 stores hashed per-target lock files in
+`${CODEX_HOME:-~/.codex}/long-task-wakeup/target-locks`. Override that location with
+`CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR` only when every daemon that may target the same session uses
+the same override. A contender that loses the cross-queue lease race returns to `pending/` without
+consuming a retry.
+
+Drain `running/` callbacks before a managed service or container restart when possible. A service
+manager normally terminates the daemon's delivery workers too; an unacknowledged interrupted
+delivery is intentionally eligible for at-least-once replay after restart.
+
+This is an at-least-once callback protocol, not exactly-once execution. Stable ids, monotonic
+acknowledgements, a singleton daemon lock, and per-delivery locks suppress ordinary duplicates, but
+a host failure after Codex receives a prompt and before its acknowledgement is durable can still
+cause a retry. Callback code must therefore inspect existing processes and artifacts before
+relaunching work.
+
+If pre-arming cannot be persisted, default mode prints a prominent `UNARMED WARNING`, runs the task,
+and falls back to legacy post-exit best effort so the wrapped command keeps its historical behavior.
+Use `--strict` when the command must not start without durable callback protection; strict mode exits
+with code 125 before launch. Inspect healthy wrappers explicitly with
+`codex-long-task-wakeup status --state active`; the shell startup hook intentionally continues to
+show only `pending/` and `running/`.
 
 If user services should survive logout on your machine, enable linger once:
 
@@ -338,6 +383,12 @@ finally:
 - command
 - exit code
 - optional message
+- callback routing details, including the bound session id and binding source
+
+When neither `--session` nor `--last` is supplied, the CLI automatically binds the callback to the
+launching Codex thread through `CODEX_THREAD_ID`. If that variable is unavailable, setup fails
+instead of selecting another conversation. `--session` remains an explicit override. `--last` is an
+unsafe compatibility fallback and always emits a warning.
 
 By default it runs:
 
@@ -362,12 +413,24 @@ Task execution and Codex wakeup are intentionally separated:
 - Callback failures and daemon enqueue failures are warnings on stderr, not task failures.
 - Use `--strict` only if you explicitly want callback failure to propagate.
 
-Use `--last` instead of `--session <session-id>` only when resuming the most recent Codex session
-is acceptable:
+Use `--last` only when resuming the most recent Codex session is explicitly acceptable:
 
 ```bash
 codex-long-task-wakeup done --last --cwd "$PWD" --task "long eval" --exit-code "$status"
 ```
+
+## Terminal Pending-Task Reminder
+
+Install an idempotent Bash startup hook:
+
+```bash
+codex-long-task-wakeup install-shell-hook
+```
+
+On interactive terminal startup it checks the local callback queue for `pending` and `running`
+items, prints a compact summary only when needed, and stops after two seconds. It never resumes or
+changes a callback. Run `codex-long-task-wakeup status` manually for the same summary, or
+`codex-long-task-wakeup status --state failed` for exhausted callbacks.
 
 ## Health Check And Troubleshooting
 
@@ -695,8 +758,43 @@ codex-long-task-wakeup cancel --queue-dir <queue-dir> --id <callback-id>
 codex-long-task-wakeup cancel --queue-dir <queue-dir> --all --message "no longer needed"
 ```
 
-取消会把 `pending/` 或 `running/` 里的活跃请求移动到 `canceled/`。如果某个 Codex resume 已经
-启动，`cancel` 不会杀掉那个进程；它只阻止 daemon 后续继续重试，或把该请求再移动到 `done/`。
+取消会先为 `active/`、`pending/` 或 `running/` 里的请求持久化 `canceled/` tombstone，再清理
+可投递副本。如果被包装任务或 Codex resume 已经启动，`cancel` 不会杀掉那个进程；它只抑制
+callback 收尾和后续重试。
+
+### `run --via-daemon` 的耐久生命周期
+
+从 0.4.1 开始，工具会在启动被包装命令前，先把一个稳定 callback id 写入 `active/`，并用
+close-on-exec owner lock 区分健康 wrapper 和孤儿记录。正常完成时，同一个 id 会记录真实退出码
+并移动到 `pending/`。如果 wrapper 被 SIGKILL，daemon 会把同一个 id 恢复成
+`outcome: unknown`，并明确提示子进程可能仍在运行；遇到这种 callback，必须先检查进程和产物，
+不能直接重跑。
+
+如果退出码已经落盘、只是最后一次状态移动被中断，恢复会保留已知退出码，不会错误降级为
+unknown。记录替换和状态迁移会同步文件及相关队列目录。重启恢复仍要求队列位于持久存储，并且
+daemon service 会在重启后启动。
+
+从 0.4.2 开始，工具还会在 `${CODEX_HOME:-~/.codex}/long-task-wakeup/target-locks` 中按目标
+session 保存哈希后的全局 lease。即使两个 daemon 分别监听默认队列和专用队列，同一 session
+也只能有一个 Codex resume。若必须覆盖目录，可设置 `CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR`，
+但所有可能唤醒同一 session 的 daemon 必须使用同一个值。竞争失败的 callback 会退回
+`pending/`，且不消耗 retry 次数。
+
+每次投递由独立 delivery worker 同时持有 callback 锁、全局 session 锁和超时，Codex 及其后代
+不会继承这些锁。因此 daemon
+进程被直接杀死并重启时，仍在运行的投递不会立即重复启动。若要重启 systemd service 或容器，
+应尽量先等 `running/` 清空；服务管理器通常也会终止 delivery worker，而尚未 ACK 的中断投递
+会按 at-least-once 语义在重启后重新投递。
+
+这是 at-least-once callback 协议，不是 exactly-once 任务执行。稳定 id、单调 ACK、daemon
+单例锁和每次投递锁可以消除常见重复，但如果 Codex 已收到 prompt、ACK 尚未耐久落盘时主机故障，
+仍可能重试。因此恢复后的 agent 必须先检查现有进程和 artifact，再决定是否重新启动任务。
+
+如果 pre-arm 无法持久化，默认模式会输出醒目的 `UNARMED WARNING`，继续执行任务，并退回旧式
+“结束后尽力入队”，以保持被包装命令原有语义。若任务在没有耐久 callback 保护时绝不能启动，
+使用 `--strict`；它会在启动前以 125 退出。可用
+`codex-long-task-wakeup status --state active` 显式查看健康 wrapper；shell 启动提示仍只展示
+`pending/` 和 `running/`。
 
 如果希望用户服务在退出登录后仍然保活，在宿主机上执行一次：
 
