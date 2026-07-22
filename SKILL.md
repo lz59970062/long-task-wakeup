@@ -119,6 +119,15 @@ systemctl --user status codex-long-task-wakeup.service
 journalctl --user -u codex-long-task-wakeup.service -f
 ```
 
+For proxy-only environment injection, use `setup --proxy-env-file ~/.codex/.env` or
+`setup --inherit-proxy`. The installer copies only the standard upper- and lowercase proxy variables
+to `${CODEX_HOME:-~/.codex}/long-task-wakeup/service-proxy.env` with mode `0600`, references it with
+systemd `EnvironmentFile=`, and never prints its values or writes them into supervisor configuration.
+A plain `.env` file is not otherwise inherited by systemd; use `--clear-proxy` to remove saved proxy
+variables. Since 0.4.3, `systemctl --user reload codex-long-task-wakeup.service` requests a safe
+hot reload: a daemon waits for live delivery workers to exit before re-execing. During a legacy daemon
+upgrade, `setup --now` refuses to restart while `running/` callbacks exist; drain those callbacks first.
+
 If `systemctl` is unavailable, as in many Docker containers, `setup --force --enable --now` prefers
 supervisor when `supervisorctl` or `supervisord` is installed. It writes
 `/etc/supervisor/conf.d/codex-long-task-wakeup.conf` with `autostart=true` and `autorestart=true`.

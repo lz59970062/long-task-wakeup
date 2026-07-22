@@ -179,8 +179,12 @@ This writes:
 ~/.config/systemd/user/codex-long-task-wakeup.service
 ```
 
-and runs `systemctl --user daemon-reload`, `enable`, and `restart`. The service keeps
-`codex-long-task-wakeup daemon` alive outside Codex tool sandboxes and restarts it if it exits.
+and runs `systemctl --user daemon-reload`, `enable`, and a safe activation. The service keeps
+`codex-long-task-wakeup daemon` alive outside Codex tool sandboxes and restarts it if it exits. A
+current daemon that advertises the hot-reload protocol receives HUP and re-execs the updated Python
+code only after its live delivery workers have exited; their leases and resumed Codex processes are
+never interrupted. A legacy daemon is never restarted automatically while a callback is in
+`running/`; its updated unit is left pending until delivery drains.
 In Docker or minimal containers where `systemctl` is not available, the same `setup --force --enable
 --now` command prefers supervisor when `supervisorctl` or `supervisord` is installed. It writes:
 
@@ -208,11 +212,27 @@ runtime dependencies such as Node/NVM outside an interactive shell. Resume calls
 `sandbox_workspace_write.writable_roots`, so the resumed agent can write acknowledgement markers
 instead of getting stuck in read-only mode.
 
+To persist proxy settings safely, copy only proxy variables from an existing `.env` file into a
+private daemon environment file:
+
+```bash
+codex-long-task-wakeup setup --force --enable --now --proxy-env-file "${CODEX_HOME:-$HOME/.codex}/.env"
+```
+
+Alternatively use `--inherit-proxy` to capture the proxy variables from the current shell. Both
+modes retain only `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, and lowercase variants in
+`${CODEX_HOME:-~/.codex}/long-task-wakeup/service-proxy.env` with mode `0600`; credentials are never
+written into the unit, supervisor configuration, or logs. A regular `.env` file is not automatically
+inherited by systemd. Proxy URLs with whitespace, quotes, or backslashes are rejected rather than
+being ambiguously parsed by service managers; percent-encode those characters. Use `--clear-proxy`
+to remove a previously persisted proxy configuration.
+
 Inspect or manage it with:
 
 ```bash
 systemctl --user status codex-long-task-wakeup.service
 journalctl --user -u codex-long-task-wakeup.service -f
+systemctl --user reload codex-long-task-wakeup.service
 systemctl --user restart codex-long-task-wakeup.service
 systemctl --user stop codex-long-task-wakeup.service
 ```
@@ -675,8 +695,11 @@ codex-long-task-wakeup setup --force --enable --now
 ~/.config/systemd/user/codex-long-task-wakeup.service
 ```
 
-并执行 `systemctl --user daemon-reload`、`enable` 和 `restart`。这个 service 会在 Codex
-工具 sandbox 外部保持 `codex-long-task-wakeup daemon` 常驻，并在异常退出后自动重启。
+并执行 `systemctl --user daemon-reload`、`enable` 和安全激活。这个 service 会在 Codex
+工具 sandbox 外部保持 `codex-long-task-wakeup daemon` 常驻，并在异常退出后自动重启。支持热重载的
+当前 daemon 会接收 HUP，但只有在所有 live delivery worker 退出后才会在原 PID 内重新加载更新后的
+Python 代码；lease 和已恢复的 Codex 进程不会被中断。旧版 daemon 在存在 `running/` callback 时会
+保守地延后激活，不会冒险中断投递。
 在 Docker 或精简容器里如果没有 `systemctl`，同一条 `setup --force --enable --now` 会优先使用
 supervisor，前提是已安装 `supervisorctl` 或 `supervisord`。它会写入：
 
@@ -700,11 +723,25 @@ ${CODEX_HOME:-~/.codex}/long-task-wakeup/daemon.log
 并写入当前 `PATH`，确保 daemon 在非交互式 systemd 环境里也能找到 Codex 的 Node/NVM
 等运行时依赖。
 
+要安全持久化代理设置，可以只从已有 `.env` 文件中复制代理变量到私有 daemon 环境文件：
+
+```bash
+codex-long-task-wakeup setup --force --enable --now --proxy-env-file "${CODEX_HOME:-$HOME/.codex}/.env"
+```
+
+也可以用 `--inherit-proxy` 捕获当前 shell 的代理变量。两种方式都只保留 `HTTP_PROXY`、
+`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY` 及其小写形式，写入
+`${CODEX_HOME:-~/.codex}/long-task-wakeup/service-proxy.env` 并设为 `0600`；不会将凭据写进
+unit、supervisor 配置或日志。普通 `.env` 不会被 systemd 自动继承。包含空白、引号或反斜杠的
+代理 URL 会被拒绝，以免 service manager 产生歧义；请将这些字符进行百分号编码。使用
+`--clear-proxy` 可以移除已持久化的代理配置。
+
 查看和管理：
 
 ```bash
 systemctl --user status codex-long-task-wakeup.service
 journalctl --user -u codex-long-task-wakeup.service -f
+systemctl --user reload codex-long-task-wakeup.service
 systemctl --user restart codex-long-task-wakeup.service
 systemctl --user stop codex-long-task-wakeup.service
 ```

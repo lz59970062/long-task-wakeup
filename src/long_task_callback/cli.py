@@ -30,12 +30,24 @@ DEFAULT_RETRY_DELAY = 30.0
 DEFAULT_RETRY_BACKOFF = 2.0
 DEFAULT_RESUME_TIMEOUT = 3600.0
 DEFAULT_SUPERVISOR_CONF_DIR = "/etc/supervisor/conf.d"
+RELOAD_PROTOCOL_VERSION = 1
 CODEX_THREAD_ID_ENV = "CODEX_THREAD_ID"
 SHELL_HOOK_BEGIN = "# >>> codex-long-task-wakeup pending status >>>"
 SHELL_HOOK_END = "# <<< codex-long-task-wakeup pending status <<<"
 ACTIVE_STATE = "active"
 LOCKS_STATE = "locks"
 TARGET_LOCK_DIR_ENV = "CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR"
+PROXY_ENV_FILE_ENV = "CODEX_LONG_TASK_WAKEUP_PROXY_ENV_FILE"
+PROXY_ENV_NAMES = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+)
 
 
 @dataclass
@@ -118,12 +130,16 @@ def systemd_user_dir() -> Path:
 
 
 def systemd_quote(value: str) -> str:
+    if any(char in value for char in "\x00\n\r"):
+        raise ValueError("systemd values must not contain NUL, carriage return, or newline characters")
     if value and all(char not in value for char in " \t\n\"'\\"):
         return value
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def supervisor_quote(value: str) -> str:
+    if any(char in value for char in "\x00\n\r"):
+        raise ValueError("supervisor values must not contain NUL, carriage return, or newline characters")
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
 
 
@@ -165,11 +181,16 @@ def systemd_service_text(args: argparse.Namespace) -> str:
             "[Service]",
             "Type=simple",
             f"ExecStart={exec_start}",
+            "ExecReload=/bin/kill -HUP $MAINPID",
             "Restart=always",
             f"RestartSec={args.restart_sec}",
+            "UMask=0077",
+            "NoNewPrivileges=yes",
             "Environment=PYTHONUNBUFFERED=1",
             f"Environment={systemd_quote(f'PATH={path}')}",
             f"Environment={systemd_quote(f'CODEX_LONG_TASK_WAKEUP_CODEX_BIN={codex_bin}')}",
+            f"Environment={systemd_quote(f'{PROXY_ENV_FILE_ENV}={service_proxy_env_path()}')}",
+            f"EnvironmentFile=-{service_proxy_env_path()}",
             "",
             "[Install]",
             "WantedBy=default.target",
@@ -180,7 +201,7 @@ def systemd_service_text(args: argparse.Namespace) -> str:
 
 def daemon_command(args: argparse.Namespace) -> list[str]:
     command = [
-        args.exec_start or console_script_path(),
+        getattr(args, "exec_start", None) or console_script_path(),
         "daemon",
         "--interval",
         str(args.interval),
@@ -219,11 +240,7 @@ def supervisor_config_text(args: argparse.Namespace) -> str:
     log_path = root / "supervisor.log"
     command = " ".join(shlex.quote(part) for part in daemon_command(args))
     environment = ",".join(
-        [
-            f"PYTHONUNBUFFERED={supervisor_quote('1')}",
-            f"CODEX_LONG_TASK_WAKEUP_CODEX_BIN={supervisor_quote(codex_bin_path(args))}",
-            f"PATH={supervisor_quote(args.path or os.environ.get('PATH', ''))}",
-        ]
+        f"{name}={supervisor_quote(value)}" for name, value in daemon_environment(args, include_proxy_values=False).items()
     )
     return "\n".join(
         [
@@ -1355,6 +1372,19 @@ def recover_running(root: Path) -> None:
                 )
 
 
+def daemon_reexec_command(args: argparse.Namespace) -> list[str]:
+    return [sys.executable, "-m", "long_task_callback", *daemon_command(args)[1:]]
+
+
+def daemon_has_live_delivery_workers(root: Path) -> bool:
+    if _BACKGROUND_RESUMES:
+        return True
+    for path in (root / "running").glob("*.json"):
+        if delivery_lock_is_held(root, path.stem):
+            return True
+    return False
+
+
 def daemon(args: argparse.Namespace) -> int:
     root = queue_dir(args)
     ensure_daemon_dirs(root)
@@ -1362,12 +1392,43 @@ def daemon(args: argparse.Namespace) -> int:
     if daemon_lock is None:
         print(f"codex-long-task-wakeup: another daemon already owns {root}", file=sys.stderr)
         return 1
+
+    reload_requested = False
+    reload_deferred_reported = False
+
+    def request_reload(_signum: int, _frame: object) -> None:
+        nonlocal reload_requested
+        reload_requested = True
+
+    previous_hup_handler: object | None = None
+    if hasattr(signal, "SIGHUP"):
+        previous_hup_handler = signal.signal(signal.SIGHUP, request_reload)
     try:
+        load_service_proxy_environment()
+        write_daemon_runtime()
         recover_running(root)
         print(f"codex-long-task-wakeup: daemon watching {root}", file=sys.stderr)
 
         processed = 0
         while True:
+            if reload_requested:
+                reap_background_resumes()
+                if daemon_has_live_delivery_workers(root):
+                    if not reload_deferred_reported:
+                        print(
+                            "codex-long-task-wakeup: reload deferred until live delivery workers exit; "
+                            "their leases and resumed Codex processes will not be interrupted.",
+                            file=sys.stderr,
+                        )
+                        reload_deferred_reported = True
+                else:
+                    load_service_proxy_environment()
+                    print(
+                        "codex-long-task-wakeup: reloading daemon in place after delivery workers drained.",
+                        file=sys.stderr,
+                    )
+                    os.execv(sys.executable, daemon_reexec_command(args))
+                    raise RuntimeError("daemon reload exec unexpectedly returned")
             reap_background_resumes()
             recover_running(root)
             recover_active(root)
@@ -1381,6 +1442,9 @@ def daemon(args: argparse.Namespace) -> int:
                 return 0
             time.sleep(args.interval)
     finally:
+        if previous_hup_handler is not None and hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, previous_hup_handler)
+        clear_daemon_runtime()
         # Keep the singleton inode stable. Unlinking a lock file after unlock
         # can let two newly starting daemons lock different inodes.
         release_owner_lock(daemon_lock, remove=False)
@@ -1641,6 +1705,16 @@ def run_systemctl(args: list[str]) -> int:
     return result.returncode
 
 
+def systemd_service_is_active(name: str) -> bool:
+    result = subprocess.run(
+        ["systemctl", "--user", "is-active", "--quiet", name],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
 def run_supervisorctl(args: list[str]) -> int:
     command = ["supervisorctl", *args]
     result = subprocess.run(command, check=False)
@@ -1651,6 +1725,190 @@ def run_supervisorctl(args: list[str]) -> int:
 
 def daemon_state_dir() -> Path:
     return codex_home() / "long-task-wakeup"
+
+
+def service_proxy_env_path() -> Path:
+    return daemon_state_dir() / "service-proxy.env"
+
+
+def daemon_runtime_path() -> Path:
+    return daemon_state_dir() / "daemon-runtime.json"
+
+
+def parse_proxy_environment_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ValueError(f"could not read proxy environment file {path}: {exc}") from exc
+
+    for line_number, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        if "=" not in line:
+            raise ValueError(f"invalid environment assignment in {path}:{line_number}")
+        name, value = line.split("=", 1)
+        name = name.strip()
+        if name not in PROXY_ENV_NAMES:
+            continue
+        value = value.strip()
+        if value.startswith(("'", '"')):
+            try:
+                parsed = shlex.split(value, comments=False, posix=True)
+            except ValueError as exc:
+                raise ValueError(f"invalid quoted value in {path}:{line_number}") from exc
+            if len(parsed) != 1:
+                raise ValueError(f"invalid proxy value in {path}:{line_number}")
+            value = parsed[0]
+        if "\x00" in value or "\n" in value or "\r" in value:
+            raise ValueError(f"unsafe proxy value in {path}:{line_number}")
+        if any(char.isspace() or char in "'\\\"" for char in value):
+            raise ValueError(
+                f"proxy value in {path}:{line_number} contains characters unsafe for a systemd environment file; "
+                "percent-encode them in the proxy URL"
+            )
+        values[name] = value
+    return values
+
+
+def write_proxy_environment_file(path: Path, values: dict[str, str]) -> None:
+    if not values:
+        raise ValueError("proxy environment source did not define any supported proxy variables")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    contents = "".join(f"{name}={values[name]}\n" for name in PROXY_ENV_NAMES if name in values)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            os.chmod(temporary, 0o600)
+            handle.write(contents)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        fsync_directory(path.parent)
+    except Exception:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def configure_proxy_environment(args: argparse.Namespace) -> Path | None:
+    source = getattr(args, "proxy_env_file", None)
+    inherit = bool(getattr(args, "inherit_proxy", False))
+    clear = bool(getattr(args, "clear_proxy", False))
+    if sum(bool(option) for option in (source, inherit, clear)) > 1:
+        raise ValueError("--proxy-env-file, --inherit-proxy, and --clear-proxy cannot be used together")
+    target = service_proxy_env_path()
+    if clear:
+        try:
+            target.unlink()
+            fsync_directory(target.parent)
+        except FileNotFoundError:
+            pass
+        print(f"Cleared proxy environment file at {target}; values were not printed.")
+        return None
+    if source:
+        values = parse_proxy_environment_file(Path(source).expanduser())
+    elif inherit:
+        values = {name: os.environ[name] for name in PROXY_ENV_NAMES if os.environ.get(name)}
+        for name, value in values.items():
+            if any(char.isspace() or char in "'\\\"\x00\n\r" for char in value):
+                raise ValueError(
+                    f"proxy value in environment variable {name} contains characters unsafe for a systemd environment file; "
+                    "percent-encode them in the proxy URL"
+                )
+    else:
+        return target if target.exists() else None
+
+    write_proxy_environment_file(target, values)
+    print(f"Configured proxy environment file at {target}; values are not printed.")
+    return target
+
+
+def configured_proxy_environment() -> dict[str, str]:
+    path = service_proxy_env_path()
+    return parse_proxy_environment_file(path) if path.exists() else {}
+
+
+def load_service_proxy_environment() -> None:
+    source = Path(os.environ.get(PROXY_ENV_FILE_ENV, service_proxy_env_path())).expanduser()
+    values = parse_proxy_environment_file(source) if source.exists() else {}
+    for name in PROXY_ENV_NAMES:
+        os.environ.pop(name, None)
+    os.environ.update(values)
+
+
+def daemon_environment(args: argparse.Namespace, *, include_proxy_values: bool = True) -> dict[str, str]:
+    values = {
+        "PYTHONUNBUFFERED": "1",
+        "CODEX_LONG_TASK_WAKEUP_CODEX_BIN": codex_bin_path(args),
+        "PATH": getattr(args, "path", None) or os.environ.get("PATH", ""),
+        PROXY_ENV_FILE_ENV: str(service_proxy_env_path()),
+    }
+    if include_proxy_values:
+        values.update(configured_proxy_environment())
+    return values
+
+
+def add_proxy_environment_flags(parser: argparse.ArgumentParser) -> None:
+    proxy_source = parser.add_mutually_exclusive_group()
+    proxy_source.add_argument(
+        "--proxy-env-file",
+        help="Read only proxy variables from this .env-style file and persist them for the daemon service",
+    )
+    proxy_source.add_argument(
+        "--inherit-proxy",
+        action="store_true",
+        help="Persist proxy variables from this command environment for the daemon service",
+    )
+    proxy_source.add_argument(
+        "--clear-proxy",
+        action="store_true",
+        help="Remove the persisted proxy environment file before updating the daemon service",
+    )
+
+
+def write_daemon_runtime() -> None:
+    path = daemon_runtime_path()
+    payload = {
+        "pid": os.getpid(),
+        "boot_id": current_boot_id(),
+        "reload_protocol": RELOAD_PROTOCOL_VERSION,
+        "version": __version__,
+        "started_at": time.time(),
+    }
+    write_request(path, payload)
+
+
+def daemon_supports_hot_reload(expected_pid: int | None = None) -> bool:
+    path = daemon_runtime_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict) or payload.get("reload_protocol") != RELOAD_PROTOCOL_VERSION:
+        return False
+    pid = payload.get("pid")
+    return isinstance(pid, int) and (expected_pid is None or pid == expected_pid) and pid_is_running(pid)
+
+
+def clear_daemon_runtime() -> None:
+    path = daemon_runtime_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return
+    if isinstance(payload, dict) and payload.get("pid") == os.getpid():
+        try:
+            path.unlink()
+            fsync_directory(path.parent)
+        except FileNotFoundError:
+            pass
 
 
 def read_pid(path: Path) -> int | None:
@@ -1678,15 +1936,33 @@ def start_standalone_daemon(args: argparse.Namespace) -> int:
 
     existing_pid = read_pid(pid_path)
     if existing_pid is not None and pid_is_running(existing_pid):
-        print(f"codex-long-task-wakeup: standalone daemon already running with pid {existing_pid}")
-        print(f"codex-long-task-wakeup: log file: {log_path}")
-        return 0
+        if has_running_callbacks(args):
+            print(
+                "codex-long-task-wakeup: deferred standalone daemon reload because callback delivery is running; "
+                "the existing daemon was left untouched.",
+                file=sys.stderr,
+            )
+            return 0
+        elif daemon_supports_hot_reload(existing_pid):
+            try:
+                os.kill(existing_pid, signal.SIGHUP)
+            except ProcessLookupError:
+                print(
+                    "codex-long-task-wakeup: standalone daemon exited while preparing reload; starting a replacement.",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"Reloading standalone wakeup daemon with pid {existing_pid}.")
+                print(f"codex-long-task-wakeup: standalone daemon already running with pid {existing_pid}")
+                print(f"codex-long-task-wakeup: log file: {log_path}")
+                return 0
+        else:
+            print(f"codex-long-task-wakeup: standalone daemon already running with pid {existing_pid}")
+            print(f"codex-long-task-wakeup: log file: {log_path}")
+            return 0
 
     env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    env["CODEX_LONG_TASK_WAKEUP_CODEX_BIN"] = codex_bin_path(args)
-    if args.path:
-        env["PATH"] = args.path
+    env.update(daemon_environment(args))
 
     log_file = log_path.open("ab")
     try:
@@ -1741,6 +2017,13 @@ def install_supervisor(args: argparse.Namespace) -> int:
 
     if not args.now:
         return 0
+    if has_running_callbacks(args):
+        print(
+            "codex-long-task-wakeup: deferred supervisor update because callback delivery is running; "
+            "the installed config will activate after those callbacks drain.",
+            file=sys.stderr,
+        )
+        return 0
     if shutil.which("supervisorctl") is None:
         print("codex-long-task-wakeup: warning: supervisorctl not found; supervisor config was written but not loaded", file=sys.stderr)
         return 1
@@ -1763,17 +2046,26 @@ def start_daemon_fallback(args: argparse.Namespace) -> int:
     return start_standalone_daemon(args)
 
 
+def has_running_callbacks(args: argparse.Namespace) -> bool:
+    root = queue_dir(args)
+    return any((root / "running").glob("*.json"))
+
+
 def install_systemd(args: argparse.Namespace) -> int:
     name = service_name(args.name)
-    text = systemd_service_text(args)
-    if args.print:
-        print(text, end="")
-        return 0
-
     target = systemd_user_dir() / name
     if target.exists() and not args.force:
         print(f"Service already exists at {target}. Re-run with --force to overwrite.", file=sys.stderr)
         return 1
+    try:
+        if args.print:
+            print(systemd_service_text(args), end="")
+            return 0
+        configure_proxy_environment(args)
+        text = systemd_service_text(args)
+    except ValueError as exc:
+        print(f"codex-long-task-wakeup: error: {exc}", file=sys.stderr)
+        return 2
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text, encoding="utf-8")
@@ -1782,11 +2074,52 @@ def install_systemd(args: argparse.Namespace) -> int:
     status = 0
     if shutil.which("systemctl"):
         status = run_systemctl(["daemon-reload"])
+        if status != 0 and args.now:
+            print(
+                "codex-long-task-wakeup: warning: systemd user service could not be reloaded; using fallback daemon",
+                file=sys.stderr,
+            )
+            return start_daemon_fallback(args)
         if args.enable:
             status = run_systemctl(["enable", name]) or status
         if args.now:
-            action = "restart" if args.enable else "start"
-            status = run_systemctl([action, name]) or status
+            if has_running_callbacks(args):
+                if daemon_supports_hot_reload():
+                    print("Requesting safe wakeup daemon reload after live delivery workers drain.")
+                    status = run_systemctl(["reload", name]) or status
+                    if status != 0:
+                        print(
+                            "codex-long-task-wakeup: reload failed; refusing to restart while callback delivery is running.",
+                            file=sys.stderr,
+                        )
+                        return status
+                else:
+                    print(
+                        "codex-long-task-wakeup: deferred daemon activation because callback delivery is running; "
+                        "the installed unit is updated, but the existing daemon was left untouched. "
+                        "Drain running callbacks, then rerun setup --now to activate this version.",
+                        file=sys.stderr,
+                    )
+                    return status
+            elif daemon_supports_hot_reload():
+                print("Reloading the running wakeup daemon in place.")
+                status = run_systemctl(["reload", name]) or status
+                if status != 0:
+                    print(
+                        "codex-long-task-wakeup: reload failed; refusing to fall back to restart automatically.",
+                        file=sys.stderr,
+                    )
+                    return status
+            elif systemd_service_is_active(name):
+                print(
+                    "codex-long-task-wakeup: deferred activation because the running daemon does not advertise "
+                    "safe hot reload; the unit is updated but the process was left untouched.",
+                    file=sys.stderr,
+                )
+                return status
+            else:
+                action = "restart" if args.enable else "start"
+                status = run_systemctl([action, name]) or status
             if status != 0:
                 print(
                     "codex-long-task-wakeup: warning: systemd user service could not be started; using fallback daemon",
@@ -1823,6 +2156,9 @@ def setup(args: argparse.Namespace) -> int:
         exec_start=args.exec_start,
         codex_bin=args.codex_bin,
         path=args.path,
+        proxy_env_file=getattr(args, "proxy_env_file", None),
+        inherit_proxy=bool(getattr(args, "inherit_proxy", False)),
+        clear_proxy=bool(getattr(args, "clear_proxy", False)),
         force=args.force,
         enable=args.enable,
         now=args.now,
@@ -1999,6 +2335,7 @@ def main() -> int:
     systemd_parser.add_argument("--exec-start", help="Path to codex-long-task-wakeup executable")
     systemd_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
     systemd_parser.add_argument("--path", help="PATH environment for the daemon service")
+    add_proxy_environment_flags(systemd_parser)
     systemd_parser.add_argument("--force", action="store_true", help="Overwrite an existing service file")
     systemd_parser.add_argument("--enable", action="store_true", help="Run systemctl --user enable after writing the service")
     systemd_parser.add_argument("--now", action="store_true", help="Start or restart the service after writing it")
@@ -2021,6 +2358,7 @@ def main() -> int:
     setup_parser.add_argument("--exec-start", help="Path to codex-long-task-wakeup executable")
     setup_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
     setup_parser.add_argument("--path", help="PATH environment for the daemon service")
+    add_proxy_environment_flags(setup_parser)
     setup_parser.add_argument("--force", action="store_true", help="Overwrite an existing skill and service file")
     setup_parser.add_argument("--enable", action="store_true", help="Run systemctl --user enable after writing the service")
     setup_parser.add_argument("--now", action="store_true", help="Start or restart the service after writing it")

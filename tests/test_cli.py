@@ -1012,6 +1012,239 @@ class CliTests(unittest.TestCase):
         self.assertTrue(systemd_args.enable)
         self.assertTrue(systemd_args.now)
 
+    def test_install_systemd_persists_only_proxy_values_in_private_environment_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / ".env"
+            source.write_text(
+                "HTTP_PROXY=http://proxy.example:8080\nSECRET_TOKEN=must-not-be-copied\nno_proxy=localhost,127.0.0.1\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                name="codex-long-task-wakeup",
+                queue_dir="/tmp/queue",
+                interval=2.0,
+                retries=3,
+                retry_delay=30.0,
+                retry_backoff=2.0,
+                resume_timeout=3600.0,
+                restart_sec=5.0,
+                exec_start=None,
+                codex_bin=None,
+                path="/bin",
+                proxy_env_file=str(source),
+                inherit_proxy=False,
+                force=True,
+                enable=False,
+                now=False,
+                print=False,
+            )
+            home = Path(tmp) / "codex-home"
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}, clear=False),
+                mock.patch.object(cli, "systemd_user_dir", return_value=Path(tmp) / "systemd"),
+                mock.patch.object(cli.shutil, "which", return_value=None),
+            ):
+                self.assertEqual(cli.install_systemd(args), 0)
+
+            proxy_file = home / "long-task-wakeup" / "service-proxy.env"
+            self.assertEqual(cli.parse_proxy_environment_file(proxy_file), {
+                "HTTP_PROXY": "http://proxy.example:8080",
+                "no_proxy": "localhost,127.0.0.1",
+            })
+            self.assertEqual(proxy_file.stat().st_mode & 0o777, 0o600)
+            service = (Path(tmp) / "systemd" / "codex-long-task-wakeup.service").read_text(encoding="utf-8")
+            self.assertIn(f"EnvironmentFile=-{proxy_file}", service)
+            self.assertIn("ExecReload=/bin/kill -HUP $MAINPID", service)
+            self.assertNotIn("proxy.example", service)
+            self.assertNotIn("SECRET_TOKEN", service)
+
+    def test_install_systemd_defers_old_daemon_restart_while_delivery_is_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            self._write_request(root, "inflight", tmp)
+            cli.move_request(root / "pending" / "inflight.json", root / "running")
+            args = argparse.Namespace(
+                name="codex-long-task-wakeup",
+                queue_dir=str(root),
+                interval=2.0,
+                retries=3,
+                retry_delay=30.0,
+                retry_backoff=2.0,
+                resume_timeout=3600.0,
+                restart_sec=5.0,
+                exec_start=None,
+                codex_bin=None,
+                path="/bin",
+                proxy_env_file=None,
+                inherit_proxy=False,
+                force=True,
+                enable=True,
+                now=True,
+                print=False,
+            )
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(Path(tmp) / "codex-home")}, clear=False),
+                mock.patch.object(cli, "systemd_user_dir", return_value=Path(tmp) / "systemd"),
+                mock.patch.object(cli.shutil, "which", side_effect=lambda command: "/usr/bin/systemctl" if command == "systemctl" else None),
+                mock.patch.object(cli, "run_systemctl", return_value=0) as run_systemctl,
+            ):
+                self.assertEqual(cli.install_systemd(args), 0)
+
+            self.assertEqual(run_systemctl.call_args_list, [mock.call(["daemon-reload"]), mock.call(["enable", "codex-long-task-wakeup.service"])])
+
+    def test_install_systemd_reloads_supported_daemon_while_delivery_is_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            self._write_request(root, "inflight", tmp)
+            cli.move_request(root / "pending" / "inflight.json", root / "running")
+            home = Path(tmp) / "codex-home"
+            runtime = home / "long-task-wakeup" / "daemon-runtime.json"
+            runtime.parent.mkdir(parents=True)
+            runtime.write_text(
+                json.dumps({"pid": os.getpid(), "reload_protocol": cli.RELOAD_PROTOCOL_VERSION}) + "\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                name="codex-long-task-wakeup",
+                queue_dir=str(root),
+                interval=2.0,
+                retries=3,
+                retry_delay=30.0,
+                retry_backoff=2.0,
+                resume_timeout=3600.0,
+                restart_sec=5.0,
+                exec_start=None,
+                codex_bin=None,
+                path="/bin",
+                proxy_env_file=None,
+                inherit_proxy=False,
+                force=True,
+                enable=True,
+                now=True,
+                print=False,
+            )
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}, clear=False),
+                mock.patch.object(cli, "systemd_user_dir", return_value=Path(tmp) / "systemd"),
+                mock.patch.object(cli.shutil, "which", side_effect=lambda command: "/usr/bin/systemctl" if command == "systemctl" else None),
+                mock.patch.object(cli, "run_systemctl", return_value=0) as run_systemctl,
+            ):
+                self.assertEqual(cli.install_systemd(args), 0)
+
+            self.assertEqual(
+                run_systemctl.call_args_list,
+                [
+                    mock.call(["daemon-reload"]),
+                    mock.call(["enable", "codex-long-task-wakeup.service"]),
+                    mock.call(["reload", "codex-long-task-wakeup.service"]),
+                ],
+            )
+
+    def test_supervisor_config_does_not_embed_proxy_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex-home"
+            proxy = home / "long-task-wakeup" / "service-proxy.env"
+            proxy.parent.mkdir(parents=True)
+            proxy.write_text("HTTPS_PROXY=https://user:secret@proxy.example:8443\n", encoding="utf-8")
+            args = argparse.Namespace(
+                name="codex-long-task-wakeup",
+                queue_dir="/tmp/queue",
+                interval=2.0,
+                retries=3,
+                retry_delay=30.0,
+                retry_backoff=2.0,
+                resume_timeout=3600.0,
+                exec_start="/usr/local/bin/codex-long-task-wakeup",
+                codex_bin="/usr/local/bin/codex",
+                path="/bin",
+            )
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}, clear=False):
+                text = cli.supervisor_config_text(args)
+
+            self.assertIn(f"{cli.PROXY_ENV_FILE_ENV}=", text)
+            self.assertNotIn("secret@proxy.example", text)
+
+    def test_proxy_parser_rejects_values_unsafe_for_service_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / ".env"
+            source.write_text("HTTPS_PROXY=https://user:bad password@proxy.example\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "unsafe for a systemd environment file"):
+                cli.parse_proxy_environment_file(source)
+
+    def test_clear_proxy_removes_persisted_proxy_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex-home"
+            proxy = home / "long-task-wakeup" / "service-proxy.env"
+            proxy.parent.mkdir(parents=True)
+            proxy.write_text("HTTP_PROXY=http://proxy.example:8080\n", encoding="utf-8")
+            args = argparse.Namespace(proxy_env_file=None, inherit_proxy=False, clear_proxy=True)
+
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}, clear=False):
+                self.assertIsNone(cli.configure_proxy_environment(args))
+
+            self.assertFalse(proxy.exists())
+
+    def test_daemon_hup_waits_for_live_delivery_workers_before_reexec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(
+                queue_dir=str(Path(tmp) / "queue"),
+                interval=2.0,
+                retries=3,
+                retry_delay=30.0,
+                retry_backoff=2.0,
+                resume_timeout=3600.0,
+                once=True,
+                max_items=None,
+            )
+            process = mock.Mock()
+            process.poll.return_value = None
+            delivery = cli.BackgroundResume(process=process, target_key="session:test", deadline=time.monotonic() + 60, request_id="inflight")
+
+            def signal_immediately(signum: int, handler: object) -> object:
+                if signum == signal.SIGHUP and callable(handler):
+                    handler(signal.SIGHUP, None)
+                return signal.SIG_DFL
+
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(Path(tmp) / "codex-home")}, clear=False),
+                mock.patch.dict(cli._BACKGROUND_RESUMES, {123: delivery}, clear=True),
+                mock.patch.object(cli.signal, "signal", side_effect=signal_immediately),
+                mock.patch.object(cli.os, "execv") as execv,
+            ):
+                self.assertEqual(cli.daemon(args), 0)
+
+            execv.assert_not_called()
+
+    def test_daemon_hup_reexecs_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(
+                queue_dir=str(Path(tmp) / "queue"),
+                interval=2.0,
+                retries=3,
+                retry_delay=30.0,
+                retry_backoff=2.0,
+                resume_timeout=3600.0,
+                once=False,
+                max_items=None,
+            )
+            expected = cli.daemon_reexec_command(args)
+
+            def signal_immediately(signum: int, handler: object) -> object:
+                if signum == signal.SIGHUP and callable(handler):
+                    handler(signal.SIGHUP, None)
+                return signal.SIG_DFL
+
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(Path(tmp) / "codex-home")}, clear=False),
+                mock.patch.object(cli.signal, "signal", side_effect=signal_immediately),
+                mock.patch.object(cli.os, "execv", side_effect=RuntimeError("reexec")) as execv,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "reexec"):
+                    cli.daemon(args)
+
+            execv.assert_called_once_with(sys.executable, expected)
+
     def test_install_systemd_starts_supervisor_in_container(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = argparse.Namespace(
