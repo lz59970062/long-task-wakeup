@@ -13,6 +13,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 try:
@@ -73,6 +74,7 @@ def build_prompt(
     lines = [
         "[long-task-callback]",
         "A long-running task explicitly called back into Codex.",
+        f"Callback time: {datetime.now().astimezone().isoformat(timespec='seconds')}",
         f"Task: {args.task}",
         f"Working directory: {args.cwd}",
     ]

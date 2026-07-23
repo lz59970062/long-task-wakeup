@@ -465,13 +465,14 @@ class CliTests(unittest.TestCase):
                 sandbox_mode="workspace-write",
             )
 
-            self.assertEqual(cli.enqueue_request(args, "wake up"), 0)
+            self.assertEqual(cli.enqueue_request(args, cli.build_prompt(args)), 0)
             queued = list((Path(tmp) / "pending").glob("*.json"))
             self.assertEqual(len(queued), 1)
             request = json.loads(queued[0].read_text(encoding="utf-8"))
 
             self.assertIn("codex-long-task-wakeup", request["prompt"])
             self.assertIn(" ack ", request["prompt"])
+            self.assertRegex(request["prompt"], r"Callback time: .+[+-]\d{2}:\d{2}")
             self.assertIn(str(request["id"]), request["prompt"])
             self.assertIn("Bound session: session-1", request["prompt"])
             self.assertIn("Binding source: --session", request["prompt"])
