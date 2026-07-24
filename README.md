@@ -252,6 +252,27 @@ runtime dependencies such as Node/NVM outside an interactive shell. Resume calls
 `sandbox_workspace_write.writable_roots`, so the resumed agent can write acknowledgement markers
 instead of getting stuck in read-only mode.
 
+When Codex Desktop's local App Server is available, an installed daemon first delivers a callback
+to the existing visible desktop task. The direct turn receives the queue directory as a writable
+sandbox root, so its acknowledgement command has the same write access as the CLI path. The daemon
+keeps the session lease until that Desktop turn completes; if `turn/start` was possibly accepted but
+its response is lost, it waits for ACK or timeout rather than injecting a duplicate CLI callback.
+If the App Server is unavailable before submission, it falls back to `codex exec resume`.
+The App Server socket is trusted only within the same Unix user account; the daemon verifies that
+peer UID on Linux and does not expose a production socket override. Treat same-UID processes as
+trusted local code. `CODEX_LONG_TASK_WAKEUP_APP_SERVER_SOCKET` is honored only with the explicit
+`CODEX_LONG_TASK_WAKEUP_ALLOW_APP_SERVER_SOCKET_OVERRIDE=1` test/debug opt-in.
+
+Set `CODEX_LONG_TASK_WAKEUP_DESKTOP_APP_SERVER=0` in a systemd user-service override to force the
+CLI-only path during compatibility troubleshooting; safely reload the daemon after its live
+deliveries drain.
+
+If a submitted Desktop turn cannot be confirmed before its timeout, the callback moves to `failed`
+with a retained **global** session lease rather than being retried. The durable lease blocks the
+same session from every queue using the configured target-lock directory. Inspect the Desktop task, then run
+`codex-long-task-wakeup cancel --queue-dir <queue> --id <callback-id>` to release that lease before
+manually scheduling a replacement callback.
+
 To persist proxy settings safely, copy only proxy variables from an existing `.env` file into a
 private daemon environment file:
 
@@ -919,9 +940,10 @@ codex exec resume --all <session-id> -
 checkpoint、生成文件或测试报告，并判断下一步。
 
 使用 `--via-daemon` 时，`run` 和 `done` 会把同一段 prompt 原子写成 JSON 队列项。
-`codex-long-task-wakeup daemon` 随后从自己的外部环境读取队列，并执行
-`codex exec resume --all ... -`。这样可以避免 `resume -> tool sandbox -> resume` 的递归链，
-也就不会继承嵌套 Codex 工具 sandbox 的文件系统或网络限制。
+对于绑定的 Desktop session，daemon 会优先通过本地 App Server 创建可见 turn；仅在提交前
+发现该服务不可用时才执行 `codex exec resume --all ... -`。这样可以避免
+`resume -> tool sandbox -> resume` 的递归链，也就不会继承嵌套 Codex 工具 sandbox 的文件系统
+或网络限制。若 `turn/start` 的结果未知，daemon 保留租约并要求人工恢复，不会自动重投。
 
 ## 不干扰任务逻辑的保证
 

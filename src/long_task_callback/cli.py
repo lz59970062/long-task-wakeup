@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from email.message import EmailMessage
 import hashlib
 import importlib.resources as resources
 import json
 import os
 import re
+import secrets
 import signal
 import shlex
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import time
@@ -43,6 +47,9 @@ ACTIVE_STATE = "active"
 LOCKS_STATE = "locks"
 TARGET_LOCK_DIR_ENV = "CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR"
 PROXY_ENV_FILE_ENV = "CODEX_LONG_TASK_WAKEUP_PROXY_ENV_FILE"
+DESKTOP_APP_SERVER_ENV = "CODEX_LONG_TASK_WAKEUP_DESKTOP_APP_SERVER"
+APP_SERVER_SOCKET_ENV = "CODEX_LONG_TASK_WAKEUP_APP_SERVER_SOCKET"
+ALLOW_APP_SERVER_SOCKET_OVERRIDE_ENV = "CODEX_LONG_TASK_WAKEUP_ALLOW_APP_SERVER_SOCKET_OVERRIDE"
 PROXY_ENV_NAMES = (
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -195,6 +202,7 @@ def systemd_service_text(args: argparse.Namespace) -> str:
             "Environment=PYTHONUNBUFFERED=1",
             f"Environment={systemd_quote(f'PATH={path}')}",
             f"Environment={systemd_quote(f'CODEX_LONG_TASK_WAKEUP_CODEX_BIN={codex_bin}')}",
+            f"Environment={systemd_quote(f'{DESKTOP_APP_SERVER_ENV}=1')}",
             f"Environment={systemd_quote(f'{PROXY_ENV_FILE_ENV}={service_proxy_env_path()}')}",
             f"EnvironmentFile=-{service_proxy_env_path()}",
             "",
@@ -645,6 +653,122 @@ def target_lock_path(request: dict[str, object]) -> Path | None:
     return target_lock_dir() / f"{digest}.lock"
 
 
+def retained_target_lease_path(request: dict[str, object]) -> Path | None:
+    path = target_lock_path(request)
+    if path is None:
+        return None
+    return path.with_suffix(".retained.json")
+
+
+def retained_target_lease_lock_path(request: dict[str, object]) -> Path | None:
+    path = target_lock_path(request)
+    if path is None:
+        return None
+    return path.with_suffix(".retained.lock")
+
+
+def acquire_retained_target_lease_lock(
+    request: dict[str, object],
+    *,
+    blocking: bool,
+) -> tuple[object, Path] | None:
+    path = retained_target_lease_lock_path(request)
+    if path is None:
+        return None
+    return acquire_path_lock(path, blocking=blocking)
+
+
+def retained_target_lease_is_held(request: dict[str, object]) -> bool:
+    path = retained_target_lease_path(request)
+    if path is None or not path.exists():
+        return False
+    lock = acquire_retained_target_lease_lock(request, blocking=False)
+    if lock is None:
+        return True
+    try:
+        if not path.exists():
+            return False
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return True
+        if not isinstance(record, dict):
+            return True
+        request_id = record.get("request_id")
+        queue_root = record.get("queue_dir")
+        if not isinstance(request_id, str) or not isinstance(queue_root, str) or not queue_root:
+            return True
+        root = Path(queue_root)
+        if not ack_path(root, request_id).exists() and not request_path(root, "canceled", request_id).exists():
+            return True
+        try:
+            path.unlink()
+            fsync_directory(path.parent)
+        except OSError:
+            return True
+        return False
+    finally:
+        release_owner_lock(lock, remove=False)
+
+
+def retain_target_lease(root: Path, request: dict[str, object]) -> None:
+    """Persist a cross-queue recovery lease while the target flock is held."""
+    path = retained_target_lease_path(request)
+    request_id = request.get("id")
+    if path is None or not isinstance(request_id, str) or not request_id:
+        raise ValueError("manual recovery requires a session target and request id")
+    record = {
+        "version": 1,
+        "request_id": request_id,
+        "queue_dir": str(root.resolve()),
+        "recorded_at": time.time(),
+    }
+    lock = acquire_retained_target_lease_lock(request, blocking=True)
+    if lock is None:  # pragma: no cover - blocking lock acquisition always succeeds
+        raise RuntimeError(f"could not lock retained target lease: {path}")
+    try:
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError(f"retained target lease is unreadable: {path}") from exc
+            if not isinstance(existing, dict) or (
+                existing.get("request_id") != request_id
+                or existing.get("queue_dir") != str(root.resolve())
+            ):
+                raise RuntimeError(f"retained target lease already exists: {path}")
+            return
+        write_request(path, record)
+    finally:
+        release_owner_lock(lock, remove=False)
+
+
+def release_retained_target_lease(root: Path, request: dict[str, object]) -> None:
+    """Release only the cross-queue recovery lease owned by this callback."""
+    path = retained_target_lease_path(request)
+    request_id = request.get("id")
+    if path is None or not isinstance(request_id, str):
+        return
+    lock = acquire_retained_target_lease_lock(request, blocking=True)
+    if lock is None:  # pragma: no cover - blocking lock acquisition always succeeds
+        raise RuntimeError(f"could not lock retained target lease: {path}")
+    try:
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"retained target lease is unreadable: {path}") from exc
+        if not isinstance(record, dict):
+            raise RuntimeError(f"retained target lease is malformed: {path}")
+        if record.get("request_id") != request_id or record.get("queue_dir") != str(root.resolve()):
+            return
+        path.unlink()
+        fsync_directory(path.parent)
+    finally:
+        release_owner_lock(lock, remove=False)
+
+
 def acquire_path_lock(path: Path, *, blocking: bool) -> tuple[object, Path] | None:
     if fcntl is None:  # pragma: no cover - supported deployments are POSIX
         raise RuntimeError("durable callback ownership requires POSIX flock support")
@@ -708,9 +832,11 @@ def target_has_live_resume(root: Path, request: dict[str, object]) -> bool:
         return False
     if target_lock_is_held(request):
         return True
+    if retained_target_lease_is_held(request):
+        return True
     if any(delivery.target_key == key for delivery in _BACKGROUND_RESUMES.values()):
         return True
-    for state in ("running", "canceled"):
+    for state in ("running", "canceled", "failed"):
         for path in (root / state).glob("*.json"):
             try:
                 live_request = json.loads(path.read_text(encoding="utf-8"))
@@ -719,7 +845,10 @@ def target_has_live_resume(root: Path, request: dict[str, object]) -> bool:
             if (
                 isinstance(live_request, dict)
                 and callback_target_key(live_request) == key
-                and delivery_lock_is_held(root, path.stem)
+                and (
+                    (state == "failed" and live_request.get("retain_target_lease") is True)
+                    or delivery_lock_is_held(root, path.stem)
+                )
             ):
                 return True
     return False
@@ -764,6 +893,376 @@ def terminate_process_group(process: subprocess.Popen[str], grace: float = 5.0) 
         process.wait()
 
 
+class AppServerProtocolError(RuntimeError):
+    """The local Codex App Server did not accept a desktop callback."""
+
+
+class AppServerTimeout(AppServerProtocolError):
+    """The local Codex App Server did not respond before the deadline."""
+
+
+class AppServerRpcError(AppServerProtocolError):
+    """The local Codex App Server explicitly rejected a JSON-RPC request."""
+
+
+def desktop_app_server_socket(request: dict[str, object]) -> Path | None:
+    target = request.get("target")
+    if (
+        not truthy_env(DESKTOP_APP_SERVER_ENV)
+        or not isinstance(target, dict)
+        or target.get("kind") != "session"
+        or not isinstance(target.get("value"), str)
+        or not target["value"]
+    ):
+        return None
+    configured = os.environ.get(APP_SERVER_SOCKET_ENV)
+    if configured and truthy_env(ALLOW_APP_SERVER_SOCKET_OVERRIDE_ENV):
+        return Path(configured).expanduser()
+    return codex_home() / "app-server-control" / "app-server-control.sock"
+
+
+def desktop_sandbox_policy(request: dict[str, object]) -> dict[str, object] | None:
+    if request.get("sandbox_mode") != "workspace-write":
+        return None
+    queue_root = request.get("queue_dir")
+    if not isinstance(queue_root, str) or not queue_root:
+        return None
+    root = Path(queue_root).expanduser()
+    if not root.is_absolute():
+        return None
+    return {"type": "workspaceWrite", "writableRoots": [str(root)]}
+
+
+class AppServerConnection:
+    def __init__(self, path: Path, timeout: float) -> None:
+        self.path = path
+        self.timeout = timeout
+        self.socket: socket.socket | None = None
+        self.buffer = b""
+        self.request_id = 0
+        self.notifications: list[dict[str, object]] = []
+
+    def connect(self) -> None:
+        if not self.path.is_socket():
+            raise AppServerProtocolError(f"control socket unavailable at {self.path}")
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        deadline = time.monotonic() + self.timeout
+        try:
+            connection.settimeout(max(0.1, deadline - time.monotonic()))
+            connection.connect(str(self.path))
+            self._verify_peer_uid(connection)
+            key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
+            request = (
+                "GET / HTTP/1.1\r\n"
+                "Host: localhost\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\n"
+                "Sec-WebSocket-Version: 13\r\n\r\n"
+            )
+            connection.sendall(request.encode("ascii"))
+            self.socket = connection
+            header = self._read_headers(deadline)
+            lines = header.decode("iso-8859-1").split("\r\n")
+            expected_accept = base64.b64encode(
+                hashlib.sha1(f"{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11".encode("ascii")).digest()
+            ).decode("ascii")
+            headers = {
+                name.strip().lower(): value.strip()
+                for line in lines[1:]
+                if ":" in line
+                for name, value in [line.split(":", 1)]
+            }
+            if (
+                not lines
+                or lines[0] != "HTTP/1.1 101 Switching Protocols"
+                or headers.get("sec-websocket-accept") != expected_accept
+                or not self._header_has_token(headers, "connection", "upgrade")
+                or not self._header_has_token(headers, "upgrade", "websocket")
+            ):
+                raise AppServerProtocolError("control socket rejected WebSocket upgrade")
+        except BaseException:
+            connection.close()
+            self.socket = None
+            raise
+
+    def close(self) -> None:
+        if self.socket is not None:
+            self.socket.close()
+            self.socket = None
+
+    def request(self, method: str, params: dict[str, object]) -> object:
+        self.request_id += 1
+        request_id = self.request_id
+        self._send_frame(0x1, json.dumps({"id": request_id, "method": method, "params": params}))
+        deadline = time.monotonic() + self.timeout
+        while True:
+            response = self._receive_json(deadline)
+            if "method" in response:
+                self.notifications.append(response)
+                continue
+            if response.get("id") != request_id:
+                raise AppServerProtocolError("control socket returned an unexpected response id")
+            if "error" in response:
+                raise AppServerRpcError(f"App Server {method} error: {response['error']}")
+            if "result" not in response:
+                raise AppServerProtocolError(f"App Server {method} returned no result")
+            return response["result"]
+
+    def notify(self, method: str, params: dict[str, object]) -> None:
+        self._send_frame(0x1, json.dumps({"method": method, "params": params}))
+
+    def wait_for_turn_completion(self, thread_id: str, turn_id: str, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.notifications:
+                message = self.notifications.pop(0)
+            else:
+                try:
+                    message = self._receive_json(deadline)
+                except AppServerTimeout:
+                    return False
+            params = message.get("params")
+            if (
+                message.get("method") == "turn/completed"
+                and isinstance(params, dict)
+                and params.get("threadId") == thread_id
+                and isinstance(params.get("turn"), dict)
+                and params["turn"].get("id") == turn_id
+            ):
+                return True
+
+    @staticmethod
+    def _header_has_token(headers: dict[str, str], name: str, expected: str) -> bool:
+        return expected in {token.strip().lower() for token in headers.get(name, "").split(",")}
+
+    @staticmethod
+    def _verify_peer_uid(connection: socket.socket) -> None:
+        if not hasattr(socket, "SO_PEERCRED"):
+            return
+        try:
+            credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+            _peer_pid, peer_uid, _peer_gid = struct.unpack("3i", credentials)
+        except OSError as exc:
+            raise AppServerProtocolError(f"could not verify control-socket peer: {exc}") from exc
+        if peer_uid != os.geteuid():
+            raise AppServerProtocolError("control socket peer does not belong to this user")
+
+    def _read_headers(self, deadline: float) -> bytes:
+        while b"\r\n\r\n" not in self.buffer:
+            if len(self.buffer) >= 65_536:
+                raise AppServerProtocolError("control socket response headers exceed 64 KiB")
+            self.buffer += self._receive_bytes(4096, deadline)
+        header, self.buffer = self.buffer.split(b"\r\n\r\n", 1)
+        return header
+
+    def _receive_json(self, deadline: float) -> dict[str, object]:
+        opcode, payload = self._receive_message(deadline)
+        if opcode == 0x8:
+            raise AppServerProtocolError("control socket closed during request")
+        if opcode != 0x1:
+            raise AppServerProtocolError("control socket sent a non-text message")
+        try:
+            message = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AppServerProtocolError(f"invalid control-socket response: {exc}") from exc
+        if not isinstance(message, dict):
+            raise AppServerProtocolError("control socket response was not a JSON object")
+        if "method" in message and not isinstance(message["method"], str):
+            raise AppServerProtocolError("control socket notification method was not a string")
+        if "id" not in message and "method" not in message:
+            raise AppServerProtocolError("control socket response had neither id nor method")
+        return message
+
+    def _receive_message(self, deadline: float) -> tuple[int, bytes]:
+        final, opcode, payload = self._receive_frame(deadline)
+        while opcode == 0x9:
+            self._send_frame(0xA, payload)
+            final, opcode, payload = self._receive_frame(deadline)
+        if final or opcode in (0x8, 0xA):
+            return opcode, payload
+        if opcode != 0x1:
+            raise AppServerProtocolError("control socket started an unsupported fragmented message")
+        chunks = [payload]
+        while True:
+            final, continuation_opcode, continuation = self._receive_frame(deadline)
+            if continuation_opcode == 0x9:
+                self._send_frame(0xA, continuation)
+                continue
+            if continuation_opcode != 0x0:
+                raise AppServerProtocolError("control socket interrupted a fragmented message")
+            chunks.append(continuation)
+            if sum(len(chunk) for chunk in chunks) > 1_048_576:
+                raise AppServerProtocolError("control socket message exceeds 1 MiB")
+            if final:
+                return opcode, b"".join(chunks)
+
+    def _receive_frame(self, deadline: float) -> tuple[bool, int, bytes]:
+        header = self._read_exact(2, deadline)
+        final = bool(header[0] & 0x80)
+        if header[0] & 0x70:
+            raise AppServerProtocolError("control socket frame used unsupported RSV bits")
+        opcode = header[0] & 0x0F
+        masked = bool(header[1] & 0x80)
+        if masked:
+            raise AppServerProtocolError("control socket server frame must not be masked")
+        length = header[1] & 0x7F
+        if length == 126:
+            length = struct.unpack("!H", self._read_exact(2, deadline))[0]
+        elif length == 127:
+            length = struct.unpack("!Q", self._read_exact(8, deadline))[0]
+        if opcode >= 0x8 and (not final or length > 125):
+            raise AppServerProtocolError("control socket sent an invalid control frame")
+        if length > 1_048_576:
+            raise AppServerProtocolError("control socket frame exceeds 1 MiB")
+        mask = self._read_exact(4, deadline) if masked else None
+        payload = self._read_exact(length, deadline)
+        if mask is not None:
+            payload = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+        return final, opcode, payload
+
+    def _send_frame(self, opcode: int, text: str | bytes) -> None:
+        if self.socket is None:
+            raise AppServerProtocolError("control socket is not connected")
+        payload = text.encode("utf-8") if isinstance(text, str) else text
+        if len(payload) > 1_048_576:
+            raise AppServerProtocolError("control socket request exceeds 1 MiB")
+        if len(payload) < 126:
+            header = bytes([0x80 | opcode, 0x80 | len(payload)])
+        elif len(payload) <= 0xFFFF:
+            header = bytes([0x80 | opcode, 0x80 | 126]) + struct.pack("!H", len(payload))
+        else:
+            header = bytes([0x80 | opcode, 0x80 | 127]) + struct.pack("!Q", len(payload))
+        mask = secrets.token_bytes(4)
+        encoded = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+        self.socket.sendall(header + mask + encoded)
+
+    def _read_exact(self, size: int, deadline: float) -> bytes:
+        while len(self.buffer) < size:
+            self.buffer += self._receive_bytes(size - len(self.buffer), deadline)
+        value, self.buffer = self.buffer[:size], self.buffer[size:]
+        return value
+
+    def _receive_bytes(self, size: int, deadline: float) -> bytes:
+        if self.socket is None:
+            raise AppServerProtocolError("control socket is not connected")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AppServerTimeout("control socket request timed out")
+        self.socket.settimeout(remaining)
+        try:
+            value = self.socket.recv(size)
+        except socket.timeout as exc:
+            raise AppServerTimeout("control socket request timed out") from exc
+        except OSError as exc:
+            raise AppServerProtocolError(f"control socket read failed: {exc}") from exc
+        if not value:
+            raise AppServerProtocolError("control socket closed unexpectedly")
+        return value
+
+
+class DesktopAppServerDelivery:
+    def __init__(self, connection: AppServerConnection | None, thread_id: str, turn_id: str | None) -> None:
+        self.connection = connection
+        self.thread_id = thread_id
+        self.turn_id = turn_id
+
+    def wait_for_completion(self, timeout: float) -> bool:
+        if self.connection is None or self.turn_id is None:
+            time.sleep(timeout)
+            return False
+        try:
+            return self.connection.wait_for_turn_completion(self.thread_id, self.turn_id, timeout)
+        except AppServerProtocolError as exc:
+            print(
+                f"codex-long-task-wakeup: desktop App Server completion stream unavailable: {exc}; "
+                "retaining the callback lease until timeout",
+                file=sys.stderr,
+            )
+            self.close()
+            return False
+
+    def close(self) -> None:
+        if self.connection is not None:
+            self.connection.close()
+            self.connection = None
+
+
+def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServerDelivery | None:
+    request = payload.get("request")
+    if not isinstance(request, dict):
+        return None
+    socket_path = desktop_app_server_socket(request)
+    target = request.get("target")
+    sandbox_policy = desktop_sandbox_policy(request)
+    if socket_path is None or sandbox_policy is None or not isinstance(target, dict) or not isinstance(target.get("value"), str):
+        return None
+    connection = AppServerConnection(socket_path, min(15.0, max(1.0, float(payload["timeout"]))))
+    turn_start_submitted = False
+    try:
+        connection.connect()
+        connection.request(
+            "initialize",
+            {
+                "clientInfo": {"name": "long-task-wakeup", "version": __version__},
+                "capabilities": {"experimentalApi": True},
+            },
+        )
+        connection.notify("initialized", {})
+        connection.request("thread/resume", {"threadId": target["value"], "excludeTurns": True})
+        turn_params: dict[str, object] = {
+            "threadId": target["value"],
+            "cwd": str(payload["cwd"]),
+            "input": [{"type": "text", "text": str(payload["prompt"])}],
+            "sandboxPolicy": sandbox_policy,
+        }
+        approval_policy = request.get("approval_policy")
+        if isinstance(approval_policy, str) and approval_policy:
+            turn_params["approvalPolicy"] = approval_policy
+        approvals_reviewer = request.get("approvals_reviewer")
+        if isinstance(approvals_reviewer, str) and approvals_reviewer:
+            turn_params["approvalsReviewer"] = approvals_reviewer
+        turn_start_submitted = True
+        started = connection.request("turn/start", turn_params)
+        turn_id = None
+        if isinstance(started, dict) and isinstance(started.get("turn"), dict):
+            candidate = started["turn"].get("id")
+            turn_id = candidate if isinstance(candidate, str) and candidate else None
+        if turn_id is None:
+            print(
+                "codex-long-task-wakeup: desktop App Server accepted turn/start without a turn id; "
+                "retaining the callback lease until timeout",
+                file=sys.stderr,
+            )
+            connection.close()
+            return DesktopAppServerDelivery(None, target["value"], None)
+        delivery = DesktopAppServerDelivery(connection, target["value"], turn_id)
+        connection = None
+        return delivery
+    except AppServerRpcError as exc:
+        if turn_start_submitted:
+            print(
+                f"codex-long-task-wakeup: desktop App Server rejected turn/start: {exc}; falling back to CLI",
+                file=sys.stderr,
+            )
+        else:
+            print(f"codex-long-task-wakeup: desktop App Server delivery unavailable: {exc}; falling back to CLI", file=sys.stderr)
+        return None
+    except (OSError, ValueError, TypeError, AppServerProtocolError) as exc:
+        if turn_start_submitted:
+            print(
+                f"codex-long-task-wakeup: desktop App Server turn/start outcome is unknown: {exc}; "
+                "waiting for ACK or timeout without CLI fallback",
+                file=sys.stderr,
+            )
+            return DesktopAppServerDelivery(None, target["value"], None)
+        print(f"codex-long-task-wakeup: desktop App Server delivery unavailable: {exc}; falling back to CLI", file=sys.stderr)
+        return None
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def delivery_worker_main() -> int:
     """Own one Codex resume and its locks without leaking them into Codex."""
     encoded_fds = os.environ.get("CODEX_LONG_TASK_DELIVERY_LOCK_FDS")
@@ -777,6 +1276,7 @@ def delivery_worker_main() -> int:
     timeout = max(1.0, float(payload["timeout"]))
     result: dict[str, object] = {"returncode": 127}
     process: subprocess.Popen[str] | None = None
+    desktop_delivery: DesktopAppServerDelivery | None = None
 
     class WorkerInterrupted(Exception):
         def __init__(self, signum: int) -> None:
@@ -792,6 +1292,43 @@ def delivery_worker_main() -> int:
             result = {"returncode": 0, "skipped": "already_acknowledged"}
         elif Path(str(payload["canceled_path"])).exists():
             result = {"returncode": 0, "skipped": "canceled"}
+        elif (desktop_delivery := start_desktop_app_server_turn(payload)) is not None:
+            deadline = time.monotonic() + timeout
+            while True:
+                acknowledged = Path(str(payload["ack_path"])).exists()
+                canceled = Path(str(payload["canceled_path"])).exists()
+                if canceled:
+                    result = {"returncode": 0, "delivery": "desktop_app_server", "skipped": "canceled"}
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    request = payload.get("request")
+                    queue_root = payload.get("queue_dir")
+                    if isinstance(request, dict) and isinstance(queue_root, str):
+                        retain_target_lease(Path(queue_root), request)
+                        if Path(str(payload["ack_path"])).exists() or Path(str(payload["canceled_path"])).exists():
+                            release_retained_target_lease(Path(queue_root), request)
+                            result = {
+                                "returncode": 0,
+                                "delivery": "desktop_app_server",
+                                "skipped": "acknowledged_or_canceled_after_timeout",
+                            }
+                            break
+                    result = {
+                        "returncode": 125,
+                        "timed_out": True,
+                        "delivery": "desktop_app_server",
+                        "manual_recovery_required": True,
+                    }
+                    break
+                if desktop_delivery.wait_for_completion(min(0.1, remaining)):
+                    acknowledged = Path(str(payload["ack_path"])).exists()
+                    result = {
+                        "returncode": 0 if acknowledged else 1,
+                        "delivery": "desktop_app_server",
+                        "turn_completed": True,
+                    }
+                    break
         else:
             process = subprocess.Popen(
                 [str(part) for part in command],
@@ -818,6 +1355,8 @@ def delivery_worker_main() -> int:
             terminate_process_group(process)
         result = {"returncode": 127, "error": f"{type(exc).__name__}: {exc}"}
     finally:
+        if desktop_delivery is not None:
+            desktop_delivery.close()
         for lock_fd in lock_fds:
             try:
                 os.close(lock_fd)
@@ -891,6 +1430,10 @@ def run_resume_until_exit_or_ack(
     if target_lock is None:
         release_owner_lock(delivery_lock, remove=False)
         raise TargetLeaseUnavailable(callback_target_key(request) or "unknown target")
+    if retained_target_lease_is_held(request):
+        release_owner_lock(delivery_lock, remove=False)
+        release_owner_lock(target_lock, remove=False)
+        raise TargetLeaseUnavailable(callback_target_key(request) or "unknown target")
     if ack_path(root, request_id).exists():
         release_owner_lock(delivery_lock, remove=False)
         release_owner_lock(target_lock, remove=False)
@@ -907,6 +1450,8 @@ def run_resume_until_exit_or_ack(
         "command": command,
         "prompt": str(request["prompt"]),
         "cwd": str(request["cwd"]),
+        "request": request,
+        "queue_dir": str(root),
         "timeout": timeout,
         "ack_path": str(ack_path(root, request_id)),
         "canceled_path": str(request_path(root, "canceled", request_id)),
@@ -1142,7 +1687,7 @@ def remove_live_request_copies(root: Path, request_id: str) -> None:
     """Remove dispatchable copies after a durable cancellation tombstone exists."""
     for _ in range(2):
         removed = False
-        for state in (ACTIVE_STATE, "pending", "running"):
+        for state in (ACTIVE_STATE, "pending", "running", "failed"):
             path = request_path(root, state, request_id)
             try:
                 path.unlink()
@@ -1307,7 +1852,7 @@ def cancel_one(root: Path, request_id: str, message: str | None = None) -> bool:
         print(f"codex-long-task-wakeup: callback {request_id} is already canceled in {root}", file=sys.stderr)
         return True
 
-    for state in (ACTIVE_STATE, "pending", "running"):
+    for state in (ACTIVE_STATE, "pending", "running", "failed"):
         source = request_path(root, state, request_id)
         if not source.exists():
             continue
@@ -1330,6 +1875,14 @@ def cancel_one(root: Path, request_id: str, message: str | None = None) -> bool:
         # honor it, so cancellation wins even if a state transition races us.
         write_request(canceled, data)
         remove_live_request_copies(root, request_id)
+        try:
+            release_retained_target_lease(root, data)
+        except RuntimeError as exc:
+            print(
+                f"codex-long-task-wakeup: warning: could not release retained target lease for "
+                f"{request_id}: {exc}",
+                file=sys.stderr,
+            )
         print(f"codex-long-task-wakeup: canceled callback {request_id} from {state} in {root}", file=sys.stderr)
         return True
 
@@ -1340,7 +1893,7 @@ def cancel_one(root: Path, request_id: str, message: str | None = None) -> bool:
 def cancel_all(root: Path, message: str | None = None) -> int:
     ensure_daemon_dirs(root)
     request_ids: set[str] = set()
-    for state in (ACTIVE_STATE, "pending", "running"):
+    for state in (ACTIVE_STATE, "pending", "running", "failed"):
         request_ids.update(path.stem for path in (root / state).glob("*.json"))
     canceled = 0
     for request_id in sorted(request_ids):
@@ -1403,13 +1956,29 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
                 f"codex-long-task-wakeup: warning: daemon callback {running.name} timed out",
                 file=sys.stderr,
             )
-        destination_dir = root / ("done" if acked else "failed")
+        if result.returncode == 125 and not acked:
+            request["last_error"] = "Desktop callback outcome is unknown; automatic retry suppressed to prevent duplicate delivery"
+            request["retain_target_lease"] = True
+            destination_dir = root / "failed"
+            print(
+                f"codex-long-task-wakeup: warning: daemon callback {running.name} has an unknown Desktop outcome; "
+                "manual recovery is required to avoid duplicate delivery",
+                file=sys.stderr,
+            )
+            if running.exists():
+                write_request(running, request)
+            else:
+                return True
+        else:
+            if result.returncode == 125 and acked:
+                release_retained_target_lease(root, request)
+            destination_dir = root / ("done" if acked else "failed")
         if result.returncode != 0:
             print(
                 f"codex-long-task-wakeup: warning: daemon callback {running.name} exited with {result.returncode}",
                 file=sys.stderr,
             )
-        if not acked:
+        if not acked and result.returncode != 125:
             request.setdefault("last_error", f"missing acknowledgement marker after exit {result.returncode}")
             max_retries = max(0, int(getattr(args, "retries", DEFAULT_RETRIES)))
             if attempts <= max_retries:
@@ -1445,6 +2014,8 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
         if destination_dir == root / "failed" and ack_path(root, request_id).exists():
             try:
                 move_request(finalized, root / "done")
+                if request.get("retain_target_lease") is True:
+                    release_retained_target_lease(root, request)
             except FileNotFoundError:
                 pass
     except FileNotFoundError:
@@ -2019,6 +2590,7 @@ def daemon_environment(args: argparse.Namespace, *, include_proxy_values: bool =
     values = {
         "PYTHONUNBUFFERED": "1",
         "CODEX_LONG_TASK_WAKEUP_CODEX_BIN": codex_bin_path(args),
+        DESKTOP_APP_SERVER_ENV: os.environ.get(DESKTOP_APP_SERVER_ENV, "1"),
         "PATH": getattr(args, "path", None) or os.environ.get("PATH", ""),
         PROXY_ENV_FILE_ENV: str(service_proxy_env_path()),
     }
@@ -2350,12 +2922,18 @@ def ack(args: argparse.Namespace) -> int:
     if args.message:
         payload["message"] = args.message
     write_request(marker, payload)
-    failed = request_path(root, "failed", args.id)
-    if failed.exists():
+    for state in ("failed", "running"):
+        source = request_path(root, state, args.id)
+        if not source.exists():
+            continue
         try:
-            move_request(failed, root / "done")
+            request = load_request(source)
+            if state == "failed":
+                move_request(source, root / "done")
+            release_retained_target_lease(root, request)
         except FileNotFoundError:
-            pass
+            continue
+        break
     print(f"codex-long-task-wakeup: acknowledged callback {args.id} in {root}", file=sys.stderr)
     return 0
 

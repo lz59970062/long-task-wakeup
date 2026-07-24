@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
+import io
 import json
 import os
 import shlex
 import signal
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -639,41 +644,123 @@ class CliTests(unittest.TestCase):
     def test_late_ack_reconciles_failed_request_to_done(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "queue"
-            self._write_request(root, "late-failed-ack", tmp)
+            target = {"kind": "session", "value": "late-ack-thread"}
+            self._write_request(root, "late-failed-ack", tmp, target=target)
             cli.ensure_daemon_dirs(root)
             cli.move_request(
                 cli.request_path(root, "pending", "late-failed-ack"),
                 root / "failed",
             )
+            failed = cli.load_request(cli.request_path(root, "failed", "late-failed-ack"))
+            failed["retain_target_lease"] = True
+            cli.write_request(cli.request_path(root, "failed", "late-failed-ack"), failed)
             args = argparse.Namespace(queue_dir=str(root), id="late-failed-ack", message="late delivery completed")
 
-            self.assertEqual(cli.ack(args), 0)
-            self.assertFalse(cli.request_path(root, "failed", "late-failed-ack").exists())
-            self.assertTrue(cli.request_path(root, "done", "late-failed-ack").exists())
-            self.assertTrue(cli.ack_path(root, "late-failed-ack").exists())
+            with mock.patch.dict(os.environ, {cli.TARGET_LOCK_DIR_ENV: str(Path(tmp) / "target-locks")}, clear=False):
+                cli.retain_target_lease(root, failed)
+                self.assertEqual(cli.ack(args), 0)
+                self.assertFalse(cli.request_path(root, "failed", "late-failed-ack").exists())
+                self.assertTrue(cli.request_path(root, "done", "late-failed-ack").exists())
+                self.assertTrue(cli.ack_path(root, "late-failed-ack").exists())
+                self.assertFalse(cli.retained_target_lease_is_held(failed))
+
+    def test_late_ack_releases_manual_recovery_lease_across_queue_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root_a = Path(tmp) / "queue-a"
+            root_b = Path(tmp) / "queue-b"
+            target = {"kind": "session", "value": "late-ack-thread"}
+            self._write_request(root_a, "late-failed-ack", tmp, target=target)
+            cli.ensure_daemon_dirs(root_a)
+            cli.move_request(cli.request_path(root_a, "pending", "late-failed-ack"), root_a / "failed")
+            failed = cli.load_request(cli.request_path(root_a, "failed", "late-failed-ack"))
+            failed["retain_target_lease"] = True
+            cli.write_request(cli.request_path(root_a, "failed", "late-failed-ack"), failed)
+            self._write_request(root_b, "same-session", tmp, target=target)
+            args = argparse.Namespace(queue_dir=str(root_a), id="late-failed-ack", message=None)
+
+            with mock.patch.dict(os.environ, {cli.TARGET_LOCK_DIR_ENV: str(Path(tmp) / "target-locks")}, clear=False):
+                cli.retain_target_lease(root_a, failed)
+                self.assertIsNone(cli.select_pending(root_b, time.time()))
+                self.assertEqual(cli.ack(args), 0)
+                self.assertEqual(cli.select_pending(root_b, time.time()).stem, "same-session")
+
+    def test_restart_reconciles_retained_marker_after_acknowledged_done_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root_a = Path(tmp) / "queue-a"
+            root_b = Path(tmp) / "queue-b"
+            target = {"kind": "session", "value": "restart-thread"}
+            self._write_request(root_a, "reconciled", tmp, target=target)
+            cli.ensure_daemon_dirs(root_a)
+            cli.move_request(cli.request_path(root_a, "pending", "reconciled"), root_a / "done")
+            completed = cli.load_request(cli.request_path(root_a, "done", "reconciled"))
+            self._write_request(root_b, "same-session", tmp, target=target)
+
+            with mock.patch.dict(os.environ, {cli.TARGET_LOCK_DIR_ENV: str(Path(tmp) / "target-locks")}, clear=False):
+                cli.retain_target_lease(root_a, completed)
+                cli.write_request(cli.ack_path(root_a, "reconciled"), {"id": "reconciled", "marked_at": time.time()})
+                self.assertEqual(cli.select_pending(root_b, time.time()).stem, "same-session")
+                self.assertFalse(cli.retained_target_lease_is_held(completed))
+
+    def test_marker_reconciliation_blocks_while_transaction_lock_is_held(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            target = {"kind": "session", "value": "reconcile-thread"}
+            self._write_request(root, "reconciled", tmp, target=target)
+            request = cli.load_request(cli.request_path(root, "pending", "reconciled"))
+
+            with mock.patch.dict(os.environ, {cli.TARGET_LOCK_DIR_ENV: str(Path(tmp) / "target-locks")}, clear=False):
+                cli.retain_target_lease(root, request)
+                cli.write_request(cli.ack_path(root, "reconciled"), {"id": "reconciled", "marked_at": time.time()})
+                lock = cli.acquire_retained_target_lease_lock(request, blocking=False)
+                self.assertIsNotNone(lock)
+                try:
+                    self.assertTrue(cli.retained_target_lease_is_held(request))
+                finally:
+                    cli.release_owner_lock(lock, remove=False)
+                self.assertFalse(cli.retained_target_lease_is_held(request))
+
+    def test_ack_releases_timeout_marker_while_parent_still_marks_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            target = {"kind": "session", "value": "timeout-thread"}
+            self._write_request(root, "timeout-ack", tmp, target=target)
+            cli.ensure_daemon_dirs(root)
+            cli.move_request(cli.request_path(root, "pending", "timeout-ack"), root / "running")
+            request = cli.load_request(cli.request_path(root, "running", "timeout-ack"))
+            args = argparse.Namespace(queue_dir=str(root), id="timeout-ack", message=None)
+
+            with mock.patch.dict(os.environ, {cli.TARGET_LOCK_DIR_ENV: str(Path(tmp) / "target-locks")}, clear=False):
+                cli.retain_target_lease(root, request)
+                self.assertEqual(cli.ack(args), 0)
+                self.assertTrue(cli.request_path(root, "running", "timeout-ack").exists())
+                self.assertFalse(cli.retained_target_lease_is_held(request))
 
     def test_ack_racing_final_failed_transition_converges_to_done(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "queue"
             request_id = "final-transition-ack"
-            self._write_request(root, request_id, tmp)
+            self._write_request(root, request_id, tmp, target={"kind": "session", "value": "race-thread"})
             args = argparse.Namespace(retries=0, retry_delay=0.0, retry_backoff=2.0)
             original_move = cli.move_request
 
             def move_with_late_ack(source: Path, destination: Path) -> Path:
                 if source.parent.name == "running" and destination == root / "failed":
+                    cli.retain_target_lease(root, cli.load_request(source))
                     cli.write_request(
                         cli.ack_path(root, request_id),
                         {"id": request_id, "marked_at": time.time()},
                     )
                 return original_move(source, destination)
 
-            completed = subprocess.CompletedProcess(["codex"], 0)
+            completed = subprocess.CompletedProcess(["codex"], 125)
             with (
+                mock.patch.dict(os.environ, {cli.TARGET_LOCK_DIR_ENV: str(Path(tmp) / "target-locks")}, clear=False),
                 mock.patch.object(cli, "run_resume_until_exit_or_ack", return_value=(completed, False, False)),
                 mock.patch.object(cli, "move_request", side_effect=move_with_late_ack),
             ):
                 self.assertTrue(cli.process_one(root, args))
+                request = cli.load_request(cli.request_path(root, "done", request_id))
+                self.assertFalse(cli.retained_target_lease_is_held(request))
 
             self.assertTrue(cli.ack_path(root, request_id).exists())
             self.assertTrue(cli.request_path(root, "done", request_id).exists())
@@ -814,6 +901,43 @@ class CliTests(unittest.TestCase):
                     spawn.assert_not_called()
                 finally:
                     cli.release_owner_lock(lease, remove=False)
+
+            pending = cli.request_path(root_b, "pending", "contender")
+            self.assertTrue(pending.exists())
+            request = json.loads(pending.read_text(encoding="utf-8"))
+            self.assertEqual(request["attempts"], 0)
+            self.assertIn("target lease held", request["last_deferred_reason"])
+
+    def test_stale_selection_rechecks_retained_target_lease_before_worker_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root_a = Path(tmp) / "queue-a"
+            root_b = Path(tmp) / "queue-b"
+            target = {"kind": "session", "value": "stale-selection-session"}
+            failed = {
+                "version": 1,
+                "id": "desktop-unknown",
+                "created_at": 1.0,
+                "cwd": tmp,
+                "target": target,
+                "prompt": "wake up",
+                "retain_target_lease": True,
+            }
+            cli.ensure_daemon_dirs(root_a)
+            cli.write_request(cli.request_path(root_a, "failed", "desktop-unknown"), failed)
+            self._write_request(root_b, "contender", tmp, target=target)
+            args = argparse.Namespace(retries=3, retry_delay=0.0, retry_backoff=2.0, resume_timeout=10.0)
+
+            with mock.patch.dict(
+                os.environ,
+                {cli.TARGET_LOCK_DIR_ENV: str(Path(tmp) / "global-target-locks")},
+            ):
+                cli.retain_target_lease(root_a, failed)
+                with (
+                    mock.patch.object(cli, "target_has_live_resume", return_value=False),
+                    mock.patch.object(cli.subprocess, "Popen") as spawn,
+                ):
+                    self.assertTrue(cli.process_one(root_b, args))
+                spawn.assert_not_called()
 
             pending = cli.request_path(root_b, "pending", "contender")
             self.assertTrue(pending.exists())
@@ -1617,6 +1741,493 @@ class CliTests(unittest.TestCase):
             goal = cli.load_goal(root, "retry-goal")
             self.assertEqual(sendmail.call_count, 3)
             self.assertIn("blocked_email_exhausted_at", goal)
+
+    def test_desktop_app_server_delivery_preserves_turn_completion_and_unknown_submit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            def start_server(*, reply_to_turn_start: bool) -> tuple[Path, threading.Thread, list[dict[str, object]], list[BaseException]]:
+                socket_path = Path(tmp) / ("confirmed.sock" if reply_to_turn_start else "unknown.sock")
+                listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                listener.bind(str(socket_path))
+                listener.listen(1)
+                messages: list[dict[str, object]] = []
+                errors: list[BaseException] = []
+
+                def read_exact(connection: socket.socket, size: int) -> bytes:
+                    chunks = bytearray()
+                    while len(chunks) < size:
+                        chunk = connection.recv(size - len(chunks))
+                        if not chunk:
+                            raise AssertionError("fake App Server closed unexpectedly")
+                        chunks.extend(chunk)
+                    return bytes(chunks)
+
+                def read_frame(connection: socket.socket) -> dict[str, object]:
+                    first, second = read_exact(connection, 2)
+                    self.assertEqual(first & 0x0F, 0x1)
+                    length = second & 0x7F
+                    if length == 126:
+                        length = int.from_bytes(read_exact(connection, 2), "big")
+                    self.assertTrue(second & 0x80)
+                    mask = read_exact(connection, 4)
+                    payload = read_exact(connection, length)
+                    decoded = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+                    return json.loads(decoded.decode("utf-8"))
+
+                def send_json(connection: socket.socket, message: dict[str, object]) -> None:
+                    payload = json.dumps(message).encode("utf-8")
+                    self.assertLess(len(payload), 126)
+                    connection.sendall(bytes([0x81, len(payload)]) + payload)
+
+                def serve() -> None:
+                    try:
+                        connection, _ = listener.accept()
+                        with connection:
+                            request = bytearray()
+                            while not request.endswith(b"\r\n\r\n"):
+                                request.extend(read_exact(connection, 1))
+                            key = next(
+                                line.split(b":", 1)[1].strip()
+                                for line in bytes(request).split(b"\r\n")
+                                if line.lower().startswith(b"sec-websocket-key:")
+                            )
+                            accepted = base64.b64encode(
+                                hashlib.sha1(key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest()
+                            )
+                            connection.sendall(
+                                b"HTTP/1.1 101 Switching Protocols\r\n"
+                                b"Connection: Upgrade\r\n"
+                                b"Upgrade: websocket\r\n"
+                                b"Sec-WebSocket-Accept: " + accepted + b"\r\n\r\n"
+                            )
+                            for expected_method in ("initialize", "initialized", "thread/resume", "turn/start"):
+                                message = read_frame(connection)
+                                self.assertEqual(message["method"], expected_method)
+                                messages.append(message)
+                                if "id" not in message:
+                                    continue
+                                if expected_method == "turn/start" and not reply_to_turn_start:
+                                    return
+                                if expected_method == "initialize":
+                                    send_json(connection, {"method": "thread/status/changed", "params": {}})
+                                result: dict[str, object] = {"turn": {"id": "desktop-turn"}} if expected_method == "turn/start" else {}
+                                send_json(connection, {"id": message["id"], "result": result})
+                            send_json(
+                                connection,
+                                {
+                                    "method": "turn/completed",
+                                    "params": {"threadId": "desktop-thread", "turn": {"id": "desktop-turn"}},
+                                },
+                            )
+                    except BaseException as exc:
+                        errors.append(exc)
+                    finally:
+                        listener.close()
+
+                thread = threading.Thread(target=serve)
+                thread.start()
+                return socket_path, thread, messages, errors
+
+            request = {
+                "target": {"kind": "session", "value": "desktop-thread"},
+                "queue_dir": str(Path(tmp) / "queue"),
+                "sandbox_mode": "workspace-write",
+                "approval_policy": "on-request",
+                "approvals_reviewer": "auto_review",
+            }
+            payload = {"request": request, "prompt": "Desktop callback test", "cwd": tmp, "timeout": 2.0}
+            socket_path, server_thread, messages, errors = start_server(reply_to_turn_start=True)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    cli.DESKTOP_APP_SERVER_ENV: "1",
+                    cli.APP_SERVER_SOCKET_ENV: str(socket_path),
+                    cli.ALLOW_APP_SERVER_SOCKET_OVERRIDE_ENV: "1",
+                },
+                clear=False,
+            ):
+                delivery = cli.start_desktop_app_server_turn(payload)
+            self.assertIsNotNone(delivery)
+            assert delivery is not None
+            self.assertTrue(delivery.wait_for_completion(1.0))
+            delivery.close()
+            server_thread.join(timeout=5)
+
+            self.assertFalse(server_thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual([message["method"] for message in messages], ["initialize", "initialized", "thread/resume", "turn/start"])
+            self.assertTrue(all("jsonrpc" not in message for message in messages))
+            self.assertEqual(messages[0]["params"]["capabilities"], {"experimentalApi": True})
+            self.assertEqual(
+                messages[-1]["params"]["sandboxPolicy"],
+                {"type": "workspaceWrite", "writableRoots": [str(Path(tmp) / "queue")]},
+            )
+
+            socket_path, server_thread, messages, errors = start_server(reply_to_turn_start=False)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    cli.DESKTOP_APP_SERVER_ENV: "1",
+                    cli.APP_SERVER_SOCKET_ENV: str(socket_path),
+                    cli.ALLOW_APP_SERVER_SOCKET_OVERRIDE_ENV: "1",
+                },
+                clear=False,
+            ):
+                unknown_delivery = cli.start_desktop_app_server_turn(payload)
+            self.assertIsNotNone(unknown_delivery)
+            assert unknown_delivery is not None
+            self.assertFalse(unknown_delivery.wait_for_completion(0.01))
+            unknown_delivery.close()
+            server_thread.join(timeout=5)
+            self.assertFalse(server_thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(messages[-1]["method"], "turn/start")
+
+    def test_desktop_delivery_worker_retains_ack_lease_until_turn_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ack_marker = Path(tmp) / "acks" / "callback.json"
+
+            class CompletingDelivery:
+                def __init__(self) -> None:
+                    self.waits = 0
+                    self.closed = False
+
+                def wait_for_completion(self, _timeout: float) -> bool:
+                    self.waits += 1
+                    if self.waits == 1:
+                        ack_marker.parent.mkdir(parents=True)
+                        ack_marker.write_text("{}\n", encoding="utf-8")
+                        return False
+                    return True
+
+                def close(self) -> None:
+                    self.closed = True
+
+            delivery = CompletingDelivery()
+            payload = {
+                "command": ["unused"],
+                "prompt": "wake up",
+                "cwd": tmp,
+                "request": {},
+                "timeout": 1.0,
+                "ack_path": str(ack_marker),
+                "canceled_path": str(Path(tmp) / "canceled.json"),
+            }
+            read_fd, lock_fd = os.pipe()
+            output = io.StringIO()
+            try:
+                with (
+                    mock.patch.dict(os.environ, {"CODEX_LONG_TASK_DELIVERY_LOCK_FDS": json.dumps([lock_fd])}, clear=False),
+                    mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                    mock.patch.object(sys, "stdout", output),
+                    mock.patch.object(cli, "start_desktop_app_server_turn", return_value=delivery),
+                    mock.patch.object(cli.subprocess, "Popen") as popen,
+                ):
+                    self.assertEqual(cli.delivery_worker_main(), 0)
+            finally:
+                os.close(read_fd)
+
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["returncode"], 0)
+            self.assertTrue(result["turn_completed"])
+            self.assertGreaterEqual(delivery.waits, 2)
+            self.assertTrue(delivery.closed)
+            popen.assert_not_called()
+
+    def test_desktop_app_server_explicit_turn_rejection_allows_cli_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            class RejectedConnection:
+                def __init__(self) -> None:
+                    self.methods: list[str] = []
+                    self.closed = False
+
+                def connect(self) -> None:
+                    pass
+
+                def request(self, method: str, _params: dict[str, object]) -> dict[str, object]:
+                    self.methods.append(method)
+                    if method == "turn/start":
+                        raise cli.AppServerRpcError("App Server turn/start error: rejected")
+                    return {}
+
+                def notify(self, method: str, _params: dict[str, object]) -> None:
+                    self.methods.append(method)
+
+                def close(self) -> None:
+                    self.closed = True
+
+            connection = RejectedConnection()
+            payload = {
+                "request": {
+                    "target": {"kind": "session", "value": "desktop-thread"},
+                    "queue_dir": str(Path(tmp) / "queue"),
+                    "sandbox_mode": "workspace-write",
+                },
+                "prompt": "Desktop callback test",
+                "cwd": tmp,
+                "timeout": 1.0,
+            }
+            with (
+                mock.patch.dict(os.environ, {cli.DESKTOP_APP_SERVER_ENV: "1"}, clear=False),
+                mock.patch.object(cli, "AppServerConnection", return_value=connection),
+            ):
+                self.assertIsNone(cli.start_desktop_app_server_turn(payload))
+
+            self.assertEqual(connection.methods, ["initialize", "initialized", "thread/resume", "turn/start"])
+            self.assertTrue(connection.closed)
+
+    def test_desktop_app_server_rejects_invalid_protocol_and_ungated_socket_override(self) -> None:
+        deadline = time.monotonic() + 1.0
+        for frame in (
+            bytes([0xC1, 0x00]),
+            bytes([0x81, 0x80]) + b"mask",
+            bytes([0x09, 0x00]),
+        ):
+            connection = cli.AppServerConnection(Path("/tmp/not-used.sock"), 1.0)
+            connection.buffer = frame
+            with self.assertRaises(cli.AppServerProtocolError):
+                connection._receive_frame(deadline)
+
+        connection = cli.AppServerConnection(Path("/tmp/not-used.sock"), 1.0)
+        with (
+            mock.patch.object(connection, "_send_frame"),
+            mock.patch.object(connection, "_receive_json", return_value={"id": 1, "result": {}}),
+        ):
+            self.assertEqual(connection.request("initialize", {}), {})
+
+        connection = cli.AppServerConnection(Path("/tmp/not-used.sock"), 1.0)
+        invalid_message = json.dumps(
+            {
+                "params": {"threadId": "desktop-thread", "turn": {"id": "turn-1"}},
+            }
+        ).encode("utf-8")
+        with mock.patch.object(connection, "_receive_message", return_value=(0x1, invalid_message)):
+            with self.assertRaises(cli.AppServerProtocolError):
+                connection._receive_json(deadline)
+
+        request = {"target": {"kind": "session", "value": "desktop-thread"}}
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    cli.DESKTOP_APP_SERVER_ENV: "1",
+                    cli.APP_SERVER_SOCKET_ENV: "/tmp/override.sock",
+                    cli.ALLOW_APP_SERVER_SOCKET_OVERRIDE_ENV: "0",
+                },
+                clear=False,
+            ),
+            mock.patch.object(cli, "codex_home", return_value=Path("/tmp/codex-home")),
+        ):
+            self.assertEqual(cli.desktop_app_server_socket(request), Path("/tmp/codex-home/app-server-control/app-server-control.sock"))
+
+    def test_desktop_delivery_worker_uses_cli_after_explicit_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = {
+                "command": ["codex", "exec", "resume"],
+                "prompt": "wake up",
+                "cwd": tmp,
+                "request": {},
+                "timeout": 1.0,
+                "ack_path": str(Path(tmp) / "acks" / "callback.json"),
+                "canceled_path": str(Path(tmp) / "canceled.json"),
+            }
+            process = mock.Mock(returncode=0)
+            process.communicate.return_value = ("", "")
+            read_fd, lock_fd = os.pipe()
+            output = io.StringIO()
+            try:
+                with (
+                    mock.patch.dict(os.environ, {"CODEX_LONG_TASK_DELIVERY_LOCK_FDS": json.dumps([lock_fd])}, clear=False),
+                    mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                    mock.patch.object(sys, "stdout", output),
+                    mock.patch.object(cli, "start_desktop_app_server_turn", return_value=None),
+                    mock.patch.object(cli.subprocess, "Popen", return_value=process) as popen,
+                ):
+                    self.assertEqual(cli.delivery_worker_main(), 0)
+            finally:
+                os.close(read_fd)
+
+            self.assertEqual(json.loads(output.getvalue())["returncode"], 0)
+            popen.assert_called_once()
+
+    def test_desktop_delivery_worker_suppresses_cli_on_unknown_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            class IncompleteDelivery:
+                def __init__(self) -> None:
+                    self.closed = False
+
+                def wait_for_completion(self, timeout: float) -> bool:
+                    time.sleep(timeout)
+                    return False
+
+                def close(self) -> None:
+                    self.closed = True
+
+            delivery = IncompleteDelivery()
+            queue_root = Path(tmp) / "queue"
+            request = {
+                "version": 1,
+                "id": "desktop-timeout",
+                "created_at": 1.0,
+                "cwd": tmp,
+                "target": {"kind": "session", "value": "desktop-thread"},
+                "prompt": "wake up",
+            }
+            payload = {
+                "command": ["unused"],
+                "prompt": "wake up",
+                "cwd": tmp,
+                "request": request,
+                "queue_dir": str(queue_root),
+                "timeout": 1.0,
+                "ack_path": str(Path(tmp) / "acks" / "callback.json"),
+                "canceled_path": str(Path(tmp) / "canceled.json"),
+            }
+            read_fd, lock_fd = os.pipe()
+            output = io.StringIO()
+            try:
+                with (
+                    mock.patch.dict(
+                        os.environ,
+                        {
+                            "CODEX_LONG_TASK_DELIVERY_LOCK_FDS": json.dumps([lock_fd]),
+                            cli.TARGET_LOCK_DIR_ENV: str(Path(tmp) / "target-locks"),
+                        },
+                        clear=False,
+                    ),
+                    mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                    mock.patch.object(sys, "stdout", output),
+                    mock.patch.object(cli, "start_desktop_app_server_turn", return_value=delivery),
+                    mock.patch.object(cli.subprocess, "Popen") as popen,
+                ):
+                    self.assertEqual(cli.delivery_worker_main(), 0)
+            finally:
+                os.close(read_fd)
+
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["returncode"], 125)
+            self.assertTrue(result["manual_recovery_required"])
+            self.assertTrue(delivery.closed)
+            popen.assert_not_called()
+            with mock.patch.dict(os.environ, {cli.TARGET_LOCK_DIR_ENV: str(Path(tmp) / "target-locks")}, clear=False):
+                self.assertTrue(cli.retained_target_lease_is_held(request))
+
+    def test_desktop_delivery_worker_clears_timeout_marker_after_late_ack(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            class IncompleteDelivery:
+                def wait_for_completion(self, timeout: float) -> bool:
+                    time.sleep(timeout)
+                    return False
+
+                def close(self) -> None:
+                    pass
+
+            queue_root = Path(tmp) / "queue"
+            request = {
+                "version": 1,
+                "id": "desktop-late-ack",
+                "created_at": 1.0,
+                "cwd": tmp,
+                "target": {"kind": "session", "value": "desktop-thread"},
+                "prompt": "wake up",
+            }
+            ack = Path(tmp) / "acks" / "callback.json"
+            payload = {
+                "command": ["unused"],
+                "prompt": "wake up",
+                "cwd": tmp,
+                "request": request,
+                "queue_dir": str(queue_root),
+                "timeout": 1.0,
+                "ack_path": str(ack),
+                "canceled_path": str(Path(tmp) / "canceled.json"),
+            }
+            original_retain = cli.retain_target_lease
+
+            def retain_then_ack(root: Path, callback: dict[str, object]) -> None:
+                original_retain(root, callback)
+                cli.write_request(ack, {"id": callback["id"], "marked_at": time.time()})
+
+            read_fd, lock_fd = os.pipe()
+            output = io.StringIO()
+            try:
+                with (
+                    mock.patch.dict(
+                        os.environ,
+                        {
+                            "CODEX_LONG_TASK_DELIVERY_LOCK_FDS": json.dumps([lock_fd]),
+                            cli.TARGET_LOCK_DIR_ENV: str(Path(tmp) / "target-locks"),
+                        },
+                        clear=False,
+                    ),
+                    mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                    mock.patch.object(sys, "stdout", output),
+                    mock.patch.object(cli, "start_desktop_app_server_turn", return_value=IncompleteDelivery()),
+                    mock.patch.object(cli, "retain_target_lease", side_effect=retain_then_ack),
+                ):
+                    self.assertEqual(cli.delivery_worker_main(), 0)
+            finally:
+                os.close(read_fd)
+
+            self.assertEqual(json.loads(output.getvalue())["returncode"], 0)
+            with mock.patch.dict(os.environ, {cli.TARGET_LOCK_DIR_ENV: str(Path(tmp) / "target-locks")}, clear=False):
+                self.assertFalse(cli.retained_target_lease_is_held(request))
+
+    def test_manual_desktop_recovery_retains_target_lease_until_canceled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            cli.ensure_daemon_dirs(root)
+            request = {
+                "version": 1,
+                "id": "desktop-unknown",
+                "created_at": 1.0,
+                "cwd": tmp,
+                "target": {"kind": "session", "value": "desktop-thread"},
+                "prompt": "wake up",
+                "retain_target_lease": True,
+            }
+            cli.write_request(cli.request_path(root, "failed", "desktop-unknown"), request)
+            with mock.patch.dict(os.environ, {cli.TARGET_LOCK_DIR_ENV: str(Path(tmp) / "target-locks")}, clear=False):
+                cli.retain_target_lease(root, request)
+                self.assertTrue(cli.target_has_live_resume(root, request))
+                self.assertTrue(cli.cancel_one(root, "desktop-unknown", "manual recovery resolved"))
+                self.assertFalse(cli.target_has_live_resume(root, request))
+
+    def test_manual_desktop_recovery_lease_blocks_same_session_across_queue_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root_a = Path(tmp) / "queue-a"
+            root_b = Path(tmp) / "queue-b"
+            target = {"kind": "session", "value": "desktop-thread"}
+            failed = {
+                "version": 1,
+                "id": "desktop-unknown",
+                "created_at": 1.0,
+                "cwd": tmp,
+                "target": target,
+                "prompt": "wake up",
+                "retain_target_lease": True,
+            }
+            cli.ensure_daemon_dirs(root_a)
+            cli.write_request(cli.request_path(root_a, "failed", "desktop-unknown"), failed)
+            self._write_request(root_b, "same-session", tmp, target=target)
+            with mock.patch.dict(os.environ, {cli.TARGET_LOCK_DIR_ENV: str(Path(tmp) / "target-locks")}, clear=False):
+                cli.retain_target_lease(root_a, failed)
+                self.assertIsNone(cli.select_pending(root_b, time.time()))
+                self.assertTrue(cli.cancel_one(root_a, "desktop-unknown", "manual recovery resolved"))
+                self.assertEqual(cli.select_pending(root_b, time.time()).stem, "same-session")
+
+    def test_cancel_releases_timeout_marker_while_parent_still_marks_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            target = {"kind": "session", "value": "timeout-thread"}
+            self._write_request(root, "timeout-cancel", tmp, target=target)
+            cli.ensure_daemon_dirs(root)
+            cli.move_request(cli.request_path(root, "pending", "timeout-cancel"), root / "running")
+            request = cli.load_request(cli.request_path(root, "running", "timeout-cancel"))
+
+            with mock.patch.dict(os.environ, {cli.TARGET_LOCK_DIR_ENV: str(Path(tmp) / "target-locks")}, clear=False):
+                cli.retain_target_lease(root, request)
+                self.assertTrue(cli.cancel_one(root, "timeout-cancel", "stop after timeout"))
+                self.assertFalse(cli.retained_target_lease_is_held(request))
 
     def _write_request(
         self,

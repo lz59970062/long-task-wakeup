@@ -114,6 +114,16 @@ such as Node/NVM are available under systemd. Resume calls also default to
 instead of stalling in read-only mode. Use `--codex-bin /path/to/codex` or `--path "$PATH"` if
 discovery is not correct. Inspect it with:
 
+For a bound Desktop task, the installed daemon first uses its local App Server so the callback is
+visible in that task. It grants the queue directory as a per-turn writable root, holds the target
+lease until the App Server reports the turn complete, and never immediately falls back to CLI after
+an uncertain `turn/start` submission. Set `CODEX_LONG_TASK_WAKEUP_DESKTOP_APP_SERVER=0` in a
+systemd user-service override to force CLI-only delivery while investigating compatibility.
+The local App Server path trusts same-UID processes only; do not enable it on a shared Unix account.
+An unknown Desktop submission retains a global target lease in `failed`; it blocks the same session
+from every queue using the target-lock directory. Inspect it and use `cancel` to release the lease
+before scheduling a manual replacement.
+
 ```bash
 systemctl --user status codex-long-task-wakeup.service
 journalctl --user -u codex-long-task-wakeup.service -f
