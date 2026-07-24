@@ -1442,6 +1442,182 @@ class CliTests(unittest.TestCase):
             self.assertEqual(rendered.count(cli.SHELL_HOOK_END), 1)
             self.assertIn("timeout 2s /opt/bin/codex-long-task-wakeup status", rendered)
 
+    def test_completed_goal_is_terminal_and_suppresses_reminders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            start_args = argparse.Namespace(
+                queue_dir=str(root), id="terminal-goal", session="thread-1", last=False,
+                cwd=tmp, task="finish report", idle_seconds=1.0,
+            )
+            self.assertEqual(cli.goal_start(start_args), 0)
+            ack_args = argparse.Namespace(
+                queue_dir=str(root), id="terminal-goal", state="completed", message="done",
+                condition=None, email_to=None, email_after=cli.DEFAULT_BLOCKED_EMAIL_SECONDS,
+            )
+            self.assertEqual(cli.goal_ack(ack_args), 0)
+
+            cli.update_goal_from_callback(root, {"goal_id": "terminal-goal", "created_at": time.time()})
+            self.assertEqual(
+                cli.enqueue_existing_request(
+                    root,
+                    {
+                        "version": 1,
+                        "id": "terminal-callback",
+                        "created_at": time.time(),
+                        "cwd": tmp,
+                        "target": {"kind": "session", "value": "thread-1"},
+                        "target_source": "--session",
+                        "goal_id": "terminal-goal",
+                        "prompt": "Task: stale callback",
+                    },
+                    "Task: stale callback",
+                ),
+                1,
+            )
+
+            goal = cli.load_goal(root, "terminal-goal")
+            self.assertEqual(goal["state"], "completed")
+            self.assertFalse((root / "pending" / "terminal-callback.json").exists())
+            self.assertFalse(cli.process_goal_reminders(root))
+            self.assertEqual(
+                cli.goal_resume(argparse.Namespace(queue_dir=str(root), id="terminal-goal")),
+                1,
+            )
+
+    def test_goal_reminder_is_deduplicated_and_external_callback_resets_idle_timer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            start_args = argparse.Namespace(
+                queue_dir=str(root), id="reminder-goal", session="thread-1", last=False,
+                cwd=tmp, task="train model", idle_seconds=1.0,
+            )
+            self.assertEqual(cli.goal_start(start_args), 0)
+            goal = cli.load_goal(root, "reminder-goal")
+            goal["last_external_callback_at"] = time.time() - 2.0
+            cli.write_goal(root, goal)
+
+            self.assertTrue(cli.process_goal_reminders(root))
+            self.assertFalse(cli.process_goal_reminders(root))
+            pending = list((root / "pending").glob("*.json"))
+            self.assertEqual(len(pending), 1)
+            reminder = cli.load_request(pending[0])
+            self.assertTrue(reminder["goal_reminder"])
+            self.assertIn("goal ack --queue-dir", reminder["prompt"])
+            self.assertIn("--id reminder-goal", reminder["prompt"])
+            self.assertIn("--condition", reminder["prompt"])
+
+            cli.move_request(pending[0], root / "done")
+            goal = cli.load_goal(root, "reminder-goal")
+            goal["last_reminder_at"] = time.time() - 2.0
+            cli.write_goal(root, goal)
+            self.assertTrue(cli.process_goal_reminders(root))
+            self.assertEqual(len(list((root / "pending").glob("*.json"))), 1)
+
+            cli.update_goal_from_callback(root, {"goal_id": "reminder-goal", "created_at": time.time()})
+            goal = cli.load_goal(root, "reminder-goal")
+            self.assertNotIn("last_reminder_at", goal)
+            self.assertGreaterEqual(float(goal["last_external_callback_at"]), time.time() - 1.0)
+
+    def test_goal_reminder_reconciles_callback_persisted_before_goal_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            start_args = argparse.Namespace(
+                queue_dir=str(root), id="recovery-goal", session="thread-1", last=False,
+                cwd=tmp, task="run recovery", idle_seconds=1.0,
+            )
+            self.assertEqual(cli.goal_start(start_args), 0)
+            goal = cli.load_goal(root, "recovery-goal")
+            goal["last_external_callback_at"] = time.time() - 2.0
+            cli.write_goal(root, goal)
+            callback_time = time.time()
+            cli.write_request(
+                root / "pending" / "crash-window.json",
+                {
+                    "version": 1,
+                    "id": "crash-window",
+                    "created_at": callback_time,
+                    "cwd": tmp,
+                    "target": {"kind": "session", "value": "thread-1"},
+                    "goal_id": "recovery-goal",
+                    "prompt": "Task: callback persisted before goal timestamp",
+                },
+            )
+
+            self.assertFalse(cli.process_goal_reminders(root))
+            goal = cli.load_goal(root, "recovery-goal")
+            self.assertEqual(float(goal["last_external_callback_at"]), callback_time)
+            self.assertNotIn("last_reminder_at", goal)
+
+    def test_blocked_goal_email_is_configured_and_sent_once_after_delay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"CODEX_LONG_TASK_WAKEUP_BLOCKED_EMAIL_TO": "owner@example.test"}, clear=False
+        ):
+            root = Path(tmp) / "queue"
+            start_args = argparse.Namespace(
+                queue_dir=str(root), id="blocked-goal", session="thread-1", last=False,
+                cwd=tmp, task="wait for access", idle_seconds=1.0,
+            )
+            self.assertEqual(cli.goal_start(start_args), 0)
+            bad_ack_args = argparse.Namespace(
+                queue_dir=str(root), id="blocked-goal", state="blocked_conditions", message=None,
+                condition="need credentials", email_to="other@example.test", email_after=1.0,
+            )
+            self.assertEqual(cli.goal_ack(bad_ack_args), 2)
+            ack_args = argparse.Namespace(
+                queue_dir=str(root), id="blocked-goal", state="blocked_conditions", message=None,
+                condition="need credentials", email_to="owner@example.test", email_after=1.0,
+            )
+            self.assertEqual(cli.goal_ack(ack_args), 0)
+            goal = cli.load_goal(root, "blocked-goal")
+            goal["state_changed_at"] = time.time() - 2.0
+            cli.write_goal(root, goal)
+
+            accepted = subprocess.CompletedProcess(["sendmail"], 0)
+            with mock.patch.object(cli.subprocess, "run", return_value=accepted) as sendmail:
+                self.assertTrue(cli.process_blocked_goal_email(root))
+                self.assertFalse(cli.process_blocked_goal_email(root))
+
+            self.assertEqual(sendmail.call_count, 1)
+            self.assertEqual(cli.load_goal(root, "blocked-goal")["blocked_email_result"], "accepted")
+
+    def test_blocked_goal_email_requires_one_recipient_and_stops_after_three_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"CODEX_LONG_TASK_WAKEUP_BLOCKED_EMAIL_TO": "owner@example.test"}, clear=False
+        ):
+            root = Path(tmp) / "queue"
+            start_args = argparse.Namespace(
+                queue_dir=str(root), id="retry-goal", session="thread-1", last=False,
+                cwd=tmp, task="wait for service", idle_seconds=1.0,
+            )
+            self.assertEqual(cli.goal_start(start_args), 0)
+            multi_recipient_args = argparse.Namespace(
+                queue_dir=str(root), id="retry-goal", state="blocked_conditions", message=None,
+                condition="need service", email_to="owner@example.test,other@example.test", email_after=1.0,
+            )
+            self.assertEqual(cli.goal_ack(multi_recipient_args), 2)
+            ack_args = argparse.Namespace(
+                queue_dir=str(root), id="retry-goal", state="blocked_conditions", message=None,
+                condition="need service", email_to="owner@example.test", email_after=1.0,
+            )
+            self.assertEqual(cli.goal_ack(ack_args), 0)
+            goal = cli.load_goal(root, "retry-goal")
+            goal["state_changed_at"] = time.time() - 2.0
+            cli.write_goal(root, goal)
+
+            failed = subprocess.CompletedProcess(["sendmail"], 1)
+            with mock.patch.object(cli.subprocess, "run", return_value=failed) as sendmail:
+                for attempt in range(3):
+                    self.assertTrue(cli.process_blocked_goal_email(root))
+                    if attempt < 2:
+                        goal = cli.load_goal(root, "retry-goal")
+                        goal["blocked_email_next_attempt_at"] = time.time() - 1.0
+                        cli.write_goal(root, goal)
+                self.assertFalse(cli.process_blocked_goal_email(root))
+
+            goal = cli.load_goal(root, "retry-goal")
+            self.assertEqual(sendmail.call_count, 3)
+            self.assertIn("blocked_email_exhausted_at", goal)
+
     def _write_request(
         self,
         root: Path,

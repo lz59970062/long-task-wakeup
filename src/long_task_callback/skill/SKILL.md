@@ -276,3 +276,24 @@ When stopping, summarize what was tried, what changed, why the loop stopped, and
 decision or resource needed from the user.
 
 Use `--strict` only when the user explicitly wants callback failure to fail the wrapper or epilogue.
+
+## Goal Completion Acknowledgement
+
+Use this workflow for a multi-stage goal that must not silently stop:
+
+1. Create it once: `codex-long-task-wakeup goal start --id <goal-id> --session <session-id> --cwd "$PWD" --task "..."`.
+2. Bind each ordinary `run` or `done` callback to it with `--goal-id <goal-id>`. After three hours
+   without a newly queued ordinary callback, the daemon asks that same session to continue, ACK
+   completion, or state the exact missing condition; it repeats at the same interval until the goal
+   is ACKed or blocked.
+3. When the whole goal is done, immediately run `goal ack --id <goal-id> --state completed`. This
+   is terminal and permanently suppresses further goal reminders; `goal resume` cannot reopen it.
+4. If work cannot proceed, run `goal ack --id <goal-id> --state blocked_conditions --condition
+   "specific prerequisite"`. This suppresses session reminders. Once the prerequisite is met, use
+   `goal resume --id <goal-id>`; do not leave an unexplained blocked state.
+
+Blocked-email escalation is opt-in. Configure one trusted recipient in the daemon environment with
+`CODEX_LONG_TASK_WAKEUP_BLOCKED_EMAIL_TO`, then pass that exact value as `--email-to` when recording
+the blocked condition. The value must be one mailbox, not a list. After 12 hours the daemon attempts local `sendmail` delivery up to three times;
+the email contains only the goal title, blocked condition, and goal id, and records local-MTA
+acceptance rather than recipient delivery.

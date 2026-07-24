@@ -68,6 +68,7 @@ install-skill
 setup
 ack
 cancel
+goal
 ```
 
 If `python -m long_task_callback --help` shows `install-systemd` but
@@ -164,6 +165,45 @@ codex-long-task-wakeup done \
 ```
 
 You can also set `CODEX_LONG_TASK_WAKEUP_VIA_DAEMON=1` instead of passing `--via-daemon`.
+
+### Persistent Goal ACKs
+
+For multi-stage work that must keep moving until it is explicitly finished, create one persistent goal
+and pass its id on every ordinary callback:
+
+```bash
+codex-long-task-wakeup goal start \
+  --id report-goal \
+  --session <session-id> \
+  --cwd "$PWD" \
+  --task "finish the report"
+
+codex-long-task-wakeup done --via-daemon --goal-id report-goal \
+  --session <session-id> --cwd "$PWD" --task "run report checks" \
+  --command "python check_report.py" --exit-code 0
+```
+
+If no ordinary callback is queued for three hours, the daemon resumes the same session and asks it to
+continue, ACK completion, or record the precise blocking prerequisite. It repeats every three hours
+while the goal remains active; completion is terminal and permanently suppresses future goal reminders:
+
+```bash
+codex-long-task-wakeup goal ack --id report-goal --state completed
+```
+
+To suppress session reminders while an external condition is genuinely unmet, record the condition and
+resume only after it is available:
+
+```bash
+codex-long-task-wakeup goal ack --id report-goal --state blocked_conditions \
+  --condition "awaiting dataset access"
+codex-long-task-wakeup goal resume --id report-goal
+```
+
+Optional blocked-goal email escalation starts after 12 hours. Set
+`CODEX_LONG_TASK_WAKEUP_BLOCKED_EMAIL_TO` in the daemon environment and pass that identical address
+with `--email-to`. The value must name one mailbox, not a recipient list; the daemon uses local `sendmail`, retries at most three times, and records local-MTA
+acceptance only.
 
 ### Run The Wakeup Daemon
 

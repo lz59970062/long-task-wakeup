@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+from email.message import EmailMessage
 import hashlib
 import importlib.resources as resources
 import json
 import os
+import re
 import signal
 import shlex
 import shutil
@@ -30,6 +32,8 @@ DEFAULT_RETRIES = 3
 DEFAULT_RETRY_DELAY = 30.0
 DEFAULT_RETRY_BACKOFF = 2.0
 DEFAULT_RESUME_TIMEOUT = 3600.0
+DEFAULT_GOAL_IDLE_SECONDS = 3 * 60 * 60
+DEFAULT_BLOCKED_EMAIL_SECONDS = 12 * 60 * 60
 DEFAULT_SUPERVISOR_CONF_DIR = "/etc/supervisor/conf.d"
 RELOAD_PROTOCOL_VERSION = 1
 CODEX_THREAD_ID_ENV = "CODEX_THREAD_ID"
@@ -330,7 +334,7 @@ def attach_routing_text(prompt: str, request: dict[str, object]) -> str:
 
 def make_request(args: argparse.Namespace, prompt: str) -> dict[str, object]:
     target, target_source = bind_target(args)
-    return {
+    request = {
         "version": 1,
         "id": uuid.uuid4().hex,
         "created_at": time.time(),
@@ -342,6 +346,10 @@ def make_request(args: argparse.Namespace, prompt: str) -> dict[str, object]:
         "approval_policy": getattr(args, "approval_policy", None) or DEFAULT_APPROVAL_POLICY,
         "sandbox_mode": getattr(args, "sandbox_mode", None) or DEFAULT_SANDBOX_MODE,
     }
+    goal_id = getattr(args, "goal_id", None)
+    if goal_id:
+        request["goal_id"] = goal_id
+    return request
 
 
 def prepare_request_for_queue(root: Path, request: dict[str, object], prompt: str) -> dict[str, object]:
@@ -369,11 +377,29 @@ def enqueue_existing_request(root: Path, request: dict[str, object], prompt: str
     request = prepare_request_for_queue(root, request, prompt)
     request_id = str(request["id"])
     target = request_path(root, "pending", request_id)
+    goal_lock: tuple[object, Path] | None = None
     try:
+        goal_id = request.get("goal_id")
+        goal: dict[str, object] | None = None
+        if not request.get("goal_reminder") and goal_id is not None:
+            if not isinstance(goal_id, str):
+                raise ValueError("callback goal id must be a string")
+            goal_path(root, goal_id)
+            goal_lock = acquire_owner_lock(root, goal_lock_id(goal_id), blocking=True)
+            goal = load_goal(root, goal_id)
+            if goal.get("state") != "active":
+                raise ValueError(f"goal {goal_id} is not active")
         write_request(target, request)
-    except OSError as exc:
+        if goal is not None:
+            goal["last_external_callback_at"] = float(request.get("created_at", time.time()))
+            goal.pop("last_reminder_at", None)
+            write_goal(root, goal)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"codex-long-task-wakeup: warning: failed to enqueue callback: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if goal_lock is not None:
+            release_owner_lock(goal_lock, remove=False)
 
     print(f"codex-long-task-wakeup: queued callback {request_id} in {root}", file=sys.stderr)
     return 0
@@ -457,7 +483,7 @@ def ensure_daemon_dirs(root: Path) -> None:
     if not root_existed:
         fsync_directory(root.parent)
     created = False
-    for name in (ACTIVE_STATE, LOCKS_STATE, "pending", "running", "done", "failed", "canceled", "acks"):
+    for name in (ACTIVE_STATE, LOCKS_STATE, "pending", "running", "done", "failed", "canceled", "acks", "goals"):
         path = root / name
         if path.exists():
             continue
@@ -465,6 +491,92 @@ def ensure_daemon_dirs(root: Path) -> None:
         created = True
     if created:
         fsync_directory(root)
+
+
+def goal_path(root: Path, goal_id: str) -> Path:
+    if not goal_id or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for character in goal_id):
+        raise ValueError("goal id must contain only letters, numbers, '-' or '_'")
+    return root / "goals" / f"{goal_id}.json"
+
+
+def load_goal(root: Path, goal_id: str) -> dict[str, object]:
+    path = goal_path(root, goal_id)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("id") != goal_id:
+        raise ValueError(f"invalid goal record {goal_id}")
+    return data
+
+
+def write_goal(root: Path, goal: dict[str, object]) -> None:
+    goal_id = goal.get("id")
+    if not isinstance(goal_id, str):
+        raise ValueError("goal requires an id")
+    write_request(goal_path(root, goal_id), goal)
+
+
+def goal_lock_id(goal_id: str) -> str:
+    return f"goal-{goal_id}"
+
+
+def clear_blocked_goal_email(goal: dict[str, object]) -> None:
+    for field in (
+        "blocked_email_to",
+        "blocked_email_after_seconds",
+        "blocked_email_attempted_at",
+        "blocked_email_attempts",
+        "blocked_email_next_attempt_at",
+        "blocked_email_result",
+        "blocked_email_exhausted_at",
+    ):
+        goal.pop(field, None)
+
+
+def is_single_email_recipient(value: str) -> bool:
+    return bool(re.fullmatch(r"[^\s@,;<>]+@[^\s@,;<>]+", value))
+
+
+def queued_goal_reminder_exists(root: Path, goal_id: str) -> bool:
+    for state in (ACTIVE_STATE, "pending", "running"):
+        for path in (root / state).glob("*.json"):
+            try:
+                request = load_request(path)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            if request.get("goal_id") == goal_id and request.get("goal_reminder"):
+                return True
+    return False
+
+
+def latest_queued_goal_callback_at(root: Path, goal_id: str) -> float | None:
+    latest: float | None = None
+    for state in (ACTIVE_STATE, "pending", "running", "done", "failed", "canceled"):
+        for path in (root / state).glob("*.json"):
+            try:
+                request = load_request(path)
+                created_at = float(request["created_at"])
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                continue
+            if request.get("goal_id") == goal_id and not request.get("goal_reminder"):
+                latest = created_at if latest is None else max(latest, created_at)
+    return latest
+
+
+def update_goal_from_callback(root: Path, request: dict[str, object]) -> None:
+    if request.get("goal_reminder"):
+        return
+    goal_id = request.get("goal_id")
+    if not isinstance(goal_id, str):
+        return
+    lock = acquire_owner_lock(root, goal_lock_id(goal_id), blocking=True)
+    try:
+        goal = load_goal(root, goal_id)
+        if goal.get("state") != "active":
+            return
+        goal["last_external_callback_at"] = float(request.get("created_at", time.time()))
+        goal.pop("last_reminder_at", None)
+        write_goal(root, goal)
+    finally:
+        release_owner_lock(lock, remove=False)
 
 
 def load_request(path: Path) -> dict[str, object]:
@@ -1374,6 +1486,59 @@ def recover_running(root: Path) -> None:
                 )
 
 
+def process_goal_reminders(root: Path) -> bool:
+    now = time.time()
+    for path in sorted((root / "goals").glob("*.json")):
+        lock: tuple[object, Path] | None = None
+        try:
+            goal_id = path.stem
+            lock = acquire_owner_lock(root, goal_lock_id(goal_id), blocking=True)
+            goal = load_goal(root, goal_id)
+            if goal.get("state") != "active":
+                continue
+            last_callback = float(goal["last_external_callback_at"])
+            observed_callback = latest_queued_goal_callback_at(root, goal_id)
+            if observed_callback is not None and observed_callback > last_callback:
+                goal["last_external_callback_at"] = observed_callback
+                goal.pop("last_reminder_at", None)
+                write_goal(root, goal)
+                last_callback = observed_callback
+            idle_seconds = float(goal.get("idle_seconds", DEFAULT_GOAL_IDLE_SECONDS))
+            if now - last_callback < idle_seconds:
+                continue
+            last_reminder = goal.get("last_reminder_at")
+            if last_reminder is not None and now - float(last_reminder) < idle_seconds:
+                continue
+            if queued_goal_reminder_exists(root, goal_id):
+                goal["last_reminder_at"] = now
+                write_goal(root, goal)
+                return True
+            request = {
+                "version": 1, "id": uuid.uuid4().hex, "created_at": now, "cwd": goal["cwd"],
+                "target": goal["target"], "target_source": goal.get("target_source", "goal"),
+                "goal_id": goal_id, "goal_reminder": True, "prompt": "",
+            }
+            goal_ack_command = " ".join(
+                shlex.quote(part)
+                for part in [console_script_path(), "goal", "ack", "--queue-dir", str(root), "--id", goal_id]
+            )
+            prompt = (f"[goal-inactivity-reminder]\nGoal: {goal.get('task', goal_id)}\n"
+                      f"No new callback has been queued for {idle_seconds / 3600:.0f} hour(s). "
+                      f"If complete, run: {goal_ack_command} --state completed. If conditions are not ready, run: "
+                      f"{goal_ack_command} --state blocked_conditions --condition \"specific missing prerequisite\". "
+                      "Otherwise continue the goal and schedule the next callback.")
+            if enqueue_existing_request(root, request, prompt) != 0:
+                return True
+            goal["last_reminder_at"] = now
+            write_goal(root, goal)
+            return True
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            print(f"codex-long-task-wakeup: warning: could not process goal reminder {path.name}: {exc}", file=sys.stderr)
+        finally:
+            release_owner_lock(lock, remove=False)
+    return False
+
+
 def daemon_reexec_command(args: argparse.Namespace) -> list[str]:
     return [sys.executable, "-m", "long_task_callback", *daemon_command(args)[1:]]
 
@@ -1434,6 +1599,10 @@ def daemon(args: argparse.Namespace) -> int:
             reap_background_resumes()
             recover_running(root)
             recover_active(root)
+            if process_goal_reminders(root):
+                continue
+            if process_blocked_goal_email(root):
+                continue
             did_work = process_one(root, args)
             if did_work:
                 processed += 1
@@ -1645,6 +1814,7 @@ def add_common_flags(parser: argparse.ArgumentParser) -> None:
         help="Queue the wakeup request for codex-long-task-wakeup daemon instead of running codex exec resume here",
     )
     parser.add_argument("--queue-dir", help="Wakeup queue directory for --via-daemon")
+    parser.add_argument("--goal-id", help="Explicit goal record to update when this callback is queued")
     parser.add_argument(
         "--approvals-reviewer",
         default=os.environ.get("CODEX_LONG_TASK_WAKEUP_APPROVALS_REVIEWER", DEFAULT_APPROVALS_REVIEWER),
@@ -2190,6 +2360,176 @@ def ack(args: argparse.Namespace) -> int:
     return 0
 
 
+def goal_start(args: argparse.Namespace) -> int:
+    root = queue_dir(args)
+    ensure_daemon_dirs(root)
+    target, source = resolve_target(args)
+    goal_id = args.id or uuid.uuid4().hex
+    try:
+        path = goal_path(root, goal_id)
+    except ValueError as exc:
+        print(f"codex-long-task-wakeup: error: {exc}", file=sys.stderr)
+        return 2
+    if args.idle_seconds <= 0:
+        print("codex-long-task-wakeup: error: --idle-seconds must be positive", file=sys.stderr)
+        return 2
+    lock = acquire_owner_lock(root, goal_lock_id(goal_id), blocking=True)
+    try:
+        if path.exists():
+            print(f"codex-long-task-wakeup: goal {goal_id} already exists", file=sys.stderr)
+            return 1
+        now = time.time()
+        write_goal(root, {"version": 1, "id": goal_id, "task": args.task, "cwd": args.cwd, "target": target,
+                          "target_source": source, "state": "active", "created_at": now,
+                          "last_external_callback_at": now, "idle_seconds": args.idle_seconds})
+    finally:
+        release_owner_lock(lock, remove=False)
+    print(goal_id)
+    return 0
+
+
+def goal_ack(args: argparse.Namespace) -> int:
+    root = queue_dir(args)
+    try:
+        goal_path(root, args.id)
+    except ValueError as exc:
+        print(f"codex-long-task-wakeup: error: {exc}", file=sys.stderr)
+        return 2
+    if args.state == "blocked_conditions":
+        if not args.condition or not args.condition.strip():
+            print("codex-long-task-wakeup: error: --condition is required for blocked_conditions", file=sys.stderr)
+            return 2
+        if args.email_after <= 0:
+            print("codex-long-task-wakeup: error: --email-after must be positive", file=sys.stderr)
+            return 2
+        if args.email_to and not is_single_email_recipient(args.email_to):
+            print("codex-long-task-wakeup: error: invalid email recipient", file=sys.stderr)
+            return 2
+        configured_recipient = os.environ.get("CODEX_LONG_TASK_WAKEUP_BLOCKED_EMAIL_TO")
+        if args.email_to and args.email_to != configured_recipient:
+            print("codex-long-task-wakeup: error: --email-to must match CODEX_LONG_TASK_WAKEUP_BLOCKED_EMAIL_TO", file=sys.stderr)
+            return 2
+    lock = acquire_owner_lock(root, goal_lock_id(args.id), blocking=True)
+    try:
+        try:
+            goal = load_goal(root, args.id)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"codex-long-task-wakeup: error: {exc}", file=sys.stderr)
+            return 1
+        if goal.get("state") == "completed" and args.state != "completed":
+            print(f"codex-long-task-wakeup: error: completed goal {args.id} is terminal", file=sys.stderr)
+            return 1
+        now = time.time()
+        goal["state"] = args.state
+        goal["state_changed_at"] = now
+        if args.message:
+            goal["message"] = args.message
+        if args.state == "blocked_conditions":
+            clear_blocked_goal_email(goal)
+            goal["condition"] = args.condition
+            goal["blocked_email_to"] = args.email_to
+            goal["blocked_email_after_seconds"] = args.email_after
+        else:
+            goal.pop("condition", None)
+            clear_blocked_goal_email(goal)
+        write_goal(root, goal)
+    finally:
+        release_owner_lock(lock, remove=False)
+    print(f"codex-long-task-wakeup: goal {args.id} acknowledged as {args.state}")
+    return 0
+
+
+def process_blocked_goal_email(root: Path) -> bool:
+    now = time.time()
+    configured_recipient = os.environ.get("CODEX_LONG_TASK_WAKEUP_BLOCKED_EMAIL_TO")
+    for path in sorted((root / "goals").glob("*.json")):
+        lock: tuple[object, Path] | None = None
+        try:
+            goal_id = path.stem
+            lock = acquire_owner_lock(root, goal_lock_id(goal_id), blocking=True)
+            goal = load_goal(root, goal_id)
+            if goal.get("state") != "blocked_conditions":
+                continue
+            recipient = goal.get("blocked_email_to")
+            changed_at = float(goal.get("state_changed_at", now))
+            delay = float(goal.get("blocked_email_after_seconds", DEFAULT_BLOCKED_EMAIL_SECONDS))
+            if (
+                not isinstance(recipient, str)
+                or not recipient
+                or recipient != configured_recipient
+                or not is_single_email_recipient(recipient)
+                or goal.get("blocked_email_result") == "accepted"
+                or goal.get("blocked_email_exhausted_at")
+                or now < changed_at + delay
+            ):
+                continue
+            next_attempt = float(goal.get("blocked_email_next_attempt_at", changed_at + delay))
+            if now < next_attempt:
+                continue
+            goal["blocked_email_attempted_at"] = now
+            attempts = int(goal.get("blocked_email_attempts", 0)) + 1
+            goal["blocked_email_attempts"] = attempts
+            write_goal(root, goal)
+            task = str(goal.get("task", goal.get("id"))).replace("\r", " ").replace("\n", " ")
+            message = EmailMessage()
+            message["To"] = recipient
+            message["Subject"] = f"Long-task goal remains blocked: {task}"
+            message.set_content(
+                f"Goal: {task}\nBlocked condition: {goal.get('condition')}\n"
+                f"State id: {goal.get('id')}\nThis confirms local MTA acceptance only."
+            )
+            try:
+                result = subprocess.run([os.environ.get("CODEX_LONG_TASK_WAKEUP_SENDMAIL", "/usr/sbin/sendmail"), "-t", "-oi"],
+                                        input=message.as_string(), text=True, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL, timeout=30, check=False)
+                goal["blocked_email_result"] = "accepted" if result.returncode == 0 else f"exit_{result.returncode}"
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                goal["blocked_email_result"] = f"failed_{type(exc).__name__}"
+            if goal["blocked_email_result"] != "accepted" and attempts < 3:
+                goal["blocked_email_next_attempt_at"] = now + 3600 * (2 ** (attempts - 1))
+            elif goal["blocked_email_result"] != "accepted":
+                goal["blocked_email_exhausted_at"] = now
+            write_goal(root, goal)
+            return True
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            print(f"codex-long-task-wakeup: warning: could not process blocked-goal email {path.name}: {exc}", file=sys.stderr)
+        finally:
+            release_owner_lock(lock, remove=False)
+    return False
+
+
+def goal_resume(args: argparse.Namespace) -> int:
+    root = queue_dir(args)
+    try:
+        goal_path(root, args.id)
+    except ValueError as exc:
+        print(f"codex-long-task-wakeup: error: {exc}", file=sys.stderr)
+        return 2
+    lock = acquire_owner_lock(root, goal_lock_id(args.id), blocking=True)
+    try:
+        try:
+            goal = load_goal(root, args.id)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"codex-long-task-wakeup: error: {exc}", file=sys.stderr)
+            return 1
+        if goal.get("state") == "completed":
+            print("codex-long-task-wakeup: error: completed goals are terminal", file=sys.stderr)
+            return 1
+        if goal.get("state") != "blocked_conditions":
+            print("codex-long-task-wakeup: error: only blocked goals can be resumed", file=sys.stderr)
+            return 1
+        now = time.time()
+        goal.update({"state": "active", "state_changed_at": now, "last_external_callback_at": now})
+        goal.pop("condition", None)
+        goal.pop("last_reminder_at", None)
+        clear_blocked_goal_email(goal)
+        write_goal(root, goal)
+    finally:
+        release_owner_lock(lock, remove=False)
+    print(f"codex-long-task-wakeup: goal {args.id} resumed")
+    return 0
+
+
 def cancel(args: argparse.Namespace) -> int:
     root = queue_dir(args)
     if args.all:
@@ -2370,6 +2710,27 @@ def main() -> int:
     ack_parser.add_argument("--id", required=True, help="Callback request id to acknowledge")
     ack_parser.add_argument("--message", help="Optional acknowledgement note")
 
+    goal_parser = sub.add_parser("goal", help="Manage persistent long-running goal acknowledgements")
+    goal_sub = goal_parser.add_subparsers(dest="goal_mode", required=True)
+    goal_start_parser = goal_sub.add_parser("start", help="Create an active goal")
+    goal_start_parser.add_argument("--id", help="Optional stable goal id")
+    goal_start_parser.add_argument("--queue-dir", help="Queue root that owns the goal")
+    goal_start_parser.add_argument("--session", required=True, help="Bound Codex session")
+    goal_start_parser.add_argument("--cwd", default=os.getcwd())
+    goal_start_parser.add_argument("--task", required=True)
+    goal_start_parser.add_argument("--idle-seconds", type=float, default=DEFAULT_GOAL_IDLE_SECONDS)
+    goal_ack_parser = goal_sub.add_parser("ack", help="Acknowledge completion or blocked conditions")
+    goal_ack_parser.add_argument("--queue-dir", help="Queue root that owns the goal")
+    goal_ack_parser.add_argument("--id", required=True)
+    goal_ack_parser.add_argument("--state", choices=["completed", "blocked_conditions"], required=True)
+    goal_ack_parser.add_argument("--message")
+    goal_ack_parser.add_argument("--condition")
+    goal_ack_parser.add_argument("--email-to")
+    goal_ack_parser.add_argument("--email-after", type=float, default=DEFAULT_BLOCKED_EMAIL_SECONDS)
+    goal_resume_parser = goal_sub.add_parser("resume", help="Explicitly resume a blocked goal")
+    goal_resume_parser.add_argument("--queue-dir", help="Queue root that owns the goal")
+    goal_resume_parser.add_argument("--id", required=True)
+
     cancel_parser = sub.add_parser("cancel", help="Cancel queued callbacks before they retry or complete")
     cancel_parser.add_argument("--queue-dir", help="Wakeup queue directory")
     cancel_target = cancel_parser.add_mutually_exclusive_group(required=True)
@@ -2410,6 +2771,12 @@ def main() -> int:
         return setup(args)
     if args.mode == "ack":
         return ack(args)
+    if args.mode == "goal":
+        if args.goal_mode == "start":
+            return goal_start(args)
+        if args.goal_mode == "ack":
+            return goal_ack(args)
+        return goal_resume(args)
     if args.mode == "cancel":
         return cancel(args)
     if args.mode == "status":
