@@ -41,6 +41,14 @@ DEFAULT_BLOCKED_EMAIL_SECONDS = 12 * 60 * 60
 DEFAULT_SUPERVISOR_CONF_DIR = "/etc/supervisor/conf.d"
 RELOAD_PROTOCOL_VERSION = 1
 CODEX_THREAD_ID_ENV = "CODEX_THREAD_ID"
+CLAUDE_THREAD_ID_ENV = "CLAUDE_CODE_SESSION_ID"
+CLAUDE_MARKER_ENV = "CLAUDECODE"
+CLAUDE_BIN_ENV = "LONG_TASK_WAKEUP_CLAUDE_BIN"
+CLAUDE_PERMISSION_MODE_ENV = "LONG_TASK_WAKEUP_CLAUDE_PERMISSION_MODE"
+DEFAULT_CLAUDE_PERMISSION_MODE = "auto"
+AGENT_NAMES = ("codex", "claude")
+AGENT_DISPLAY_NAMES = {"codex": "Codex", "claude": "Claude Code"}
+AGENT_THREAD_ID_ENVS = {"codex": CODEX_THREAD_ID_ENV, "claude": CLAUDE_THREAD_ID_ENV}
 SHELL_HOOK_BEGIN = "# >>> codex-long-task-wakeup pending status >>>"
 SHELL_HOOK_END = "# <<< codex-long-task-wakeup pending status <<<"
 ACTIVE_STATE = "active"
@@ -84,7 +92,7 @@ def build_prompt(
 ) -> str:
     lines = [
         "[long-task-callback]",
-        "A long-running task explicitly called back into Codex.",
+        f"A long-running task explicitly called back into {agent_display_name(resolve_agent(args))}.",
         f"Callback time: {datetime.now().astimezone().isoformat(timespec='seconds')}",
         f"Task: {args.task}",
         f"Working directory: {args.cwd}",
@@ -107,12 +115,55 @@ def build_prompt(
         ]
     )
     if acknowledgement:
-        lines.extend(["", build_acknowledgement_text(acknowledgement)])
+        lines.extend(["", build_acknowledgement_text(acknowledgement, agent=resolve_agent(args))])
     return "\n".join(lines)
 
 
 def truthy_env(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def resolve_agent(args: argparse.Namespace | None = None) -> str:
+    """Decide which agent (Codex or Claude Code) a callback should wake."""
+    if args is not None:
+        cached = getattr(args, "_callback_agent", None)
+        if isinstance(cached, str) and cached in AGENT_NAMES:
+            return cached
+        explicit = getattr(args, "agent", None)
+        if explicit:
+            if explicit not in AGENT_NAMES:
+                raise SystemExit(f"Unknown agent {explicit!r}; expected one of: {', '.join(AGENT_NAMES)}")
+            args._callback_agent = explicit
+            return explicit
+    if truthy_env(CLAUDE_MARKER_ENV) or os.environ.get(CLAUDE_THREAD_ID_ENV, "").strip():
+        agent = "claude"
+    elif os.environ.get(CODEX_THREAD_ID_ENV, "").strip():
+        agent = "codex"
+    else:
+        agent = "codex"
+    if args is not None:
+        args._callback_agent = agent
+    return agent
+
+
+def agent_display_name(agent: str) -> str:
+    return AGENT_DISPLAY_NAMES.get(agent, agent)
+
+
+def request_agent(request: dict[str, object]) -> str:
+    agent = request.get("agent", "codex")
+    return agent if isinstance(agent, str) and agent in AGENT_NAMES else "codex"
+
+
+def claude_command() -> str:
+    return os.environ.get(CLAUDE_BIN_ENV, "claude")
+
+
+def claude_permission_mode(request: dict[str, object]) -> str:
+    value = request.get("permission_mode")
+    if isinstance(value, str) and value:
+        return value
+    return os.environ.get(CLAUDE_PERMISSION_MODE_ENV, DEFAULT_CLAUDE_PERMISSION_MODE)
 
 
 def queue_dir(args: argparse.Namespace | None = None) -> Path:
@@ -165,9 +216,10 @@ def program_name(name: str) -> str:
 
 
 def console_script_path() -> str:
-    command = shutil.which("codex-long-task-wakeup")
-    if command:
-        return command
+    for name in ("ltc", "codex-long-task-wakeup"):
+        command = shutil.which(name)
+        if command:
+            return command
     return sys.argv[0]
 
 
@@ -178,15 +230,24 @@ def codex_bin_path(args: argparse.Namespace) -> str:
     return command or "codex"
 
 
+def claude_bin_path(args: argparse.Namespace) -> str:
+    claude_bin = getattr(args, "claude_bin", None)
+    if claude_bin:
+        return str(Path(claude_bin).expanduser())
+    command = shutil.which("claude")
+    return command or "claude"
+
+
 def systemd_service_text(args: argparse.Namespace) -> str:
     command = daemon_command(args)
     exec_start = " ".join(systemd_quote(part) for part in command)
     codex_bin = codex_bin_path(args)
+    claude_bin = claude_bin_path(args)
     path = args.path or os.environ.get("PATH", "")
     return "\n".join(
         [
             "[Unit]",
-            "Description=Codex Long Task Wakeup Daemon",
+            "Description=Long Task Callback daemon (Codex and Claude Code)",
             "Documentation=https://github.com/lz59970062/long-task-wakeup",
             "After=network-online.target",
             "Wants=network-online.target",
@@ -202,6 +263,7 @@ def systemd_service_text(args: argparse.Namespace) -> str:
             "Environment=PYTHONUNBUFFERED=1",
             f"Environment={systemd_quote(f'PATH={path}')}",
             f"Environment={systemd_quote(f'CODEX_LONG_TASK_WAKEUP_CODEX_BIN={codex_bin}')}",
+            f"Environment={systemd_quote(f'{CLAUDE_BIN_ENV}={claude_bin}')}",
             f"Environment={systemd_quote(f'{DESKTOP_APP_SERVER_ENV}=1')}",
             f"Environment={systemd_quote(f'{PROXY_ENV_FILE_ENV}={service_proxy_env_path()}')}",
             f"EnvironmentFile=-{service_proxy_env_path()}",
@@ -283,13 +345,15 @@ def resolve_target(args: argparse.Namespace) -> tuple[dict[str, str], str]:
     if args.last:
         return {"kind": "last"}, "--last"
 
-    session = os.environ.get(CODEX_THREAD_ID_ENV, "").strip()
+    agent = resolve_agent(args)
+    env_name = AGENT_THREAD_ID_ENVS[agent]
+    session = os.environ.get(env_name, "").strip()
     if session:
-        return {"kind": "session", "value": session}, CODEX_THREAD_ID_ENV
+        return {"kind": "session", "value": session}, env_name
 
     raise SystemExit(
-        f"Cannot determine the callback session: {CODEX_THREAD_ID_ENV} is unset. "
-        "Run from Codex or pass --session <id>; use --last only as an explicit unsafe fallback."
+        f"Cannot determine the callback session: {env_name} is unset. "
+        f"Run from {agent_display_name(agent)} or pass --session <id>; use --last only as an explicit unsafe fallback."
     )
 
 
@@ -304,12 +368,12 @@ def bind_target(args: argparse.Namespace) -> tuple[dict[str, str], str]:
     args._callback_target_source = source
     if target["kind"] == "session":
         print(
-            f"codex-long-task-wakeup: callback bound to session {target['value']} via {source}",
+            f"ltc: callback bound to session {target['value']} via {source}",
             file=sys.stderr,
         )
     else:
         print(
-            "codex-long-task-wakeup: warning: --last is not session-safe and may wake an unrelated active thread",
+            "ltc: warning: --last is not session-safe and may wake an unrelated active thread",
             file=sys.stderr,
         )
     return target, source
@@ -330,7 +394,7 @@ def routing_text(request: dict[str, object]) -> str:
     return "\n".join(
         [
             "Callback routing warning:",
-            "- Target: most recently active Codex session (--last)",
+            f"- Target: most recently active {agent_display_name(request_agent(request))} session (--last)",
             "- This unsafe fallback was explicitly requested and may reach an unrelated thread.",
         ]
     )
@@ -342,11 +406,13 @@ def attach_routing_text(prompt: str, request: dict[str, object]) -> str:
 
 def make_request(args: argparse.Namespace, prompt: str) -> dict[str, object]:
     target, target_source = bind_target(args)
+    agent = resolve_agent(args)
     request = {
         "version": 1,
         "id": uuid.uuid4().hex,
         "created_at": time.time(),
         "cwd": args.cwd,
+        "agent": agent,
         "target": target,
         "target_source": target_source,
         "prompt": prompt,
@@ -354,6 +420,10 @@ def make_request(args: argparse.Namespace, prompt: str) -> dict[str, object]:
         "approval_policy": getattr(args, "approval_policy", None) or DEFAULT_APPROVAL_POLICY,
         "sandbox_mode": getattr(args, "sandbox_mode", None) or DEFAULT_SANDBOX_MODE,
     }
+    if agent == "claude":
+        request["permission_mode"] = getattr(args, "permission_mode", None) or os.environ.get(
+            CLAUDE_PERMISSION_MODE_ENV, DEFAULT_CLAUDE_PERMISSION_MODE
+        )
     goal_id = getattr(args, "goal_id", None)
     if goal_id:
         request["goal_id"] = goal_id
@@ -376,7 +446,7 @@ def prepare_request_for_queue(root: Path, request: dict[str, object], prompt: st
         ]
     )
     routed_prompt = attach_routing_text(prompt, request)
-    request["prompt"] = f"{routed_prompt}\n\n{build_acknowledgement_text(acknowledgement)}"
+    request["prompt"] = f"{routed_prompt}\n\n{build_acknowledgement_text(acknowledgement, agent=request_agent(request))}"
     return request
 
 
@@ -403,13 +473,13 @@ def enqueue_existing_request(root: Path, request: dict[str, object], prompt: str
             goal.pop("last_reminder_at", None)
             write_goal(root, goal)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(f"codex-long-task-wakeup: warning: failed to enqueue callback: {exc}", file=sys.stderr)
+        print(f"ltc: warning: failed to enqueue callback: {exc}", file=sys.stderr)
         return 1
     finally:
         if goal_lock is not None:
             release_owner_lock(goal_lock, remove=False)
 
-    print(f"codex-long-task-wakeup: queued callback {request_id} in {root}", file=sys.stderr)
+    print(f"ltc: queued callback {request_id} in {root}", file=sys.stderr)
     return 0
 
 
@@ -424,6 +494,15 @@ def should_enqueue(args: argparse.Namespace) -> bool:
 
 
 def resume_command(request: dict[str, object]) -> list[str]:
+    agent = request.get("agent", "codex")
+    if agent == "claude":
+        return claude_resume_command(request)
+    if agent != "codex":
+        raise ValueError(f"unsupported request agent: {agent!r}")
+    return codex_resume_command(request)
+
+
+def codex_resume_command(request: dict[str, object]) -> list[str]:
     cmd = [codex_command(), "exec", "resume", "--all"]
     approvals_reviewer = request.get("approvals_reviewer", DEFAULT_APPROVALS_REVIEWER)
     if isinstance(approvals_reviewer, str) and approvals_reviewer:
@@ -454,6 +533,27 @@ def resume_command(request: dict[str, object]) -> list[str]:
     return cmd
 
 
+def claude_resume_command(request: dict[str, object]) -> list[str]:
+    cmd = [claude_command(), "-p", "--permission-mode", claude_permission_mode(request)]
+    queue_root = request.get("queue_dir")
+    if isinstance(queue_root, str) and queue_root:
+        cmd.extend(["--add-dir", queue_root])
+    target = request.get("target")
+    if not isinstance(target, dict):
+        raise ValueError("request target must be an object")
+    kind = target.get("kind")
+    if kind == "session":
+        value = target.get("value")
+        if not isinstance(value, str) or not value:
+            raise ValueError("session target requires a non-empty value")
+        cmd.extend(["--resume", value])
+    elif kind == "last":
+        cmd.append("--continue")
+    else:
+        raise ValueError("request target kind must be 'session' or 'last'")
+    return cmd
+
+
 def resume_codex(args: argparse.Namespace, prompt: str) -> int:
     if should_enqueue(args):
         return enqueue_request(args, prompt)
@@ -464,6 +564,7 @@ def resume_codex(args: argparse.Namespace, prompt: str) -> int:
         print(routed_prompt)
         return 0
     cmd = resume_command(request)
+    display = agent_display_name(request_agent(request))
 
     try:
         result = subprocess.run(
@@ -474,12 +575,12 @@ def resume_codex(args: argparse.Namespace, prompt: str) -> int:
             check=False,
         )
     except OSError as exc:
-        print(f"codex-long-task-wakeup: warning: failed to run Codex callback: {exc}", file=sys.stderr)
+        print(f"ltc: warning: failed to run {display} callback: {exc}", file=sys.stderr)
         return 127
 
     if result.returncode != 0:
         print(
-            f"codex-long-task-wakeup: warning: Codex callback exited with {result.returncode}",
+            f"ltc: warning: {display} callback exited with {result.returncode}",
             file=sys.stderr,
         )
     return result.returncode
@@ -603,14 +704,24 @@ def load_request(path: Path) -> dict[str, object]:
     return data
 
 
-def build_acknowledgement_text(command: str) -> str:
+def build_acknowledgement_text(command: str, agent: str = "codex") -> str:
+    if agent == "claude":
+        delivery_note = (
+            "This resume runs Claude Code headless with automatic permission handling "
+            "and grants the callback queue directory as an additional working directory."
+        )
+    else:
+        delivery_note = (
+            "This resume is configured to make the callback queue writable and to use "
+            "automatic approval review when the Codex CLI supports it."
+        )
     return "\n".join(
         [
             "Callback acknowledgement:",
             "After you have successfully resumed this callback and inspected the relevant result,",
             "mark the callback as received by running this command:",
             command,
-            "This resume is configured to make the callback queue writable and to use automatic approval review when the Codex CLI supports it.",
+            delivery_note,
             "The wakeup daemon will retry this callback until the acknowledgement marker exists or retries are exhausted.",
         ]
     )
@@ -817,7 +928,7 @@ def reap_background_resumes() -> None:
             continue
         if now >= delivery.deadline:
             print(
-                f"codex-long-task-wakeup: warning: acknowledged resume {delivery.request_id} "
+                f"ltc: warning: acknowledged resume {delivery.request_id} "
                 "exceeded its timeout; terminating the resume process",
                 file=sys.stderr,
             )
@@ -1175,7 +1286,7 @@ class DesktopAppServerDelivery:
             return self.connection.wait_for_turn_completion(self.thread_id, self.turn_id, timeout)
         except AppServerProtocolError as exc:
             print(
-                f"codex-long-task-wakeup: desktop App Server completion stream unavailable: {exc}; "
+                f"ltc: desktop App Server completion stream unavailable: {exc}; "
                 "retaining the callback lease until timeout",
                 file=sys.stderr,
             )
@@ -1192,6 +1303,8 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
     request = payload.get("request")
     if not isinstance(request, dict):
         return None
+    if request_agent(request) != "codex":
+        return None  # The Desktop App Server delivery path is Codex-only.
     socket_path = desktop_app_server_socket(request)
     target = request.get("target")
     sandbox_policy = desktop_sandbox_policy(request)
@@ -1230,7 +1343,7 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
             turn_id = candidate if isinstance(candidate, str) and candidate else None
         if turn_id is None:
             print(
-                "codex-long-task-wakeup: desktop App Server accepted turn/start without a turn id; "
+                "ltc: desktop App Server accepted turn/start without a turn id; "
                 "retaining the callback lease until timeout",
                 file=sys.stderr,
             )
@@ -1242,21 +1355,21 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
     except AppServerRpcError as exc:
         if turn_start_submitted:
             print(
-                f"codex-long-task-wakeup: desktop App Server rejected turn/start: {exc}; falling back to CLI",
+                f"ltc: desktop App Server rejected turn/start: {exc}; falling back to CLI",
                 file=sys.stderr,
             )
         else:
-            print(f"codex-long-task-wakeup: desktop App Server delivery unavailable: {exc}; falling back to CLI", file=sys.stderr)
+            print(f"ltc: desktop App Server delivery unavailable: {exc}; falling back to CLI", file=sys.stderr)
         return None
     except (OSError, ValueError, TypeError, AppServerProtocolError) as exc:
         if turn_start_submitted:
             print(
-                f"codex-long-task-wakeup: desktop App Server turn/start outcome is unknown: {exc}; "
+                f"ltc: desktop App Server turn/start outcome is unknown: {exc}; "
                 "waiting for ACK or timeout without CLI fallback",
                 file=sys.stderr,
             )
             return DesktopAppServerDelivery(None, target["value"], None)
-        print(f"codex-long-task-wakeup: desktop App Server delivery unavailable: {exc}; falling back to CLI", file=sys.stderr)
+        print(f"ltc: desktop App Server delivery unavailable: {exc}; falling back to CLI", file=sys.stderr)
         return None
     finally:
         if connection is not None:
@@ -1706,13 +1819,13 @@ def discard_unlaunched_active(root: Path, request_id: str) -> None:
     except FileNotFoundError:
         return
     except OSError as exc:
-        print(f"codex-long-task-wakeup: warning: could not remove unlaunched callback {request_id}: {exc}", file=sys.stderr)
+        print(f"ltc: warning: could not remove unlaunched callback {request_id}: {exc}", file=sys.stderr)
         return
     try:
         fsync_directory(path.parent)
     except OSError as exc:
         print(
-            f"codex-long-task-wakeup: warning: removed unlaunched active callback {request_id} "
+            f"ltc: warning: removed unlaunched active callback {request_id} "
             f"but could not sync its directory: {exc}",
             file=sys.stderr,
         )
@@ -1726,11 +1839,11 @@ def best_effort_disarm(
     try:
         discard_unlaunched_active(root, request_id)
     except Exception as exc:
-        print(f"codex-long-task-wakeup: warning: pre-arm record cleanup failed: {exc}", file=sys.stderr)
+        print(f"ltc: warning: pre-arm record cleanup failed: {exc}", file=sys.stderr)
     try:
         release_owner_lock(lock, remove=True)
     except Exception as exc:
-        print(f"codex-long-task-wakeup: warning: pre-arm lock cleanup failed: {exc}", file=sys.stderr)
+        print(f"ltc: warning: pre-arm lock cleanup failed: {exc}", file=sys.stderr)
 
 
 def transition_active_to_pending(root: Path, request: dict[str, object], prompt: str) -> int:
@@ -1738,13 +1851,13 @@ def transition_active_to_pending(root: Path, request: dict[str, object], prompt:
     source = request_path(root, ACTIVE_STATE, request_id)
     if is_canceled(root, request_id):
         remove_live_request_copies(root, request_id)
-        print(f"codex-long-task-wakeup: callback {request_id} was canceled; suppressing finalization", file=sys.stderr)
+        print(f"ltc: callback {request_id} was canceled; suppressing finalization", file=sys.stderr)
         return 0
     if not source.exists():
         if request_already_transitioned(root, request_id):
             return 0
         print(
-            f"codex-long-task-wakeup: warning: active callback {request_id} disappeared before finalization",
+            f"ltc: warning: active callback {request_id} disappeared before finalization",
             file=sys.stderr,
         )
         return 1
@@ -1767,7 +1880,7 @@ def transition_active_to_pending(root: Path, request: dict[str, object], prompt:
     if is_canceled(root, request_id):
         remove_live_request_copies(root, request_id)
         return 0
-    print(f"codex-long-task-wakeup: queued callback {request_id} in {root}", file=sys.stderr)
+    print(f"ltc: queued callback {request_id} in {root}", file=sys.stderr)
     return 0
 
 
@@ -1779,6 +1892,7 @@ def recovery_prompt(request: dict[str, object], now: float) -> str:
         cwd=str(request["cwd"]),
         command=str(request.get("command") or ""),
         exit_code=None,
+        agent=request_agent(request),
         message=(
             "The long-task wrapper disappeared before recording task completion. "
             "The task outcome and exit status are unknown, and the wrapped child may still be running. "
@@ -1809,7 +1923,7 @@ def recover_active(root: Path) -> int:
                 discard_unlaunched_active(root, request_id)
                 remove_lock = True
                 print(
-                    f"codex-long-task-wakeup: discarded callback {request_id}; wrapped task was not launch-committed",
+                    f"ltc: discarded callback {request_id}; wrapped task was not launch-committed",
                     file=sys.stderr,
                 )
                 continue
@@ -1818,7 +1932,7 @@ def recover_active(root: Path) -> int:
                 recovered += 1
                 remove_lock = True
                 print(
-                    f"codex-long-task-wakeup: recovered completed callback {request_id} with its recorded exit code",
+                    f"ltc: recovered completed callback {request_id} with its recorded exit code",
                     file=sys.stderr,
                 )
                 continue
@@ -1831,12 +1945,12 @@ def recover_active(root: Path) -> int:
                 recovered += 1
                 remove_lock = True
                 print(
-                    f"codex-long-task-wakeup: recovered orphaned active callback {request_id} with unknown outcome",
+                    f"ltc: recovered orphaned active callback {request_id} with unknown outcome",
                     file=sys.stderr,
                 )
         except Exception as exc:
             print(
-                f"codex-long-task-wakeup: warning: failed to recover active callback {request_id}: {exc}",
+                f"ltc: warning: failed to recover active callback {request_id}: {exc}",
                 file=sys.stderr,
             )
         finally:
@@ -1849,7 +1963,7 @@ def cancel_one(root: Path, request_id: str, message: str | None = None) -> bool:
     canceled = request_path(root, "canceled", request_id)
     if canceled.exists():
         remove_live_request_copies(root, request_id)
-        print(f"codex-long-task-wakeup: callback {request_id} is already canceled in {root}", file=sys.stderr)
+        print(f"ltc: callback {request_id} is already canceled in {root}", file=sys.stderr)
         return True
 
     for state in (ACTIVE_STATE, "pending", "running", "failed"):
@@ -1879,14 +1993,14 @@ def cancel_one(root: Path, request_id: str, message: str | None = None) -> bool:
             release_retained_target_lease(root, data)
         except RuntimeError as exc:
             print(
-                f"codex-long-task-wakeup: warning: could not release retained target lease for "
+                f"ltc: warning: could not release retained target lease for "
                 f"{request_id}: {exc}",
                 file=sys.stderr,
             )
-        print(f"codex-long-task-wakeup: canceled callback {request_id} from {state} in {root}", file=sys.stderr)
+        print(f"ltc: canceled callback {request_id} from {state} in {root}", file=sys.stderr)
         return True
 
-    print(f"codex-long-task-wakeup: warning: active callback {request_id} not found in {root}", file=sys.stderr)
+    print(f"ltc: warning: active callback {request_id} not found in {root}", file=sys.stderr)
     return False
 
 
@@ -1899,7 +2013,7 @@ def cancel_all(root: Path, message: str | None = None) -> int:
     for request_id in sorted(request_ids):
         if cancel_one(root, request_id, message):
             canceled += 1
-    print(f"codex-long-task-wakeup: canceled {canceled} active callback(s) in {root}", file=sys.stderr)
+    print(f"ltc: canceled {canceled} active callback(s) in {root}", file=sys.stderr)
     return canceled
 
 
@@ -1918,7 +2032,7 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
     except FileNotFoundError:
         return True
     except Exception as exc:
-        print(f"codex-long-task-wakeup: warning: could not claim {path.name}: {exc}", file=sys.stderr)
+        print(f"ltc: warning: could not claim {path.name}: {exc}", file=sys.stderr)
         return True
     if is_canceled(root, request_id):
         remove_live_request_copies(root, request_id)
@@ -1951,9 +2065,9 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
         if result is None:
             return True
         if result.returncode == 124 and not acked:
-            request["last_error"] = "Codex resume timed out"
+            request["last_error"] = "agent resume timed out"
             print(
-                f"codex-long-task-wakeup: warning: daemon callback {running.name} timed out",
+                f"ltc: warning: daemon callback {running.name} timed out",
                 file=sys.stderr,
             )
         if result.returncode == 125 and not acked:
@@ -1961,7 +2075,7 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
             request["retain_target_lease"] = True
             destination_dir = root / "failed"
             print(
-                f"codex-long-task-wakeup: warning: daemon callback {running.name} has an unknown Desktop outcome; "
+                f"ltc: warning: daemon callback {running.name} has an unknown Desktop outcome; "
                 "manual recovery is required to avoid duplicate delivery",
                 file=sys.stderr,
             )
@@ -1975,7 +2089,7 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
             destination_dir = root / ("done" if acked else "failed")
         if result.returncode != 0:
             print(
-                f"codex-long-task-wakeup: warning: daemon callback {running.name} exited with {result.returncode}",
+                f"ltc: warning: daemon callback {running.name} exited with {result.returncode}",
                 file=sys.stderr,
             )
         if not acked and result.returncode != 125:
@@ -1986,24 +2100,24 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
                 request["next_attempt_at"] = time.time() + delay
                 if not running.exists():
                     print(
-                        f"codex-long-task-wakeup: callback {request_id} disappeared from running; assuming it was canceled",
+                        f"ltc: callback {request_id} disappeared from running; assuming it was canceled",
                         file=sys.stderr,
                     )
                     return True
                 write_request(running, request)
                 move_request(running, root / "pending")
                 print(
-                    f"codex-long-task-wakeup: warning: daemon callback {running.name} was not acknowledged; "
+                    f"ltc: warning: daemon callback {running.name} was not acknowledged; "
                     f"retry {attempts}/{max_retries} in {delay:.1f}s",
                     file=sys.stderr,
                 )
                 return True
     except Exception as exc:
         destination_dir = root / "failed"
-        print(f"codex-long-task-wakeup: warning: daemon failed to process {running.name}: {exc}", file=sys.stderr)
+        print(f"ltc: warning: daemon failed to process {running.name}: {exc}", file=sys.stderr)
 
     if not running.exists():
-        print(f"codex-long-task-wakeup: callback {running.stem} disappeared from running; assuming it was canceled", file=sys.stderr)
+        print(f"ltc: callback {running.stem} disappeared from running; assuming it was canceled", file=sys.stderr)
         return True
     try:
         finalized = move_request(running, destination_dir)
@@ -2021,7 +2135,7 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
     except FileNotFoundError:
         return True
     except Exception as exc:
-        print(f"codex-long-task-wakeup: warning: could not finalize {running.name}: {exc}", file=sys.stderr)
+        print(f"ltc: warning: could not finalize {running.name}: {exc}", file=sys.stderr)
     return True
 
 
@@ -2039,11 +2153,11 @@ def recover_running(root: Path) -> None:
             if is_canceled(root, path.stem):
                 continue
             print(
-                f"codex-long-task-wakeup: running callback {path.stem} changed state during recovery",
+                f"ltc: running callback {path.stem} changed state during recovery",
                 file=sys.stderr,
             )
         except Exception as exc:
-            print(f"codex-long-task-wakeup: warning: failed to recover {path.name}: {exc}", file=sys.stderr)
+            print(f"ltc: warning: failed to recover {path.name}: {exc}", file=sys.stderr)
             if not path.exists():
                 continue
             try:
@@ -2052,7 +2166,7 @@ def recover_running(root: Path) -> None:
                 continue
             except Exception as move_exc:
                 print(
-                    f"codex-long-task-wakeup: warning: could not quarantine {path.name}: {move_exc}",
+                    f"ltc: warning: could not quarantine {path.name}: {move_exc}",
                     file=sys.stderr,
                 )
 
@@ -2086,6 +2200,7 @@ def process_goal_reminders(root: Path) -> bool:
                 return True
             request = {
                 "version": 1, "id": uuid.uuid4().hex, "created_at": now, "cwd": goal["cwd"],
+                "agent": goal.get("agent", "codex"),
                 "target": goal["target"], "target_source": goal.get("target_source", "goal"),
                 "goal_id": goal_id, "goal_reminder": True, "prompt": "",
             }
@@ -2104,7 +2219,7 @@ def process_goal_reminders(root: Path) -> bool:
             write_goal(root, goal)
             return True
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
-            print(f"codex-long-task-wakeup: warning: could not process goal reminder {path.name}: {exc}", file=sys.stderr)
+            print(f"ltc: warning: could not process goal reminder {path.name}: {exc}", file=sys.stderr)
         finally:
             release_owner_lock(lock, remove=False)
     return False
@@ -2128,7 +2243,7 @@ def daemon(args: argparse.Namespace) -> int:
     ensure_daemon_dirs(root)
     daemon_lock = acquire_owner_lock(root, "daemon-singleton", blocking=False)
     if daemon_lock is None:
-        print(f"codex-long-task-wakeup: another daemon already owns {root}", file=sys.stderr)
+        print(f"ltc: another daemon already owns {root}", file=sys.stderr)
         return 1
 
     reload_requested = False
@@ -2145,7 +2260,7 @@ def daemon(args: argparse.Namespace) -> int:
         load_service_proxy_environment()
         write_daemon_runtime()
         recover_running(root)
-        print(f"codex-long-task-wakeup: daemon watching {root}", file=sys.stderr)
+        print(f"ltc: daemon watching {root}", file=sys.stderr)
 
         processed = 0
         while True:
@@ -2154,7 +2269,7 @@ def daemon(args: argparse.Namespace) -> int:
                 if daemon_has_live_delivery_workers(root):
                     if not reload_deferred_reported:
                         print(
-                            "codex-long-task-wakeup: reload deferred until live delivery workers exit; "
+                            "ltc: reload deferred until live delivery workers exit; "
                             "their leases and resumed Codex processes will not be interrupted.",
                             file=sys.stderr,
                         )
@@ -2162,7 +2277,7 @@ def daemon(args: argparse.Namespace) -> int:
                 else:
                     load_service_proxy_environment()
                     print(
-                        "codex-long-task-wakeup: reloading daemon in place after delivery workers drained.",
+                        "ltc: reloading daemon in place after delivery workers drained.",
                         file=sys.stderr,
                     )
                     os.execv(sys.executable, daemon_reexec_command(args))
@@ -2199,7 +2314,7 @@ def done(args: argparse.Namespace) -> int:
 
 def run_unarmed_via_daemon(args: argparse.Namespace, started: float, reason: str) -> int:
     print(
-        "codex-long-task-wakeup: UNARMED WARNING: durable pre-launch callback persistence failed; "
+        "ltc: UNARMED WARNING: durable pre-launch callback persistence failed; "
         f"running with legacy post-exit best effort ({reason})",
         file=sys.stderr,
     )
@@ -2242,13 +2357,13 @@ def run_via_daemon(args: argparse.Namespace) -> int:
         lock = acquire_owner_lock(root, request_id, blocking=True)
     except (OSError, RuntimeError) as exc:
         if args.strict:
-            print(f"codex-long-task-wakeup: refusing to launch unarmed task: {exc}", file=sys.stderr)
+            print(f"ltc: refusing to launch unarmed task: {exc}", file=sys.stderr)
             return 125
         return run_unarmed_via_daemon(args, started, str(exc))
     if lock is None:
         reason = "failed to acquire callback owner lock"
         if args.strict:
-            print(f"codex-long-task-wakeup: refusing to launch unarmed task: {reason}", file=sys.stderr)
+            print(f"ltc: refusing to launch unarmed task: {reason}", file=sys.stderr)
             return 125
         return run_unarmed_via_daemon(args, started, reason)
     try:
@@ -2261,13 +2376,13 @@ def run_via_daemon(args: argparse.Namespace) -> int:
         best_effort_disarm(root, request_id, lock)
         if args.strict:
             print(
-                f"codex-long-task-wakeup: refusing to launch unarmed task because active callback persistence failed: {exc}",
+                f"ltc: refusing to launch unarmed task because active callback persistence failed: {exc}",
                 file=sys.stderr,
             )
             return 125
         return run_unarmed_via_daemon(args, started, str(exc))
 
-    print(f"codex-long-task-wakeup: armed callback {request_id} before task launch", file=sys.stderr)
+    print(f"ltc: armed callback {request_id} before task launch", file=sys.stderr)
     exit_code = 1
     task_returned = False
     try:
@@ -2311,13 +2426,13 @@ def run_via_daemon(args: argparse.Namespace) -> int:
         try:
             callback_code = transition_active_to_pending(root, request, prompt)
         except Exception as exc:
-            print(f"codex-long-task-wakeup: warning: failed to finalize callback {request_id}: {exc}", file=sys.stderr)
+            print(f"ltc: warning: failed to finalize callback {request_id}: {exc}", file=sys.stderr)
         finally:
             try:
                 release_owner_lock(lock, remove=True)
             except Exception as exc:
                 callback_code = 1
-                print(f"codex-long-task-wakeup: warning: failed to clean callback lock {request_id}: {exc}", file=sys.stderr)
+                print(f"ltc: warning: failed to clean callback lock {request_id}: {exc}", file=sys.stderr)
         if task_returned and args.strict and exit_code == 0 and callback_code != 0:
             raise SystemExit(callback_code)
 
@@ -2364,17 +2479,22 @@ def run(args: argparse.Namespace) -> int:
 
 
 def add_common_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--agent",
+        choices=AGENT_NAMES,
+        help="Agent to wake (default: auto-detect from $CLAUDECODE/$CLAUDE_CODE_SESSION_ID or $CODEX_THREAD_ID)",
+    )
     target = parser.add_mutually_exclusive_group()
     target.add_argument(
         "--session",
-        help=f"Codex session id to resume (default: ${CODEX_THREAD_ID_ENV} from the launching Codex thread)",
+        help=f"Agent session id to resume (default: ${CLAUDE_THREAD_ID_ENV} or ${CODEX_THREAD_ID_ENV} from the launching agent thread)",
     )
     target.add_argument(
         "--last",
         action="store_true",
-        help="Unsafely resume the most recent Codex session instead of binding the launching thread",
+        help="Unsafely resume the most recent agent session instead of binding the launching thread",
     )
-    parser.add_argument("--cwd", default=os.getcwd(), help="Working directory for resumed Codex")
+    parser.add_argument("--cwd", default=os.getcwd(), help="Working directory for the resumed agent")
     parser.add_argument("--task", default="long task", help="Human-readable task name")
     parser.add_argument("--command", help="Original command text")
     parser.add_argument("--exit-code", type=int, help="Completed task exit code")
@@ -2382,26 +2502,31 @@ def add_common_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--via-daemon",
         action="store_true",
-        help="Queue the wakeup request for codex-long-task-wakeup daemon instead of running codex exec resume here",
+        help="Queue the wakeup request for the wakeup daemon instead of resuming the agent here",
     )
     parser.add_argument("--queue-dir", help="Wakeup queue directory for --via-daemon")
     parser.add_argument("--goal-id", help="Explicit goal record to update when this callback is queued")
     parser.add_argument(
         "--approvals-reviewer",
         default=os.environ.get("CODEX_LONG_TASK_WAKEUP_APPROVALS_REVIEWER", DEFAULT_APPROVALS_REVIEWER),
-        help="Codex approvals_reviewer config value used when resuming (default: auto_review)",
+        help="Codex-only: approvals_reviewer config value used when resuming (default: auto_review)",
     )
     parser.add_argument(
         "--approval-policy",
         default=os.environ.get("CODEX_LONG_TASK_WAKEUP_APPROVAL_POLICY", DEFAULT_APPROVAL_POLICY),
-        help="Codex approval_policy config value used when resuming (default: on-request)",
+        help="Codex-only: approval_policy config value used when resuming (default: on-request)",
     )
     parser.add_argument(
         "--sandbox-mode",
         default=os.environ.get("CODEX_LONG_TASK_WAKEUP_SANDBOX_MODE", DEFAULT_SANDBOX_MODE),
-        help="Codex sandbox_mode config value used when resuming (default: workspace-write)",
+        help="Codex-only: sandbox_mode config value used when resuming (default: workspace-write)",
     )
-    parser.add_argument("--dry-run", action="store_true", help="Print the wakeup prompt instead of resuming Codex")
+    parser.add_argument(
+        "--permission-mode",
+        default=os.environ.get(CLAUDE_PERMISSION_MODE_ENV, DEFAULT_CLAUDE_PERMISSION_MODE),
+        help="Claude Code-only: --permission-mode used when resuming (default: auto)",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Print the wakeup prompt instead of resuming the agent")
     parser.add_argument(
         "--strict",
         action="store_true",
@@ -2413,10 +2538,12 @@ def codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
 
 
-def install_skill(args: argparse.Namespace) -> int:
-    target_root = Path(args.path).expanduser() if args.path else codex_home() / "skills"
-    target = target_root / "long-task-callback"
-    if target.exists() and not args.force:
+def claude_home() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser()
+
+
+def install_skill_tree(target: Path, *, include_codex_plugin: bool, force: bool) -> int:
+    if target.exists() and not force:
         print(
             f"Skill already exists at {target}. Re-run with --force to overwrite.",
             file=sys.stderr,
@@ -2429,22 +2556,40 @@ def install_skill(args: argparse.Namespace) -> int:
     target.mkdir(parents=True, exist_ok=True)
 
     for item in package_root.iterdir():
+        if item.name == "agents" and not include_codex_plugin:
+            continue  # agents/openai.yaml is Codex plugin metadata; other agents ignore it.
         destination = target / item.name
-        if item.is_dir():
-            shutil.copytree(item, destination)
-        else:
-            with resources.as_file(item) as source:
+        with resources.as_file(item) as source:
+            if item.is_dir():
+                shutil.copytree(source, destination)
+            else:
                 shutil.copy2(source, destination)
 
-    print(f"Installed Codex skill to {target}")
+    print(f"Installed long-task-callback skill to {target}")
     return 0
+
+
+def install_skill(args: argparse.Namespace) -> int:
+    if args.path:
+        return install_skill_tree(
+            Path(args.path).expanduser() / "long-task-callback",
+            include_codex_plugin=True,
+            force=args.force,
+        )
+    target_name = getattr(args, "target", None) or "both"
+    status = 0
+    if target_name in ("codex", "both"):
+        status |= install_skill_tree(codex_home() / "skills" / "long-task-callback", include_codex_plugin=True, force=args.force)
+    if target_name in ("claude", "both"):
+        status |= install_skill_tree(claude_home() / "skills" / "long-task-callback", include_codex_plugin=False, force=args.force)
+    return status
 
 
 def run_systemctl(args: list[str]) -> int:
     command = ["systemctl", "--user", *args]
     result = subprocess.run(command, check=False)
     if result.returncode != 0:
-        print(f"codex-long-task-wakeup: warning: {' '.join(shlex.quote(part) for part in command)} exited with {result.returncode}", file=sys.stderr)
+        print(f"ltc: warning: {' '.join(shlex.quote(part) for part in command)} exited with {result.returncode}", file=sys.stderr)
     return result.returncode
 
 
@@ -2462,7 +2607,7 @@ def run_supervisorctl(args: list[str]) -> int:
     command = ["supervisorctl", *args]
     result = subprocess.run(command, check=False)
     if result.returncode != 0:
-        print(f"codex-long-task-wakeup: warning: {' '.join(shlex.quote(part) for part in command)} exited with {result.returncode}", file=sys.stderr)
+        print(f"ltc: warning: {' '.join(shlex.quote(part) for part in command)} exited with {result.returncode}", file=sys.stderr)
     return result.returncode
 
 
@@ -2590,6 +2735,7 @@ def daemon_environment(args: argparse.Namespace, *, include_proxy_values: bool =
     values = {
         "PYTHONUNBUFFERED": "1",
         "CODEX_LONG_TASK_WAKEUP_CODEX_BIN": codex_bin_path(args),
+        CLAUDE_BIN_ENV: claude_bin_path(args),
         DESKTOP_APP_SERVER_ENV: os.environ.get(DESKTOP_APP_SERVER_ENV, "1"),
         "PATH": getattr(args, "path", None) or os.environ.get("PATH", ""),
         PROXY_ENV_FILE_ENV: str(service_proxy_env_path()),
@@ -2682,7 +2828,7 @@ def start_standalone_daemon(args: argparse.Namespace) -> int:
     if existing_pid is not None and pid_is_running(existing_pid):
         if has_running_callbacks(args):
             print(
-                "codex-long-task-wakeup: deferred standalone daemon reload because callback delivery is running; "
+                "ltc: deferred standalone daemon reload because callback delivery is running; "
                 "the existing daemon was left untouched.",
                 file=sys.stderr,
             )
@@ -2692,17 +2838,17 @@ def start_standalone_daemon(args: argparse.Namespace) -> int:
                 os.kill(existing_pid, signal.SIGHUP)
             except ProcessLookupError:
                 print(
-                    "codex-long-task-wakeup: standalone daemon exited while preparing reload; starting a replacement.",
+                    "ltc: standalone daemon exited while preparing reload; starting a replacement.",
                     file=sys.stderr,
                 )
             else:
                 print(f"Reloading standalone wakeup daemon with pid {existing_pid}.")
-                print(f"codex-long-task-wakeup: standalone daemon already running with pid {existing_pid}")
-                print(f"codex-long-task-wakeup: log file: {log_path}")
+                print(f"ltc: standalone daemon already running with pid {existing_pid}")
+                print(f"ltc: log file: {log_path}")
                 return 0
         else:
-            print(f"codex-long-task-wakeup: standalone daemon already running with pid {existing_pid}")
-            print(f"codex-long-task-wakeup: log file: {log_path}")
+            print(f"ltc: standalone daemon already running with pid {existing_pid}")
+            print(f"ltc: log file: {log_path}")
             return 0
 
     env = os.environ.copy()
@@ -2727,7 +2873,7 @@ def start_standalone_daemon(args: argparse.Namespace) -> int:
     returncode = process.poll()
     if returncode is not None:
         print(
-            f"codex-long-task-wakeup: warning: standalone daemon exited immediately with {returncode}; see {log_path}",
+            f"ltc: warning: standalone daemon exited immediately with {returncode}; see {log_path}",
             file=sys.stderr,
         )
         return returncode
@@ -2743,7 +2889,7 @@ def start_supervisord_if_available() -> int:
         return 1
     result = subprocess.run(["supervisord"], check=False)
     if result.returncode != 0:
-        print("codex-long-task-wakeup: warning: supervisord failed to start", file=sys.stderr)
+        print("ltc: warning: supervisord failed to start", file=sys.stderr)
     return result.returncode
 
 
@@ -2763,13 +2909,13 @@ def install_supervisor(args: argparse.Namespace) -> int:
         return 0
     if has_running_callbacks(args):
         print(
-            "codex-long-task-wakeup: deferred supervisor update because callback delivery is running; "
+            "ltc: deferred supervisor update because callback delivery is running; "
             "the installed config will activate after those callbacks drain.",
             file=sys.stderr,
         )
         return 0
     if shutil.which("supervisorctl") is None:
-        print("codex-long-task-wakeup: warning: supervisorctl not found; supervisor config was written but not loaded", file=sys.stderr)
+        print("ltc: warning: supervisorctl not found; supervisor config was written but not loaded", file=sys.stderr)
         return 1
 
     status = run_supervisorctl(["reread"])
@@ -2784,9 +2930,9 @@ def install_supervisor(args: argparse.Namespace) -> int:
 
 def start_daemon_fallback(args: argparse.Namespace) -> int:
     if running_in_container() and (shutil.which("supervisorctl") or shutil.which("supervisord")):
-        print("codex-long-task-wakeup: starting supervisor daemon fallback", file=sys.stderr)
+        print("ltc: starting supervisor daemon fallback", file=sys.stderr)
         return install_supervisor(args)
-    print("codex-long-task-wakeup: starting standalone daemon fallback", file=sys.stderr)
+    print("ltc: starting standalone daemon fallback", file=sys.stderr)
     return start_standalone_daemon(args)
 
 
@@ -2808,7 +2954,7 @@ def install_systemd(args: argparse.Namespace) -> int:
         configure_proxy_environment(args)
         text = systemd_service_text(args)
     except ValueError as exc:
-        print(f"codex-long-task-wakeup: error: {exc}", file=sys.stderr)
+        print(f"ltc: error: {exc}", file=sys.stderr)
         return 2
 
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -2820,7 +2966,7 @@ def install_systemd(args: argparse.Namespace) -> int:
         status = run_systemctl(["daemon-reload"])
         if status != 0 and args.now:
             print(
-                "codex-long-task-wakeup: warning: systemd user service could not be reloaded; using fallback daemon",
+                "ltc: warning: systemd user service could not be reloaded; using fallback daemon",
                 file=sys.stderr,
             )
             return start_daemon_fallback(args)
@@ -2833,13 +2979,13 @@ def install_systemd(args: argparse.Namespace) -> int:
                     status = run_systemctl(["reload", name]) or status
                     if status != 0:
                         print(
-                            "codex-long-task-wakeup: reload failed; refusing to restart while callback delivery is running.",
+                            "ltc: reload failed; refusing to restart while callback delivery is running.",
                             file=sys.stderr,
                         )
                         return status
                 else:
                     print(
-                        "codex-long-task-wakeup: deferred daemon activation because callback delivery is running; "
+                        "ltc: deferred daemon activation because callback delivery is running; "
                         "the installed unit is updated, but the existing daemon was left untouched. "
                         "Drain running callbacks, then rerun setup --now to activate this version.",
                         file=sys.stderr,
@@ -2850,13 +2996,13 @@ def install_systemd(args: argparse.Namespace) -> int:
                 status = run_systemctl(["reload", name]) or status
                 if status != 0:
                     print(
-                        "codex-long-task-wakeup: reload failed; refusing to fall back to restart automatically.",
+                        "ltc: reload failed; refusing to fall back to restart automatically.",
                         file=sys.stderr,
                     )
                     return status
             elif systemd_service_is_active(name):
                 print(
-                    "codex-long-task-wakeup: deferred activation because the running daemon does not advertise "
+                    "ltc: deferred activation because the running daemon does not advertise "
                     "safe hot reload; the unit is updated but the process was left untouched.",
                     file=sys.stderr,
                 )
@@ -2866,16 +3012,16 @@ def install_systemd(args: argparse.Namespace) -> int:
                 status = run_systemctl([action, name]) or status
             if status != 0:
                 print(
-                    "codex-long-task-wakeup: warning: systemd user service could not be started; using fallback daemon",
+                    "ltc: warning: systemd user service could not be started; using fallback daemon",
                     file=sys.stderr,
                 )
                 fallback_status = start_daemon_fallback(args)
                 if fallback_status == 0:
                     return 0
     else:
-        print("codex-long-task-wakeup: warning: systemctl not found; service file was written but not loaded", file=sys.stderr)
+        print("ltc: warning: systemctl not found; service file was written but not loaded", file=sys.stderr)
         if args.enable:
-            print("codex-long-task-wakeup: warning: --enable has no effect without systemd", file=sys.stderr)
+            print("ltc: warning: --enable has no effect without systemd", file=sys.stderr)
         if args.now:
             status = start_daemon_fallback(args)
 
@@ -2883,7 +3029,11 @@ def install_systemd(args: argparse.Namespace) -> int:
 
 
 def setup(args: argparse.Namespace) -> int:
-    skill_args = argparse.Namespace(path=args.skill_path, force=args.force)
+    skill_args = argparse.Namespace(
+        path=args.skill_path,
+        force=args.force,
+        target=getattr(args, "skill_target", None) or "both",
+    )
     skill_status = install_skill(skill_args)
     if skill_status != 0:
         return skill_status
@@ -2899,6 +3049,7 @@ def setup(args: argparse.Namespace) -> int:
         restart_sec=args.restart_sec,
         exec_start=args.exec_start,
         codex_bin=args.codex_bin,
+        claude_bin=getattr(args, "claude_bin", None),
         path=args.path,
         proxy_env_file=getattr(args, "proxy_env_file", None),
         inherit_proxy=bool(getattr(args, "inherit_proxy", False)),
@@ -2934,7 +3085,7 @@ def ack(args: argparse.Namespace) -> int:
         except FileNotFoundError:
             continue
         break
-    print(f"codex-long-task-wakeup: acknowledged callback {args.id} in {root}", file=sys.stderr)
+    print(f"ltc: acknowledged callback {args.id} in {root}", file=sys.stderr)
     return 0
 
 
@@ -2946,19 +3097,19 @@ def goal_start(args: argparse.Namespace) -> int:
     try:
         path = goal_path(root, goal_id)
     except ValueError as exc:
-        print(f"codex-long-task-wakeup: error: {exc}", file=sys.stderr)
+        print(f"ltc: error: {exc}", file=sys.stderr)
         return 2
     if args.idle_seconds <= 0:
-        print("codex-long-task-wakeup: error: --idle-seconds must be positive", file=sys.stderr)
+        print("ltc: error: --idle-seconds must be positive", file=sys.stderr)
         return 2
     lock = acquire_owner_lock(root, goal_lock_id(goal_id), blocking=True)
     try:
         if path.exists():
-            print(f"codex-long-task-wakeup: goal {goal_id} already exists", file=sys.stderr)
+            print(f"ltc: goal {goal_id} already exists", file=sys.stderr)
             return 1
         now = time.time()
         write_goal(root, {"version": 1, "id": goal_id, "task": args.task, "cwd": args.cwd, "target": target,
-                          "target_source": source, "state": "active", "created_at": now,
+                          "target_source": source, "agent": resolve_agent(args), "state": "active", "created_at": now,
                           "last_external_callback_at": now, "idle_seconds": args.idle_seconds})
     finally:
         release_owner_lock(lock, remove=False)
@@ -2971,31 +3122,31 @@ def goal_ack(args: argparse.Namespace) -> int:
     try:
         goal_path(root, args.id)
     except ValueError as exc:
-        print(f"codex-long-task-wakeup: error: {exc}", file=sys.stderr)
+        print(f"ltc: error: {exc}", file=sys.stderr)
         return 2
     if args.state == "blocked_conditions":
         if not args.condition or not args.condition.strip():
-            print("codex-long-task-wakeup: error: --condition is required for blocked_conditions", file=sys.stderr)
+            print("ltc: error: --condition is required for blocked_conditions", file=sys.stderr)
             return 2
         if args.email_after <= 0:
-            print("codex-long-task-wakeup: error: --email-after must be positive", file=sys.stderr)
+            print("ltc: error: --email-after must be positive", file=sys.stderr)
             return 2
         if args.email_to and not is_single_email_recipient(args.email_to):
-            print("codex-long-task-wakeup: error: invalid email recipient", file=sys.stderr)
+            print("ltc: error: invalid email recipient", file=sys.stderr)
             return 2
         configured_recipient = os.environ.get("CODEX_LONG_TASK_WAKEUP_BLOCKED_EMAIL_TO")
         if args.email_to and args.email_to != configured_recipient:
-            print("codex-long-task-wakeup: error: --email-to must match CODEX_LONG_TASK_WAKEUP_BLOCKED_EMAIL_TO", file=sys.stderr)
+            print("ltc: error: --email-to must match CODEX_LONG_TASK_WAKEUP_BLOCKED_EMAIL_TO", file=sys.stderr)
             return 2
     lock = acquire_owner_lock(root, goal_lock_id(args.id), blocking=True)
     try:
         try:
             goal = load_goal(root, args.id)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
-            print(f"codex-long-task-wakeup: error: {exc}", file=sys.stderr)
+            print(f"ltc: error: {exc}", file=sys.stderr)
             return 1
         if goal.get("state") == "completed" and args.state != "completed":
-            print(f"codex-long-task-wakeup: error: completed goal {args.id} is terminal", file=sys.stderr)
+            print(f"ltc: error: completed goal {args.id} is terminal", file=sys.stderr)
             return 1
         now = time.time()
         goal["state"] = args.state
@@ -3013,7 +3164,7 @@ def goal_ack(args: argparse.Namespace) -> int:
         write_goal(root, goal)
     finally:
         release_owner_lock(lock, remove=False)
-    print(f"codex-long-task-wakeup: goal {args.id} acknowledged as {args.state}")
+    print(f"ltc: goal {args.id} acknowledged as {args.state}")
     return 0
 
 
@@ -3070,7 +3221,7 @@ def process_blocked_goal_email(root: Path) -> bool:
             write_goal(root, goal)
             return True
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-            print(f"codex-long-task-wakeup: warning: could not process blocked-goal email {path.name}: {exc}", file=sys.stderr)
+            print(f"ltc: warning: could not process blocked-goal email {path.name}: {exc}", file=sys.stderr)
         finally:
             release_owner_lock(lock, remove=False)
     return False
@@ -3081,20 +3232,20 @@ def goal_resume(args: argparse.Namespace) -> int:
     try:
         goal_path(root, args.id)
     except ValueError as exc:
-        print(f"codex-long-task-wakeup: error: {exc}", file=sys.stderr)
+        print(f"ltc: error: {exc}", file=sys.stderr)
         return 2
     lock = acquire_owner_lock(root, goal_lock_id(args.id), blocking=True)
     try:
         try:
             goal = load_goal(root, args.id)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
-            print(f"codex-long-task-wakeup: error: {exc}", file=sys.stderr)
+            print(f"ltc: error: {exc}", file=sys.stderr)
             return 1
         if goal.get("state") == "completed":
-            print("codex-long-task-wakeup: error: completed goals are terminal", file=sys.stderr)
+            print("ltc: error: completed goals are terminal", file=sys.stderr)
             return 1
         if goal.get("state") != "blocked_conditions":
-            print("codex-long-task-wakeup: error: only blocked goals can be resumed", file=sys.stderr)
+            print("ltc: error: only blocked goals can be resumed", file=sys.stderr)
             return 1
         now = time.time()
         goal.update({"state": "active", "state_changed_at": now, "last_external_callback_at": now})
@@ -3104,7 +3255,7 @@ def goal_resume(args: argparse.Namespace) -> int:
         write_goal(root, goal)
     finally:
         release_owner_lock(lock, remove=False)
-    print(f"codex-long-task-wakeup: goal {args.id} resumed")
+    print(f"ltc: goal {args.id} resumed")
     return 0
 
 
@@ -3174,7 +3325,7 @@ def status(args: argparse.Namespace) -> int:
         print(line)
     if len(items) > limit:
         print(f"  ... {len(items) - limit} more item(s)")
-    print("  Inspect: codex-long-task-wakeup status --state pending --state running")
+    print("  Inspect: ltc status --state pending --state running")
     return 0
 
 
@@ -3222,14 +3373,14 @@ def install_shell_hook(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Explicit callback tool for waking Codex after a long task.")
+    parser = argparse.ArgumentParser(description="Explicit callback tool for waking Codex or Claude Code after a long task.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="mode", required=True)
 
-    done_parser = sub.add_parser("done", help="Wake Codex after an externally managed task finishes")
+    done_parser = sub.add_parser("done", help="Wake the agent after an externally managed task finishes")
     add_common_flags(done_parser)
 
-    run_parser = sub.add_parser("run", help="Run a command and wake Codex when it exits")
+    run_parser = sub.add_parser("run", help="Run a command and wake the agent when it exits")
     add_common_flags(run_parser)
     run_parser.add_argument("wrapped_command", nargs=argparse.REMAINDER)
 
@@ -3254,6 +3405,7 @@ def main() -> int:
     systemd_parser.add_argument("--restart-sec", type=float, default=5.0, help="Restart delay in seconds")
     systemd_parser.add_argument("--exec-start", help="Path to codex-long-task-wakeup executable")
     systemd_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
+    systemd_parser.add_argument("--claude-bin", help="Path to claude executable used by the daemon")
     systemd_parser.add_argument("--path", help="PATH environment for the daemon service")
     add_proxy_environment_flags(systemd_parser)
     systemd_parser.add_argument("--force", action="store_true", help="Overwrite an existing service file")
@@ -3261,12 +3413,24 @@ def main() -> int:
     systemd_parser.add_argument("--now", action="store_true", help="Start or restart the service after writing it")
     systemd_parser.add_argument("--print", action="store_true", help="Print the service file instead of writing it")
 
-    install_parser = sub.add_parser("install-skill", help="Install the bundled Codex skill into CODEX_HOME")
-    install_parser.add_argument("--path", help="Skills directory to install into (defaults to ${CODEX_HOME:-~/.codex}/skills)")
+    install_parser = sub.add_parser("install-skill", help="Install the bundled skill for Codex and/or Claude Code")
+    install_parser.add_argument("--path", help="Skills directory to install into (overrides --target)")
+    install_parser.add_argument(
+        "--target",
+        choices=["codex", "claude", "both"],
+        default="both",
+        help="Agent home to install into (default: both — ${CODEX_HOME:-~/.codex}/skills and ${CLAUDE_CONFIG_DIR:-~/.claude}/skills)",
+    )
     install_parser.add_argument("--force", action="store_true", help="Overwrite an existing long-task-callback skill")
 
     setup_parser = sub.add_parser("setup", help="Install the bundled skill and user-level wakeup daemon")
-    setup_parser.add_argument("--skill-path", help="Skills directory to install into (defaults to ${CODEX_HOME:-~/.codex}/skills)")
+    setup_parser.add_argument("--skill-path", help="Skills directory to install into (overrides --skill-target)")
+    setup_parser.add_argument(
+        "--skill-target",
+        choices=["codex", "claude", "both"],
+        default="both",
+        help="Agent home to install the skill into (default: both)",
+    )
     setup_parser.add_argument("--name", default="codex-long-task-wakeup", help="Systemd service name")
     setup_parser.add_argument("--queue-dir", help="Wakeup queue directory")
     setup_parser.add_argument("--interval", type=float, default=2.0, help="Daemon polling interval in seconds")
@@ -3277,6 +3441,7 @@ def main() -> int:
     setup_parser.add_argument("--restart-sec", type=float, default=5.0, help="Systemd restart delay in seconds")
     setup_parser.add_argument("--exec-start", help="Path to codex-long-task-wakeup executable")
     setup_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
+    setup_parser.add_argument("--claude-bin", help="Path to claude executable used by the daemon")
     setup_parser.add_argument("--path", help="PATH environment for the daemon service")
     add_proxy_environment_flags(setup_parser)
     setup_parser.add_argument("--force", action="store_true", help="Overwrite an existing skill and service file")
@@ -3293,7 +3458,12 @@ def main() -> int:
     goal_start_parser = goal_sub.add_parser("start", help="Create an active goal")
     goal_start_parser.add_argument("--id", help="Optional stable goal id")
     goal_start_parser.add_argument("--queue-dir", help="Queue root that owns the goal")
-    goal_start_parser.add_argument("--session", required=True, help="Bound Codex session")
+    goal_start_parser.add_argument("--session", required=True, help="Bound agent session")
+    goal_start_parser.add_argument(
+        "--agent",
+        choices=AGENT_NAMES,
+        help="Agent that owns the session (default: auto-detect from the environment)",
+    )
     goal_start_parser.add_argument("--cwd", default=os.getcwd())
     goal_start_parser.add_argument("--task", required=True)
     goal_start_parser.add_argument("--idle-seconds", type=float, default=DEFAULT_GOAL_IDLE_SECONDS)

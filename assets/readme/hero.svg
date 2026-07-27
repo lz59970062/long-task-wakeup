@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="360" viewBox="0 0 1200 360"
+     role="img" aria-labelledby="title desc">
+  <title id="title">Long Task Callback (ltc)</title>
+  <desc id="desc">Project title with a terminal card showing a long task exiting, queueing a callback, and resuming the same agent session with an acknowledgement.</desc>
+
+  <rect width="1200" height="360" rx="26" fill="#0d1117"/>
+
+  <g id="title-block" transform="translate(64 62)">
+    <text x="0" y="0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="19" letter-spacing="3" fill="#8b949e">EXPLICIT CALLBACKS FOR LONG AGENT TASKS</text>
+    <text x="0" y="66" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif"
+          font-size="62" font-weight="700" fill="#e6edf3">Long Task Callback</text>
+    <text x="4" y="112" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif"
+          font-size="25" fill="#8b949e">Wake Codex or Claude Code back into the same session</text>
+    <text x="4" y="146" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif"
+          font-size="25" fill="#8b949e">when an hours-long task finishes.</text>
+    <g transform="translate(4 190)" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="21">
+      <text x="0" y="0" fill="#3fb950">$</text>
+      <text x="24" y="0" fill="#e6edf3">ltc run --via-daemon -- python train.py</text>
+      <rect x="520" y="-16" width="13" height="24" fill="#3fb950"/>
+    </g>
+    <text x="4" y="248" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#8b949e">one Python package · no polling · at-least-once delivery</text>
+  </g>
+
+  <g id="lifecycle-card" transform="translate(776 56)">
+    <rect width="368" height="248" rx="16" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+    <circle cx="26" cy="26" r="6" fill="#ff5f57"/>
+    <circle cx="48" cy="26" r="6" fill="#febc2e"/>
+    <circle cx="70" cy="26" r="6" fill="#28c840"/>
+    <text x="96" y="32" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="17" fill="#8b949e">callback lifecycle</text>
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="19">
+      <text x="24" y="76" fill="#e6edf3">train.py <tspan fill="#8b949e">··· 6h 12m</tspan></text>
+      <text x="24" y="112" fill="#d29922">exit 0 → callback queued</text>
+      <text x="24" y="148" fill="#58a6ff">daemon → resume session</text>
+      <text x="24" y="184" fill="#3fb950">inspect → ack ✓</text>
+      <text x="24" y="220" fill="#8b949e">goal continues ↩</text>
+    </g>
+  </g>
+</svg>

@@ -29,6 +29,17 @@ class CliTests(unittest.TestCase):
             cli.stop_resume_process(delivery.process)
         cli._BACKGROUND_RESUMES.clear()
 
+    @staticmethod
+    def _env_without_claude(**extra: str) -> "mock._patch_dict":
+        """Simulate a Codex-only environment even when tests run inside Claude Code."""
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID")
+        }
+        env.update(extra)
+        return mock.patch.dict(os.environ, env, clear=True)
+
     def test_via_daemon_run_preserves_exit_code_and_one_callback_id(self) -> None:
         for exit_code in (0, 7):
             with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as tmp:
@@ -385,7 +396,7 @@ class CliTests(unittest.TestCase):
             sandbox_mode="workspace-write",
         )
 
-        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-from-env"}, clear=False):
+        with self._env_without_claude(CODEX_THREAD_ID="thread-from-env"):
             request = cli.make_request(args, "wake up")
 
         self.assertEqual(request["target"], {"kind": "session", "value": "thread-from-env"})
@@ -431,9 +442,9 @@ class CliTests(unittest.TestCase):
             sandbox_mode="workspace-write",
         )
 
-        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "launch-thread"}, clear=False):
+        with self._env_without_claude(CODEX_THREAD_ID="launch-thread"):
             cli.bind_target(args)
-        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "later-thread"}, clear=False):
+        with self._env_without_claude(CODEX_THREAD_ID="later-thread"):
             request = cli.make_request(args, "wake up")
 
         self.assertEqual(request["target"], {"kind": "session", "value": "launch-thread"})
@@ -475,7 +486,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(len(queued), 1)
             request = json.loads(queued[0].read_text(encoding="utf-8"))
 
-            self.assertIn("codex-long-task-wakeup", request["prompt"])
+            self.assertRegex(request["prompt"], r"(ltc|codex-long-task-wakeup)")
             self.assertIn(" ack ", request["prompt"])
             self.assertRegex(request["prompt"], r"Callback time: .+[+-]\d{2}:\d{2}")
             self.assertIn(str(request["id"]), request["prompt"])
@@ -495,6 +506,165 @@ class CliTests(unittest.TestCase):
         )
 
         self.assertIn('sandbox_workspace_write.writable_roots=["/tmp/callback-queue"]', command)
+
+    def test_resolve_agent_detects_claude_environment(self) -> None:
+        env = {key: value for key, value in os.environ.items() if key != "CODEX_THREAD_ID"}
+        env["CLAUDECODE"] = "1"
+        env["CLAUDE_CODE_SESSION_ID"] = "claude-session-1"
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(cli.resolve_agent(), "claude")
+
+    def test_resolve_agent_prefers_explicit_flag(self) -> None:
+        args = argparse.Namespace(agent="claude")
+        with self._env_without_claude(CODEX_THREAD_ID="codex-thread"):
+            self.assertEqual(cli.resolve_agent(args), "claude")
+        args = argparse.Namespace(agent="codex")
+        with mock.patch.dict(os.environ, {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "s"}, clear=False):
+            self.assertEqual(cli.resolve_agent(args), "codex")
+
+    def test_make_request_binds_claude_session_id_by_default(self) -> None:
+        args = argparse.Namespace(
+            cwd="/tmp",
+            session=None,
+            last=False,
+            agent=None,
+            approvals_reviewer="auto_review",
+            approval_policy="on-request",
+            sandbox_mode="workspace-write",
+            permission_mode="auto",
+        )
+        env = {key: value for key, value in os.environ.items() if key != "CODEX_THREAD_ID"}
+        env["CLAUDECODE"] = "1"
+        env["CLAUDE_CODE_SESSION_ID"] = "claude-session-1"
+        with mock.patch.dict(os.environ, env, clear=True):
+            request = cli.make_request(args, "wake up")
+
+        self.assertEqual(request["agent"], "claude")
+        self.assertEqual(request["target"], {"kind": "session", "value": "claude-session-1"})
+        self.assertEqual(request["target_source"], "CLAUDE_CODE_SESSION_ID")
+        self.assertEqual(request["permission_mode"], "auto")
+
+    def test_claude_resume_command_shape(self) -> None:
+        command = cli.resume_command(
+            {
+                "agent": "claude",
+                "target": {"kind": "session", "value": "claude-session-1"},
+                "cwd": "/tmp",
+                "prompt": "hello",
+                "queue_dir": "/tmp/callback-queue",
+            }
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "claude",
+                "-p",
+                "--permission-mode",
+                "auto",
+                "--add-dir",
+                "/tmp/callback-queue",
+                "--resume",
+                "claude-session-1",
+            ],
+        )
+
+    def test_claude_resume_command_honors_overrides(self) -> None:
+        request = {
+            "agent": "claude",
+            "target": {"kind": "last"},
+            "cwd": "/tmp",
+            "prompt": "hello",
+            "permission_mode": "acceptEdits",
+        }
+        with mock.patch.dict(os.environ, {"LONG_TASK_WAKEUP_CLAUDE_BIN": "/opt/claude"}, clear=False):
+            command = cli.resume_command(request)
+
+        self.assertEqual(command, ["/opt/claude", "-p", "--permission-mode", "acceptEdits", "--continue"])
+
+    def test_claude_prompt_and_acknowledgement_text(self) -> None:
+        args = argparse.Namespace(
+            task="train",
+            cwd="/tmp",
+            command="python train.py",
+            exit_code=0,
+            message=None,
+            agent="claude",
+        )
+        prompt = cli.build_prompt(args)
+        self.assertIn("called back into Claude Code", prompt)
+        ack_text = cli.build_acknowledgement_text("ltc ack --queue-dir /q --id abc", agent="claude")
+        self.assertIn("Claude Code headless", ack_text)
+        self.assertIn("ltc ack --queue-dir /q --id abc", ack_text)
+
+    def test_desktop_delivery_skipped_for_claude_requests(self) -> None:
+        payload = {
+            "request": {
+                "agent": "claude",
+                "target": {"kind": "session", "value": "claude-session-1"},
+                "sandbox_mode": "workspace-write",
+            },
+            "timeout": 1.0,
+        }
+        self.assertIsNone(cli.start_desktop_app_server_turn(payload))
+
+    def test_daemon_marks_done_after_fake_claude_ack(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            self._write_request(root, "claude-acked", tmp)
+            pending = root / "pending" / "claude-acked.json"
+            request = json.loads(pending.read_text(encoding="utf-8"))
+            request["agent"] = "claude"
+            request["queue_dir"] = str(root)
+            pending.write_text(json.dumps(request) + "\n", encoding="utf-8")
+            fake_claude = self._fake_codex(Path(tmp), ack=True, queue=root, request_id="claude-acked")
+            args = argparse.Namespace(retries=3, retry_delay=0.0, retry_backoff=2.0)
+
+            with mock.patch.dict(os.environ, {"LONG_TASK_WAKEUP_CLAUDE_BIN": str(fake_claude)}):
+                self.assertTrue(cli.process_one(root, args))
+
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not (root / "done" / "claude-acked.json").exists():
+                cli.reap_background_resumes()
+                cli.recover_running(root)
+                time.sleep(0.02)
+
+            self.assertTrue((root / "done" / "claude-acked.json").exists())
+            self.assertTrue((root / "acks" / "claude-acked.json").exists())
+
+    def test_install_skill_installs_for_both_agents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex-home"
+            claude_home = Path(tmp) / "claude-home"
+            args = argparse.Namespace(path=None, target="both", force=False)
+            with mock.patch.dict(
+                os.environ,
+                {"CODEX_HOME": str(codex_home), "CLAUDE_CONFIG_DIR": str(claude_home)},
+                clear=False,
+            ):
+                self.assertEqual(cli.install_skill(args), 0)
+
+            codex_skill = codex_home / "skills" / "long-task-callback"
+            claude_skill = claude_home / "skills" / "long-task-callback"
+            self.assertTrue((codex_skill / "SKILL.md").exists())
+            self.assertTrue((codex_skill / "agents" / "openai.yaml").exists())
+            self.assertTrue((claude_skill / "SKILL.md").exists())
+            self.assertFalse((claude_skill / "agents").exists())
+
+    def test_install_skill_single_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex-home"
+            claude_home = Path(tmp) / "claude-home"
+            args = argparse.Namespace(path=None, target="claude", force=False)
+            with mock.patch.dict(
+                os.environ,
+                {"CODEX_HOME": str(codex_home), "CLAUDE_CONFIG_DIR": str(claude_home)},
+                clear=False,
+            ):
+                self.assertEqual(cli.install_skill(args), 0)
+
+            self.assertFalse((codex_home / "skills").exists())
+            self.assertTrue((claude_home / "skills" / "long-task-callback" / "SKILL.md").exists())
 
     def test_daemon_requeues_when_agent_does_not_ack(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -557,7 +727,7 @@ class CliTests(unittest.TestCase):
                 self.assertTrue(cli.process_one(root, args))
 
             request = json.loads((root / "pending" / "stuck.json").read_text(encoding="utf-8"))
-            self.assertEqual(request["last_error"], "Codex resume timed out")
+            self.assertEqual(request["last_error"], "agent resume timed out")
 
     def test_daemon_recovers_stale_running_requests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

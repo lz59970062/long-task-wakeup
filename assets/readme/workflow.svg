@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="440" viewBox="0 0 1200 440"
+     role="img" aria-labelledby="title desc">
+  <title id="title">How Long Task Callback works</title>
+  <desc id="desc">Five stage sequence: the agent launches a long task, the task runs for hours, its exit path fires an ltc callback, the daemon queues and delivers it, and the same agent session resumes to inspect, acknowledge, and continue.</desc>
+
+  <rect width="1200" height="440" rx="26" fill="#0d1117"/>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8b949e"/>
+    </marker>
+  </defs>
+
+  <text x="64" y="58" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="19" letter-spacing="3" fill="#8b949e">ONE CALLBACK, FIVE STEPS</text>
+
+  <!-- stage cards -->
+  <g font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, sans-serif">
+
+    <g transform="translate(40 88)">
+      <rect width="200" height="180" rx="14" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+      <text x="20" y="40" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" fill="#58a6ff">01 LAUNCH</text>
+      <text x="20" y="78" font-size="19" fill="#e6edf3">Codex or Claude</text>
+      <text x="20" y="104" font-size="19" fill="#e6edf3">Code starts a long</text>
+      <text x="20" y="130" font-size="19" fill="#e6edf3">task with ltc</text>
+      <text x="20" y="162" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" fill="#8b949e">session bound</text>
+    </g>
+
+    <g transform="translate(272 88)">
+      <rect width="200" height="180" rx="14" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+      <text x="20" y="40" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" fill="#8b949e">02 RUN</text>
+      <text x="20" y="78" font-size="19" fill="#e6edf3">Training, evals,</text>
+      <text x="20" y="104" font-size="19" fill="#e6edf3">builds, pipelines</text>
+      <text x="20" y="130" font-size="19" fill="#e6edf3">run unattended</text>
+      <text x="20" y="162" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" fill="#8b949e">no polling</text>
+    </g>
+
+    <g transform="translate(504 88)">
+      <rect width="200" height="180" rx="14" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+      <text x="20" y="40" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" fill="#d29922">03 CALLBACK</text>
+      <text x="20" y="78" font-size="19" fill="#e6edf3">The exit path fires</text>
+      <text x="20" y="104" font-size="19" fill="#e6edf3">one explicit ltc</text>
+      <text x="20" y="130" font-size="19" fill="#e6edf3">callback command</text>
+      <text x="20" y="162" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" fill="#8b949e">exit code preserved</text>
+    </g>
+
+    <g transform="translate(736 88)">
+      <rect width="200" height="180" rx="14" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+      <text x="20" y="40" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" fill="#d29922">04 QUEUE</text>
+      <text x="20" y="78" font-size="19" fill="#e6edf3">A user-level daemon</text>
+      <text x="20" y="104" font-size="19" fill="#e6edf3">delivers it outside</text>
+      <text x="20" y="130" font-size="19" fill="#e6edf3">tool sandboxes</text>
+      <text x="20" y="162" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" fill="#8b949e">at-least-once</text>
+    </g>
+
+    <g transform="translate(968 88)">
+      <rect width="200" height="180" rx="14" fill="#161b22" stroke="#3fb950" stroke-width="2"/>
+      <text x="20" y="40" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" fill="#3fb950">05 WAKE</text>
+      <text x="20" y="78" font-size="19" fill="#e6edf3">The same session</text>
+      <text x="20" y="104" font-size="19" fill="#e6edf3">resumes, inspects,</text>
+      <text x="20" y="130" font-size="19" fill="#e6edf3">acks, continues</text>
+      <text x="20" y="162" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" fill="#3fb950">ack ✓ monotonic</text>
+    </g>
+  </g>
+
+  <!-- arrows between cards -->
+  <g stroke="#8b949e" stroke-width="2.5">
+    <line x1="242" y1="178" x2="266" y2="178" marker-end="url(#arrow)"/>
+    <line x1="474" y1="178" x2="498" y2="178" marker-end="url(#arrow)"/>
+    <line x1="706" y1="178" x2="730" y2="178" marker-end="url(#arrow)"/>
+    <line x1="938" y1="178" x2="962" y2="178" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- feedback loop: wake -> launch the next stage -->
+  <path d="M 1068 268 L 1068 330 L 140 330 L 140 276"
+        fill="none" stroke="#3fb950" stroke-width="2.5" stroke-dasharray="8 7"
+        marker-end="url(#arrow)" opacity="0.85"/>
+  <text x="470" y="356" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="19" fill="#3fb950">goal not done? queue the next stage — the loop repeats until ack</text>
+
+  <text x="64" y="412" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="17" fill="#8b949e">resume: codex exec resume · claude -p --resume   |   ack: ltc ack --id &lt;callback-id&gt;</text>
+</svg>

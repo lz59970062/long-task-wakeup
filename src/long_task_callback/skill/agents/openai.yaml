@@ -1,4 +1,4 @@
 interface:
   display_name: "Long Task Callback"
-  short_description: "Wire long-running jobs to wake Codex when they finish"
-  default_prompt: "Add a callback so this long task wakes Codex when it finishes"
+  short_description: "Wire long-running jobs to wake Codex or Claude Code when they finish"
+  default_prompt: "Add a callback so this long task wakes my agent session when it finishes"
