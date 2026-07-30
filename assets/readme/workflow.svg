@@ -2,7 +2,7 @@
      width="1200" height="440" viewBox="0 0 1200 440"
      role="img" aria-labelledby="title desc">
   <title id="title">How Long Task Callback works</title>
-  <desc id="desc">Five stage sequence: the agent launches a long task, the task runs for hours, its exit path fires an ltc callback, the daemon queues and delivers it, and the same agent session resumes to inspect, acknowledge, and continue.</desc>
+  <desc id="desc">Five stage sequence: the agent submits a task to the daemon, the daemon starts a GNU screen session, the screen-owned task runs for hours, completion is queued, and the same agent session resumes to inspect, acknowledge, and continue.</desc>
 
   <rect width="1200" height="440" rx="26" fill="#0d1117"/>
 
@@ -23,18 +23,18 @@
       <rect width="200" height="180" rx="14" fill="#161b22" stroke="#30363d" stroke-width="2"/>
       <text x="20" y="40" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" fill="#58a6ff">01 LAUNCH</text>
       <text x="20" y="78" font-size="19" fill="#e6edf3">Codex or Claude</text>
-      <text x="20" y="104" font-size="19" fill="#e6edf3">Code starts a long</text>
-      <text x="20" y="130" font-size="19" fill="#e6edf3">task with ltc</text>
-      <text x="20" y="162" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" fill="#8b949e">session bound</text>
+      <text x="20" y="104" font-size="19" fill="#e6edf3">submits one task</text>
+      <text x="20" y="130" font-size="19" fill="#e6edf3">to the daemon</text>
+      <text x="20" y="162" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" fill="#8b949e">durable record</text>
     </g>
 
     <g transform="translate(272 88)">
       <rect width="200" height="180" rx="14" fill="#161b22" stroke="#30363d" stroke-width="2"/>
       <text x="20" y="40" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" fill="#8b949e">02 RUN</text>
-      <text x="20" y="78" font-size="19" fill="#e6edf3">Training, evals,</text>
-      <text x="20" y="104" font-size="19" fill="#e6edf3">builds, pipelines</text>
-      <text x="20" y="130" font-size="19" fill="#e6edf3">run unattended</text>
-      <text x="20" y="162" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" fill="#8b949e">no polling</text>
+      <text x="20" y="78" font-size="19" fill="#e6edf3">Daemon starts GNU</text>
+      <text x="20" y="104" font-size="19" fill="#e6edf3">screen; the task</text>
+      <text x="20" y="130" font-size="19" fill="#e6edf3">runs unattended</text>
+      <text x="20" y="162" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" fill="#8b949e">screen owns process</text>
     </g>
 
     <g transform="translate(504 88)">

@@ -53,6 +53,8 @@ SHELL_HOOK_BEGIN = "# >>> codex-long-task-wakeup pending status >>>"
 SHELL_HOOK_END = "# <<< codex-long-task-wakeup pending status <<<"
 ACTIVE_STATE = "active"
 LOCKS_STATE = "locks"
+SCREEN_BIN_ENV = "LONG_TASK_WAKEUP_SCREEN_BIN"
+TASKS_DIR_NAME = "tasks"
 TARGET_LOCK_DIR_ENV = "CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR"
 PROXY_ENV_FILE_ENV = "CODEX_LONG_TASK_WAKEUP_PROXY_ENV_FILE"
 DESKTOP_APP_SERVER_ENV = "CODEX_LONG_TASK_WAKEUP_DESKTOP_APP_SERVER"
@@ -243,6 +245,7 @@ def systemd_service_text(args: argparse.Namespace) -> str:
     exec_start = " ".join(systemd_quote(part) for part in command)
     codex_bin = codex_bin_path(args)
     claude_bin = claude_bin_path(args)
+    screen_bin = screen_binary() or "screen"
     path = args.path or os.environ.get("PATH", "")
     return "\n".join(
         [
@@ -264,6 +267,7 @@ def systemd_service_text(args: argparse.Namespace) -> str:
             f"Environment={systemd_quote(f'PATH={path}')}",
             f"Environment={systemd_quote(f'CODEX_LONG_TASK_WAKEUP_CODEX_BIN={codex_bin}')}",
             f"Environment={systemd_quote(f'{CLAUDE_BIN_ENV}={claude_bin}')}",
+            f"Environment={systemd_quote(f'{SCREEN_BIN_ENV}={screen_bin}')}",
             f"Environment={systemd_quote(f'{DESKTOP_APP_SERVER_ENV}=1')}",
             f"Environment={systemd_quote(f'{PROXY_ENV_FILE_ENV}={service_proxy_env_path()}')}",
             f"EnvironmentFile=-{service_proxy_env_path()}",
@@ -409,7 +413,7 @@ def make_request(args: argparse.Namespace, prompt: str) -> dict[str, object]:
     agent = resolve_agent(args)
     request = {
         "version": 1,
-        "id": uuid.uuid4().hex,
+        "id": getattr(args, "_callback_id", None) or uuid.uuid4().hex,
         "created_at": time.time(),
         "cwd": args.cwd,
         "agent": agent,
@@ -489,10 +493,6 @@ def enqueue_request(args: argparse.Namespace, prompt: str) -> int:
     return enqueue_existing_request(root, request, prompt)
 
 
-def should_enqueue(args: argparse.Namespace) -> bool:
-    return bool(getattr(args, "via_daemon", False)) or truthy_env("CODEX_LONG_TASK_WAKEUP_VIA_DAEMON")
-
-
 def resume_command(request: dict[str, object]) -> list[str]:
     agent = request.get("agent", "codex")
     if agent == "claude":
@@ -554,36 +554,14 @@ def claude_resume_command(request: dict[str, object]) -> list[str]:
     return cmd
 
 
-def resume_codex(args: argparse.Namespace, prompt: str) -> int:
-    if should_enqueue(args):
+def queue_callback(args: argparse.Namespace, prompt: str) -> int:
+    """Persist callback delivery; only the daemon may resume an agent."""
+    if not args.dry_run:
         return enqueue_request(args, prompt)
-
     request = make_request(args, prompt)
     routed_prompt = attach_routing_text(prompt, request)
-    if args.dry_run:
-        print(routed_prompt)
-        return 0
-    cmd = resume_command(request)
-    display = agent_display_name(request_agent(request))
-
-    try:
-        result = subprocess.run(
-            cmd,
-            input=routed_prompt,
-            text=True,
-            cwd=args.cwd,
-            check=False,
-        )
-    except OSError as exc:
-        print(f"ltc: warning: failed to run {display} callback: {exc}", file=sys.stderr)
-        return 127
-
-    if result.returncode != 0:
-        print(
-            f"ltc: warning: {display} callback exited with {result.returncode}",
-            file=sys.stderr,
-        )
-    return result.returncode
+    print(routed_prompt)
+    return 0
 
 
 def ensure_daemon_dirs(root: Path) -> None:
@@ -860,6 +838,10 @@ def release_retained_target_lease(root: Path, request: dict[str, object]) -> Non
     request_id = request.get("id")
     if path is None or not isinstance(request_id, str):
         return
+    # Ordinary ACKs have no retained lease. Avoid creating a target-lock file
+    # from inside the resumed agent sandbox just to discover that fact.
+    if not path.exists():
+        return
     lock = acquire_retained_target_lease_lock(request, blocking=True)
     if lock is None:  # pragma: no cover - blocking lock acquisition always succeeds
         raise RuntimeError(f"could not lock retained target lease: {path}")
@@ -878,6 +860,24 @@ def release_retained_target_lease(root: Path, request: dict[str, object]) -> Non
         fsync_directory(path.parent)
     finally:
         release_owner_lock(lock, remove=False)
+
+
+def reconcile_acknowledged_retained_leases(root: Path) -> None:
+    """Let the daemon release leases when a sandboxed ACK cannot write target-locks."""
+    for state in ("running", "failed", "done", "canceled"):
+        for path in sorted((root / state).glob("*.json")):
+            request_id = path.stem
+            if not ack_path(root, request_id).exists() and not request_path(root, "canceled", request_id).exists():
+                continue
+            try:
+                request = load_request(path)
+                release_retained_target_lease(root, request)
+            except (OSError, RuntimeError) as exc:
+                print(
+                    f"ltc: warning: deferred retained target lease reconciliation "
+                    f"for {request_id}: {exc}",
+                    file=sys.stderr,
+                )
 
 
 def acquire_path_lock(path: Path, *, blocking: bool) -> tuple[object, Path] | None:
@@ -1643,7 +1643,8 @@ def write_request(path: Path, request: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.stem}.{uuid.uuid4().hex}.tmp")
     try:
-        with tmp.open("w", encoding="utf-8") as handle:
+        descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(request, ensure_ascii=False, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -1991,7 +1992,7 @@ def cancel_one(root: Path, request_id: str, message: str | None = None) -> bool:
         remove_live_request_copies(root, request_id)
         try:
             release_retained_target_lease(root, data)
-        except RuntimeError as exc:
+        except (OSError, RuntimeError) as exc:
             print(
                 f"ltc: warning: could not release retained target lease for "
                 f"{request_id}: {exc}",
@@ -2284,7 +2285,14 @@ def daemon(args: argparse.Namespace) -> int:
                     raise RuntimeError("daemon reload exec unexpectedly returned")
             reap_background_resumes()
             recover_running(root)
+            reconcile_acknowledged_retained_leases(root)
+            managed_work = recover_managed_tasks(root)
             recover_active(root)
+            if managed_work:
+                processed += managed_work
+                if args.max_items is not None and processed >= args.max_items:
+                    return 0
+                continue
             if process_goal_reminders(root):
                 continue
             if process_blocked_goal_email(root):
@@ -2308,133 +2316,495 @@ def daemon(args: argparse.Namespace) -> int:
 
 
 def done(args: argparse.Namespace) -> int:
-    callback_code = resume_codex(args, build_prompt(args))
+    callback_code = queue_callback(args, build_prompt(args))
     return callback_code if args.strict else 0
 
 
-def run_unarmed_via_daemon(args: argparse.Namespace, started: float, reason: str) -> int:
+def screen_binary() -> str | None:
+    configured = os.environ.get(SCREEN_BIN_ENV)
+    return shutil.which(configured) if configured else shutil.which("screen")
+
+
+def screen_required_error() -> str:
+    return (
+        "GNU screen is required for durable task ownership but was not found. "
+        "Install it first (for example: `sudo apt install screen` or `sudo dnf install screen`) "
+        f"and rerun the command. Override discovery with ${SCREEN_BIN_ENV}."
+    )
+
+
+def managed_tasks_root(root: Path) -> Path:
+    root = root.expanduser().absolute()
+    return root.parent / TASKS_DIR_NAME if root.name == "queue" else root / TASKS_DIR_NAME
+
+
+def managed_task_dir(root: Path, task_id: str) -> Path:
+    if not task_id or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for character in task_id):
+        raise ValueError("task id must contain only letters, numbers, '-' or '_'")
+    return managed_tasks_root(root) / task_id
+
+
+def managed_task_path(root: Path, task_id: str) -> Path:
+    return managed_task_dir(root, task_id) / "task.json"
+
+
+def managed_result_path(root: Path, task_id: str) -> Path:
+    return managed_task_dir(root, task_id) / "result.json"
+
+
+def current_machine_id() -> str:
+    try:
+        value = Path("/etc/machine-id").read_text(encoding="utf-8").strip()
+    except OSError:
+        value = socket.gethostname()
+    return value or socket.gethostname()
+
+
+def write_managed_task(root: Path, task: dict[str, object]) -> None:
+    task_id = task.get("id")
+    if not isinstance(task_id, str):
+        raise ValueError("managed task requires an id")
+    directory = managed_task_dir(root, task_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    write_request(managed_task_path(root, task_id), task)
+
+
+def load_managed_task(path: Path) -> dict[str, object]:
+    task = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(task, dict) or task.get("version") != 1:
+        raise ValueError("invalid managed task record")
+    if task.get("id") != path.parent.name:
+        raise ValueError("managed task id must match its directory")
+    if not isinstance(task.get("screen_session"), str) or not isinstance(task.get("queue_dir"), str):
+        raise ValueError("managed task is missing screen or queue metadata")
+    return task
+
+
+def managed_callback_exists(root: Path, task_id: str) -> bool:
+    if ack_path(root, task_id).exists():
+        return True
+    return any(
+        request_path(root, state, task_id).exists()
+        for state in (ACTIVE_STATE, "pending", "running", "done", "failed", "canceled")
+    )
+
+
+def screen_session_exists(session: str) -> bool:
+    command = screen_binary()
+    if command is None:
+        return False
+    result = subprocess.run(
+        [command, "-ls", session],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    return bool(re.search(rf"\b\d+\.{re.escape(session)}\s", result.stdout or ""))
+
+
+def managed_task_namespace(task: dict[str, object]) -> argparse.Namespace:
+    target = task.get("target")
+    return argparse.Namespace(
+        cwd=str(task["cwd"]),
+        task=str(task["task"]),
+        command=str(task["command"]),
+        exit_code=task.get("exit_code"),
+        message=task.get("message"),
+        session=target.get("value") if isinstance(target, dict) and target.get("kind") == "session" else None,
+        last=isinstance(target, dict) and target.get("kind") == "last",
+        agent=str(task.get("agent", "codex")),
+        queue_dir=str(task["queue_dir"]),
+        goal_id=task.get("goal_id"),
+        approvals_reviewer=str(task.get("approvals_reviewer") or DEFAULT_APPROVALS_REVIEWER),
+        approval_policy=str(task.get("approval_policy") or DEFAULT_APPROVAL_POLICY),
+        sandbox_mode=str(task.get("sandbox_mode") or DEFAULT_SANDBOX_MODE),
+        permission_mode=str(task.get("permission_mode") or DEFAULT_CLAUDE_PERMISSION_MODE),
+        strict=bool(task.get("strict", False)),
+        dry_run=False,
+        wrapped_command=[str(part) for part in task["wrapped_command"]],
+        _callback_id=str(task["id"]),
+        _callback_target=target,
+        _callback_target_source=str(task.get("target_source", "managed-task")),
+        _callback_agent=str(task.get("agent", "codex")),
+    )
+
+
+def managed_task_prompt(
+    task: dict[str, object],
+    *,
+    outcome: str,
+    duration: float | None = None,
+) -> str:
+    args = managed_task_namespace(task)
+    log_path = task.get("log_path")
+    screen_session = task.get("screen_session")
+    details = [
+        f"Managed task id: {task['id']}",
+        f"Screen session: {screen_session}",
+        f"Screen log: {log_path}",
+    ]
+    if outcome != "completed":
+        reason = str(task.get("recovery_reason") or outcome)
+        details.extend(
+            [
+                f"Recovery state: {reason}",
+                "The task was not automatically restarted.",
+                "Inspect the local screen log, workspace outputs, and checkpoints.",
+                "Then either recreate the task through the standard `ltc run` flow, "
+                "supplement its completed status if artifacts prove it finished, or record the exact blocked condition.",
+            ]
+        )
+    original_message = task.get("message")
+    args.message = "\n".join(
+        ([str(original_message), ""] if isinstance(original_message, str) and original_message else []) + details
+    )
+    return build_prompt(args, duration)
+
+
+def managed_callback_request(task: dict[str, object], prompt: str) -> dict[str, object]:
+    args = managed_task_namespace(task)
+    request = make_request(args, prompt)
+    request.update(
+        {
+            "managed_task_id": task["id"],
+            "managed_task_state": task["state"],
+            "screen_session": task["screen_session"],
+            "log_path": task["log_path"],
+            "outcome": task.get("outcome", "unknown"),
+        }
+    )
+    if isinstance(task.get("exit_code"), int):
+        request["exit_code"] = task["exit_code"]
+    if task.get("recovery_reason"):
+        request["recovery_reason"] = task["recovery_reason"]
+    return request
+
+
+def queue_managed_task_callback(root: Path, task: dict[str, object]) -> bool:
+    task_id = str(task["id"])
+    if managed_callback_exists(root, task_id):
+        if not task.get("callback_queued"):
+            task["callback_queued"] = True
+            task["callback_observed_at"] = time.time()
+            write_managed_task(root, task)
+        return False
+    completed_at = task.get("completed_at")
+    started_at = task.get("started_at")
+    duration = (
+        float(completed_at) - float(started_at)
+        if isinstance(completed_at, (int, float)) and isinstance(started_at, (int, float))
+        else None
+    )
+    prompt = managed_task_prompt(task, outcome=str(task.get("outcome", "unknown")), duration=duration)
+    request = managed_callback_request(task, prompt)
+    if enqueue_existing_request(root, request, prompt) != 0:
+        return False
+    task["callback_queued"] = True
+    task["callback_queued_at"] = time.time()
+    write_managed_task(root, task)
+    return True
+
+
+def mark_managed_task_interrupted(
+    root: Path,
+    task: dict[str, object],
+    reason: str,
+) -> bool:
+    task["state"] = "interrupted"
+    task["outcome"] = "unknown"
+    task["recovery_reason"] = reason
+    task["interrupted_at"] = time.time()
+    task.pop("exit_code", None)
+    write_managed_task(root, task)
+    return queue_managed_task_callback(root, task)
+
+
+def mark_managed_task_foreign_host(root: Path, task: dict[str, object]) -> None:
+    task["state"] = "foreign_host"
+    task["outcome"] = "unknown"
+    task["recovery_reason"] = "cross_host_recovery_unsupported"
+    task["interrupted_at"] = time.time()
+    task.pop("exit_code", None)
+    write_managed_task(root, task)
     print(
-        "ltc: UNARMED WARNING: durable pre-launch callback persistence failed; "
-        f"running with legacy post-exit best effort ({reason})",
+        f"ltc: task {task['id']} belongs to another host; "
+        "cross-host launch and callback recovery are unsupported",
         file=sys.stderr,
     )
-    exit_code = 1
-    task_returned = False
-    try:
-        completed = subprocess.run(
-            args.wrapped_command,
-            cwd=args.cwd,
-            shell=False,
-            check=False,
-            close_fds=True,
+
+
+def launch_managed_screen(root: Path, task: dict[str, object]) -> bool:
+    command = screen_binary()
+    if command is None:
+        return mark_managed_task_interrupted(root, task, "screen_required_but_unavailable")
+    session = str(task["screen_session"])
+    if screen_session_exists(session):
+        return False
+    environment_path = Path(str(task["environment_path"]))
+    if not environment_path.exists():
+        return mark_managed_task_interrupted(root, task, "launch_environment_missing")
+    task["state"] = "launching"
+    task["launch_requested_at"] = time.time()
+    task["screen_submitted_at"] = time.time()
+    write_managed_task(root, task)
+    screen_command = [
+        command,
+        "-dmS",
+        session,
+        "-L",
+        "-Logfile",
+        str(task["log_path"]),
+        console_script_path(),
+        "_screen-worker",
+        "--task-file",
+        str(managed_task_path(root, str(task["id"]))),
+        "--token",
+        str(task["token"]),
+    ]
+    result = subprocess.run(screen_command, check=False)
+    if result.returncode == 0:
+        print(
+            f"ltc: started managed task {task['id']} in screen session {session}",
+            file=sys.stderr,
         )
-        exit_code = completed.returncode
-        task_returned = True
-        return exit_code
-    finally:
-        duration = time.time() - started
-        callback_args = args
-        if task_returned:
-            args.exit_code = exit_code
-        else:
-            callback_args = argparse.Namespace(**vars(args))
-            callback_args.exit_code = None
-            interruption = "The unarmed wrapper did not observe a child return code; task outcome is unknown."
-            callback_args.message = (
-                f"{args.message}\n\n{interruption}" if getattr(args, "message", None) else interruption
-            )
-        callback_code = enqueue_request(callback_args, build_prompt(callback_args, duration))
-        if task_returned and args.strict and exit_code == 0 and callback_code != 0:
-            raise SystemExit(callback_code)
+        return True
+    try:
+        latest = load_managed_task(managed_task_path(root, str(task["id"])))
+    except (OSError, ValueError, json.JSONDecodeError):
+        latest = task
+    if latest.get("state") in ("running", "completed") or screen_session_exists(session):
+        return False
+    latest["screen_exit_code"] = result.returncode
+    return mark_managed_task_interrupted(root, latest, f"screen_launch_failed_exit_{result.returncode}")
 
 
-def run_via_daemon(args: argparse.Namespace) -> int:
-    started = time.time()
-    root = queue_dir(args)
-    request = make_active_request(args, started)
-    request_id = str(request["id"])
-    try:
-        lock = acquire_owner_lock(root, request_id, blocking=True)
-    except (OSError, RuntimeError) as exc:
-        if args.strict:
-            print(f"ltc: refusing to launch unarmed task: {exc}", file=sys.stderr)
-            return 125
-        return run_unarmed_via_daemon(args, started, str(exc))
-    if lock is None:
-        reason = "failed to acquire callback owner lock"
-        if args.strict:
-            print(f"ltc: refusing to launch unarmed task: {reason}", file=sys.stderr)
-            return 125
-        return run_unarmed_via_daemon(args, started, reason)
-    try:
-        active_path = request_path(root, ACTIVE_STATE, request_id)
-        write_request(active_path, request)
-        request["launch_phase"] = "launch_committed"
-        request["launch_committed_at"] = time.time()
-        write_request(active_path, request)
-    except OSError as exc:
-        best_effort_disarm(root, request_id, lock)
-        if args.strict:
-            print(
-                f"ltc: refusing to launch unarmed task because active callback persistence failed: {exc}",
-                file=sys.stderr,
-            )
-            return 125
-        return run_unarmed_via_daemon(args, started, str(exc))
-
-    print(f"ltc: armed callback {request_id} before task launch", file=sys.stderr)
-    exit_code = 1
-    task_returned = False
-    try:
-        completed = subprocess.run(
-            args.wrapped_command,
-            cwd=args.cwd,
-            shell=False,
-            check=False,
-            close_fds=True,
-        )
-        exit_code = completed.returncode
-        task_returned = True
-        return exit_code
-    finally:
-        args.command = args.command or " ".join(args.wrapped_command)
-        duration = time.time() - started
-        request["duration_seconds"] = duration
-        if task_returned:
-            args.exit_code = exit_code
-            prompt = build_prompt(args, duration)
-            request["completed_at"] = time.time()
-            request["exit_code"] = exit_code
-            request["outcome"] = "completed"
-        else:
-            interrupted_args = argparse.Namespace(**vars(args))
-            interrupted_args.exit_code = None
-            interruption = (
-                "The callback wrapper stopped waiting before it observed a child return code. "
-                "The task outcome is unknown and the wrapped child or descendants may still be running. "
-                "Inspect processes and artifacts before retrying."
-            )
-            interrupted_args.message = (
-                f"{args.message}\n\n{interruption}" if getattr(args, "message", None) else interruption
-            )
-            prompt = build_prompt(interrupted_args, duration)
-            request["interrupted_at"] = time.time()
-            request.pop("exit_code", None)
-            request["outcome"] = "unknown"
-            request["recovery_reason"] = "wrapper_did_not_observe_child_return"
-        callback_code = 1
+def recover_managed_tasks(root: Path) -> int:
+    tasks_root = managed_tasks_root(root)
+    if not tasks_root.exists():
+        return 0
+    current_boot = current_boot_id()
+    current_machine = current_machine_id()
+    processed = 0
+    for path in sorted(tasks_root.glob("*/task.json")):
+        lock: tuple[object, Path] | None = None
         try:
-            callback_code = transition_active_to_pending(root, request, prompt)
-        except Exception as exc:
-            print(f"ltc: warning: failed to finalize callback {request_id}: {exc}", file=sys.stderr)
+            task = load_managed_task(path)
+            task_id = str(task["id"])
+            lock = acquire_owner_lock(root, f"managed-task-{task_id}", blocking=False)
+            if lock is None:
+                continue
+            state = task.get("state")
+            if state == "completed":
+                if queue_managed_task_callback(root, task):
+                    processed += 1
+                continue
+            if state in ("interrupted", "launch_failed"):
+                if queue_managed_task_callback(root, task):
+                    processed += 1
+                continue
+            if state not in ("submitted", "launching", "running"):
+                continue
+            if task.get("machine_id") != current_machine:
+                mark_managed_task_foreign_host(root, task)
+                processed += 1
+                continue
+            if state == "running":
+                if screen_session_exists(str(task["screen_session"])):
+                    continue
+                result_path = managed_result_path(root, task_id)
+                if result_path.exists():
+                    result = json.loads(result_path.read_text(encoding="utf-8"))
+                    task.update(result)
+                    task["state"] = "completed"
+                    task["outcome"] = "completed"
+                    write_managed_task(root, task)
+                    if queue_managed_task_callback(root, task):
+                        processed += 1
+                    continue
+                reason = (
+                    "interrupted_by_host_reboot"
+                    if task.get("boot_id") != current_boot
+                    else "screen_disappeared_before_completion"
+                )
+                if mark_managed_task_interrupted(root, task, reason):
+                    processed += 1
+                continue
+            if task.get("submission_boot_id") != current_boot:
+                if mark_managed_task_interrupted(root, task, "not_started_before_host_reboot"):
+                    processed += 1
+                continue
+            if launch_managed_screen(root, task):
+                processed += 1
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            print(f"ltc: warning: could not recover managed task {path}: {exc}", file=sys.stderr)
         finally:
-            try:
-                release_owner_lock(lock, remove=True)
-            except Exception as exc:
-                callback_code = 1
-                print(f"ltc: warning: failed to clean callback lock {request_id}: {exc}", file=sys.stderr)
-        if task_returned and args.strict and exit_code == 0 and callback_code != 0:
-            raise SystemExit(callback_code)
+            release_owner_lock(lock, remove=False)
+    return processed
+
+
+def validate_managed_goal(root: Path, goal_id: object) -> None:
+    if goal_id is None:
+        return
+    if not isinstance(goal_id, str):
+        raise ValueError("goal id must be a string")
+    goal = load_goal(root, goal_id)
+    if goal.get("state") != "active":
+        raise ValueError(f"goal {goal_id} is not active")
+
+
+def submit_managed_run(args: argparse.Namespace) -> int:
+    if screen_binary() is None:
+        print(f"ltc: refusing to submit task: {screen_required_error()}", file=sys.stderr)
+        return 125
+    root = queue_dir(args).expanduser().absolute()
+    ensure_daemon_dirs(root)
+    try:
+        validate_managed_goal(root, getattr(args, "goal_id", None))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"ltc: refusing to submit task: {exc}", file=sys.stderr)
+        return 125
+    task_id = uuid.uuid4().hex
+    target, target_source = bind_target(args)
+    task_directory = managed_task_dir(root, task_id)
+    environment_path = task_directory / "environment.json"
+    log_path = task_directory / "attempt-1.log"
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in ("INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID", "STY", "WINDOW")
+    }
+    task: dict[str, object] = {
+        "version": 1,
+        "id": task_id,
+        "submitted_at": time.time(),
+        "submission_boot_id": current_boot_id(),
+        "machine_id": current_machine_id(),
+        "state": "submitted",
+        "outcome": "pending",
+        "task": args.task,
+        "cwd": os.path.abspath(args.cwd),
+        "command": args.command or shlex.join(args.wrapped_command),
+        "wrapped_command": list(args.wrapped_command),
+        "message": args.message,
+        "queue_dir": str(root),
+        "agent": resolve_agent(args),
+        "target": target,
+        "target_source": target_source,
+        "goal_id": getattr(args, "goal_id", None),
+        "approvals_reviewer": getattr(args, "approvals_reviewer", None) or DEFAULT_APPROVALS_REVIEWER,
+        "approval_policy": getattr(args, "approval_policy", None) or DEFAULT_APPROVAL_POLICY,
+        "sandbox_mode": getattr(args, "sandbox_mode", None) or DEFAULT_SANDBOX_MODE,
+        "permission_mode": getattr(args, "permission_mode", None) or DEFAULT_CLAUDE_PERMISSION_MODE,
+        "strict": bool(args.strict),
+        "screen_session": f"ltc-{task_id}",
+        "log_path": str(log_path),
+        "environment_path": str(environment_path),
+        "token": secrets.token_urlsafe(32),
+    }
+    try:
+        task_directory.mkdir(parents=True, exist_ok=False)
+        os.chmod(task_directory, 0o700)
+        write_request(environment_path, {"version": 1, "environment": environment})
+        write_managed_task(root, task)
+    except OSError as exc:
+        print(f"ltc: refusing to submit task because its durable record could not be written: {exc}", file=sys.stderr)
+        return 125
+    print(f"ltc: submitted managed task {task_id}", file=sys.stderr)
+    print(f"ltc: screen session: {task['screen_session']}", file=sys.stderr)
+    print(f"ltc: screen log: {log_path}", file=sys.stderr)
+    return 0
+
+
+def run_screen_worker(args: argparse.Namespace) -> int:
+    if not os.environ.get("STY"):
+        print("ltc: refusing to run screen worker outside GNU screen", file=sys.stderr)
+        return 125
+    task_path = Path(args.task_file).expanduser().absolute()
+    try:
+        task = load_managed_task(task_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"ltc: invalid managed task record {task_path}: {exc}", file=sys.stderr)
+        return 125
+    if task.get("token") != args.token:
+        print("ltc: refusing unauthorized screen worker", file=sys.stderr)
+        return 125
+    root = Path(str(task["queue_dir"])).expanduser().absolute()
+    if task_path != managed_task_path(root, str(task["id"])).absolute():
+        print("ltc: refusing managed task outside its recorded queue", file=sys.stderr)
+        return 125
+    lock = acquire_owner_lock(root, f"managed-task-{task['id']}", blocking=True)
+    if lock is None:
+        print("ltc: could not acquire managed task ownership", file=sys.stderr)
+        return 125
+    try:
+        return run_screen_worker_locked(root, task)
+    finally:
+        release_owner_lock(lock, remove=False)
+
+
+def run_screen_worker_locked(root: Path, task: dict[str, object]) -> int:
+    environment_path = Path(str(task["environment_path"]))
+    try:
+        environment_record = json.loads(environment_path.read_text(encoding="utf-8"))
+        environment = environment_record["environment"]
+        if not isinstance(environment, dict) or not all(
+            isinstance(name, str) and isinstance(value, str) for name, value in environment.items()
+        ):
+            raise ValueError("invalid environment payload")
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        task["state"] = "interrupted"
+        task["outcome"] = "unknown"
+        task["recovery_reason"] = f"launch_environment_invalid: {exc}"
+        write_managed_task(root, task)
+        queue_managed_task_callback(root, task)
+        return 125
+    os.environ.update(environment)
+    try:
+        environment_path.unlink()
+        fsync_directory(environment_path.parent)
+    except FileNotFoundError:
+        pass
+    task.pop("token", None)
+    task["state"] = "running"
+    task["outcome"] = "running"
+    task["boot_id"] = current_boot_id()
+    task["started_at"] = time.time()
+    task["wrapper_pid"] = os.getpid()
+    write_managed_task(root, task)
+    exit_code = 127
+    try:
+        completed = subprocess.run(
+            [str(part) for part in task["wrapped_command"]],
+            cwd=str(task["cwd"]),
+            shell=False,
+            check=False,
+            close_fds=True,
+        )
+        exit_code = completed.returncode
+        completed_at = time.time()
+        result = {
+            "version": 1,
+            "id": task["id"],
+            "exit_code": exit_code,
+            "completed_at": completed_at,
+            "outcome": "completed",
+        }
+        write_request(managed_result_path(root, str(task["id"])), result)
+        task.update(result)
+        task["state"] = "completed"
+        write_managed_task(root, task)
+        queue_managed_task_callback(root, task)
+        return exit_code
+    except OSError as exc:
+        task["state"] = "interrupted"
+        task["outcome"] = "unknown"
+        task["recovery_reason"] = f"wrapped_command_launch_failed: {exc}"
+        task["interrupted_at"] = time.time()
+        write_managed_task(root, task)
+        queue_managed_task_callback(root, task)
+        return exit_code
 
 
 def run(args: argparse.Namespace) -> int:
@@ -2443,39 +2813,21 @@ def run(args: argparse.Namespace) -> int:
 
     args.command = args.command or shlex.join(args.wrapped_command)
     bind_target(args)
-    if should_enqueue(args):
-        return run_via_daemon(args)
-
-    started = time.time()
-    exit_code = 1
-    task_returned = False
-    try:
-        completed = subprocess.run(
-            args.wrapped_command,
-            cwd=args.cwd,
-            shell=False,
-            check=False,
-        )
-        exit_code = completed.returncode
-        task_returned = True
-        return exit_code
-    finally:
-        args.command = args.command or " ".join(args.wrapped_command)
-        duration = time.time() - started
-        callback_args = args
-        if task_returned:
-            args.exit_code = exit_code
-        else:
-            callback_args = argparse.Namespace(**vars(args))
-            callback_args.exit_code = None
-            interruption = "The callback wrapper did not observe a child return code; task outcome is unknown."
-            callback_args.message = (
-                f"{args.message}\n\n{interruption}" if getattr(args, "message", None) else interruption
+    if args.dry_run:
+        print(
+            "\n".join(
+                [
+                    "[long-task-submission-dry-run]",
+                    f"Task: {args.task}",
+                    f"Working directory: {os.path.abspath(args.cwd)}",
+                    f"Command: {args.command}",
+                    "Execution: daemon submission -> GNU screen -> LTC worker -> wrapped task",
+                    "No task record was written and no command was started.",
+                ]
             )
-        prompt = build_prompt(callback_args, duration)
-        callback_code = resume_codex(callback_args, prompt)
-        if task_returned and args.strict and exit_code == 0 and callback_code != 0:
-            raise SystemExit(callback_code)
+        )
+        return 0
+    return submit_managed_run(args)
 
 
 def add_common_flags(parser: argparse.ArgumentParser) -> None:
@@ -2502,9 +2854,9 @@ def add_common_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--via-daemon",
         action="store_true",
-        help="Queue the wakeup request for the wakeup daemon instead of resuming the agent here",
+        help=argparse.SUPPRESS,
     )
-    parser.add_argument("--queue-dir", help="Wakeup queue directory for --via-daemon")
+    parser.add_argument("--queue-dir", help="Wakeup queue directory for daemon task submission and callback delivery")
     parser.add_argument("--goal-id", help="Explicit goal record to update when this callback is queued")
     parser.add_argument(
         "--approvals-reviewer",
@@ -2526,7 +2878,11 @@ def add_common_flags(parser: argparse.ArgumentParser) -> None:
         default=os.environ.get(CLAUDE_PERMISSION_MODE_ENV, DEFAULT_CLAUDE_PERMISSION_MODE),
         help="Claude Code-only: --permission-mode used when resuming (default: auto)",
     )
-    parser.add_argument("--dry-run", action="store_true", help="Print the wakeup prompt instead of resuming the agent")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview the run submission or done callback without writing queue state",
+    )
     parser.add_argument(
         "--strict",
         action="store_true",
@@ -2736,6 +3092,7 @@ def daemon_environment(args: argparse.Namespace, *, include_proxy_values: bool =
         "PYTHONUNBUFFERED": "1",
         "CODEX_LONG_TASK_WAKEUP_CODEX_BIN": codex_bin_path(args),
         CLAUDE_BIN_ENV: claude_bin_path(args),
+        SCREEN_BIN_ENV: screen_binary() or "screen",
         DESKTOP_APP_SERVER_ENV: os.environ.get(DESKTOP_APP_SERVER_ENV, "1"),
         "PATH": getattr(args, "path", None) or os.environ.get("PATH", ""),
         PROXY_ENV_FILE_ENV: str(service_proxy_env_path()),
@@ -3029,6 +3386,9 @@ def install_systemd(args: argparse.Namespace) -> int:
 
 
 def setup(args: argparse.Namespace) -> int:
+    if screen_binary() is None:
+        print(f"ltc: setup cannot continue: {screen_required_error()}", file=sys.stderr)
+        return 2
     skill_args = argparse.Namespace(
         path=args.skill_path,
         force=args.force,
@@ -3081,7 +3441,14 @@ def ack(args: argparse.Namespace) -> int:
             request = load_request(source)
             if state == "failed":
                 move_request(source, root / "done")
-            release_retained_target_lease(root, request)
+            try:
+                release_retained_target_lease(root, request)
+            except (OSError, RuntimeError) as exc:
+                print(
+                    f"ltc: warning: callback {args.id} is durably acknowledged; "
+                    f"daemon will reconcile its retained target lease: {exc}",
+                    file=sys.stderr,
+                )
         except FileNotFoundError:
             continue
         break
@@ -3377,12 +3744,16 @@ def main() -> int:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="mode", required=True)
 
-    done_parser = sub.add_parser("done", help="Wake the agent after an externally managed task finishes")
+    done_parser = sub.add_parser("done", help="Queue a callback after an externally managed task finishes")
     add_common_flags(done_parser)
 
-    run_parser = sub.add_parser("run", help="Run a command and wake the agent when it exits")
+    run_parser = sub.add_parser("run", help="Submit a command to the daemon for GNU screen execution")
     add_common_flags(run_parser)
     run_parser.add_argument("wrapped_command", nargs=argparse.REMAINDER)
+
+    screen_worker_parser = sub.add_parser("_screen-worker", help=argparse.SUPPRESS)
+    screen_worker_parser.add_argument("--task-file", required=True)
+    screen_worker_parser.add_argument("--token", required=True)
 
     daemon_parser = sub.add_parser("daemon", help="Process queued wakeup requests outside Codex tool sandboxes")
     daemon_parser.add_argument("--queue-dir", help="Wakeup queue directory")
@@ -3509,6 +3880,8 @@ def main() -> int:
         if args.wrapped_command and args.wrapped_command[0] == "--":
             args.wrapped_command = args.wrapped_command[1:]
         return run(args)
+    if args.mode == "_screen-worker":
+        return run_screen_worker(args)
     if args.mode == "daemon":
         return daemon(args)
     if args.mode == "install-systemd":

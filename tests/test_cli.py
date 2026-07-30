@@ -40,23 +40,265 @@ class CliTests(unittest.TestCase):
         env.update(extra)
         return mock.patch.dict(os.environ, env, clear=True)
 
-    def test_via_daemon_run_preserves_exit_code_and_one_callback_id(self) -> None:
-        for exit_code in (0, 7):
-            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp) / "queue"
-                args = self._run_args(tmp, root, [sys.executable, "-c", f"raise SystemExit({exit_code})"])
+    def test_run_defaults_to_durable_submission_without_starting_task_in_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            args = self._run_args(tmp, root, [sys.executable, "-c", "pass"])
 
-                self.assertEqual(cli.run(args), exit_code)
+            with (
+                mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"),
+                mock.patch.object(cli.subprocess, "run") as wrapped,
+            ):
+                self.assertEqual(cli.run(args), 0)
 
-                pending = list((root / "pending").glob("*.json"))
-                self.assertEqual(len(pending), 1)
-                request = json.loads(pending[0].read_text(encoding="utf-8"))
-                self.assertEqual(request["id"], pending[0].stem)
-                self.assertEqual(request["exit_code"], exit_code)
-                self.assertEqual(request["outcome"], "completed")
-                self.assertEqual(request["lifecycle_state"], "pending")
-                self.assertIn(f"Exit code: {exit_code}", request["prompt"])
-                self.assertFalse(list((root / cli.ACTIVE_STATE).glob("*.json")))
+            wrapped.assert_not_called()
+            manifests = list(cli.managed_tasks_root(root).glob("*/task.json"))
+            self.assertEqual(len(manifests), 1)
+            task = cli.load_managed_task(manifests[0])
+            self.assertEqual(task["state"], "submitted")
+            self.assertEqual(task["wrapped_command"], args.wrapped_command)
+            self.assertEqual(task["id"], task["screen_session"].removeprefix("ltc-"))
+            self.assertTrue(Path(str(task["environment_path"])).exists())
+            self.assertFalse(list((root / "pending").glob("*.json")))
+
+    def test_default_run_requires_screen_and_does_not_persist_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            args = self._run_args(tmp, root, [sys.executable, "-c", "pass"])
+
+            with mock.patch.object(cli, "screen_binary", return_value=None):
+                self.assertEqual(cli.run(args), 125)
+
+            self.assertFalse(cli.managed_tasks_root(root).exists())
+
+    def test_done_defaults_to_daemon_queue_without_requiring_screen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            args = self._run_args(tmp, root, [sys.executable, "-c", "pass"])
+            args.exit_code = 0
+
+            with (
+                mock.patch.object(cli, "screen_binary", return_value=None),
+                mock.patch.object(cli.subprocess, "run") as direct_resume,
+            ):
+                self.assertEqual(cli.done(args), 0)
+
+            direct_resume.assert_not_called()
+            callbacks = list((root / "pending").glob("*.json"))
+            self.assertEqual(len(callbacks), 1)
+            callback = cli.load_request(callbacks[0])
+            self.assertEqual(callback["target"], {"kind": "session", "value": "test-thread"})
+            self.assertEqual(callbacks[0].stem, callback["id"])
+
+    def test_run_dry_run_previews_without_screen_or_queue_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            args = self._run_args(tmp, root, [sys.executable, "-c", "pass"])
+            args.dry_run = True
+            output = io.StringIO()
+
+            with (
+                mock.patch.object(cli, "screen_binary", return_value=None),
+                mock.patch.object(cli.subprocess, "run") as wrapped,
+                mock.patch("sys.stdout", output),
+            ):
+                self.assertEqual(cli.run(args), 0)
+
+            wrapped.assert_not_called()
+            self.assertFalse(cli.managed_tasks_root(root).exists())
+            self.assertIn("daemon submission -> GNU screen", output.getvalue())
+
+    def test_via_daemon_is_hidden_compatibility_flag(self) -> None:
+        help_output = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", ["ltc", "run", "--help"]),
+            mock.patch("sys.stdout", help_output),
+            self.assertRaises(SystemExit) as help_exit,
+        ):
+            cli.main()
+        self.assertEqual(help_exit.exception.code, 0)
+        self.assertNotIn("--via-daemon", help_output.getvalue())
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["ltc", "run", "--via-daemon", "--session", "compat-session", "--", "true"],
+            ),
+            mock.patch.object(cli, "run", return_value=0) as parsed_run,
+        ):
+            self.assertEqual(cli.main(), 0)
+        self.assertTrue(parsed_run.call_args.args[0].via_daemon)
+
+    def test_daemon_launches_submitted_task_through_screen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            args = self._run_args(tmp, root, [sys.executable, "-c", "pass"])
+            with mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"):
+                self.assertEqual(cli.run(args), 0)
+            task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
+
+            completed = subprocess.CompletedProcess(["screen"], 0)
+            with (
+                mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"),
+                mock.patch.object(cli, "screen_session_exists", return_value=False),
+                mock.patch.object(cli, "console_script_path", return_value="/usr/bin/ltc"),
+                mock.patch.object(cli.subprocess, "run", return_value=completed) as launch,
+            ):
+                self.assertEqual(cli.recover_managed_tasks(root), 1)
+
+            command = launch.call_args.args[0]
+            self.assertEqual(command[:3], ["/usr/bin/screen", "-dmS", f"ltc-{task_path.parent.name}"])
+            self.assertIn("-Logfile", command)
+            self.assertIn("_screen-worker", command)
+            task = cli.load_managed_task(task_path)
+            self.assertEqual(task["state"], "launching")
+
+    def test_screen_worker_records_result_and_queues_same_id_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            run_args = self._run_args(tmp, root, [sys.executable, "-c", "pass"])
+            with mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"):
+                self.assertEqual(cli.run(run_args), 0)
+            task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
+            task = cli.load_managed_task(task_path)
+            worker = argparse.Namespace(task_file=str(task_path), token=task["token"])
+
+            completed = subprocess.CompletedProcess(run_args.wrapped_command, 7)
+            with (
+                mock.patch.dict(os.environ, {"STY": "screen-session"}, clear=True),
+                mock.patch.object(cli.subprocess, "run", return_value=completed),
+            ):
+                self.assertEqual(cli.run_screen_worker(worker), 7)
+
+            task = cli.load_managed_task(task_path)
+            self.assertEqual(task["state"], "completed")
+            self.assertEqual(task["exit_code"], 7)
+            self.assertNotIn("token", task)
+            self.assertFalse(Path(str(task["environment_path"])).exists())
+            callback = cli.load_request(root / "pending" / f"{task['id']}.json")
+            self.assertEqual(callback["id"], task["id"])
+            self.assertEqual(callback["exit_code"], 7)
+            self.assertIn("Screen log:", callback["prompt"])
+
+    def test_host_reboot_recovers_original_agent_without_restarting_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            run_args = self._run_args(tmp, root, [sys.executable, "-c", "pass"])
+            run_args.agent = "claude"
+            with mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"):
+                self.assertEqual(cli.run(run_args), 0)
+            task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
+            task = cli.load_managed_task(task_path)
+            task.update({"state": "running", "boot_id": "old-boot", "agent": "claude"})
+            cli.write_managed_task(root, task)
+
+            with (
+                mock.patch.object(cli, "current_boot_id", return_value="new-boot"),
+                mock.patch.object(cli, "current_machine_id", return_value=str(task["machine_id"])),
+                mock.patch.object(cli, "screen_session_exists", return_value=False),
+                mock.patch.object(cli.subprocess, "run") as restart,
+            ):
+                self.assertEqual(cli.recover_managed_tasks(root), 1)
+
+            restart.assert_not_called()
+            task = cli.load_managed_task(task_path)
+            self.assertEqual(task["recovery_reason"], "interrupted_by_host_reboot")
+            callback = cli.load_request(root / "pending" / f"{task['id']}.json")
+            self.assertEqual(callback["agent"], "claude")
+            self.assertEqual(callback["target"], {"kind": "session", "value": "test-thread"})
+            self.assertIn("not automatically restarted", callback["prompt"])
+            self.assertIn("checkpoints", callback["prompt"])
+
+    def test_daemon_restart_reconnects_live_screen_without_duplicate_launch_or_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            run_args = self._run_args(tmp, root, [sys.executable, "-c", "pass"])
+            with mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"):
+                self.assertEqual(cli.run(run_args), 0)
+            task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
+            task = cli.load_managed_task(task_path)
+            task.update({"state": "running", "boot_id": cli.current_boot_id()})
+            cli.write_managed_task(root, task)
+
+            with (
+                mock.patch.object(cli, "current_machine_id", return_value=str(task["machine_id"])),
+                mock.patch.object(cli, "screen_session_exists", return_value=True),
+                mock.patch.object(cli.subprocess, "run") as relaunch,
+            ):
+                self.assertEqual(cli.recover_managed_tasks(root), 0)
+
+            relaunch.assert_not_called()
+            self.assertFalse((root / "pending" / f"{task['id']}.json").exists())
+
+    def test_cross_host_record_is_preserved_without_launch_or_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            run_args = self._run_args(tmp, root, [sys.executable, "-c", "pass"])
+            with mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"):
+                self.assertEqual(cli.run(run_args), 0)
+            task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
+
+            with (
+                mock.patch.object(cli, "current_machine_id", return_value="different-machine"),
+                mock.patch.object(cli.subprocess, "run") as launch,
+            ):
+                self.assertEqual(cli.recover_managed_tasks(root), 1)
+
+            launch.assert_not_called()
+            task = cli.load_managed_task(task_path)
+            self.assertEqual(task["state"], "foreign_host")
+            self.assertEqual(task["recovery_reason"], "cross_host_recovery_unsupported")
+            self.assertFalse((root / "pending" / f"{task['id']}.json").exists())
+
+    def test_reboot_recovery_callback_ack_does_not_complete_bound_goal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            start = argparse.Namespace(
+                queue_dir=str(root),
+                id="stage-goal",
+                session="test-thread",
+                last=False,
+                agent="codex",
+                cwd=tmp,
+                task="finish training stage",
+                idle_seconds=1.0,
+            )
+            self.assertEqual(cli.goal_start(start), 0)
+            run_args = self._run_args(tmp, root, [sys.executable, "-c", "pass"])
+            run_args.goal_id = "stage-goal"
+            with mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"):
+                self.assertEqual(cli.run(run_args), 0)
+            task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
+            task = cli.load_managed_task(task_path)
+            task.update({"state": "running", "boot_id": "old-boot"})
+            cli.write_managed_task(root, task)
+
+            with (
+                mock.patch.object(cli, "current_boot_id", return_value="new-boot"),
+                mock.patch.object(cli, "current_machine_id", return_value=str(task["machine_id"])),
+                mock.patch.object(cli, "screen_session_exists", return_value=False),
+            ):
+                self.assertEqual(cli.recover_managed_tasks(root), 1)
+
+            callback = cli.load_request(root / "pending" / f"{task['id']}.json")
+            self.assertEqual(callback["goal_id"], "stage-goal")
+            self.assertEqual(
+                cli.ack(argparse.Namespace(queue_dir=str(root), id=task["id"], message="recovery inspected")),
+                0,
+            )
+            goal = cli.load_goal(root, "stage-goal")
+            self.assertEqual(goal["state"], "active")
+            reminder_time = float(callback["created_at"]) + 2.0
+            with mock.patch.object(cli.time, "time", return_value=reminder_time):
+                self.assertTrue(cli.process_goal_reminders(root))
+            reminders = [
+                cli.load_request(path)
+                for path in (root / "pending").glob("*.json")
+                if path.stem != task["id"]
+            ]
+            self.assertEqual(len(reminders), 1)
+            self.assertTrue(reminders[0]["goal_reminder"])
 
     def test_active_owner_lock_blocks_premature_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -94,260 +336,41 @@ class CliTests(unittest.TestCase):
             cli.release_owner_lock(handoff, remove=False)
             self.assertTrue(lock_path.exists())
 
-    def test_wrapper_sigkill_recovers_prearmed_callback(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "queue"
-            child_pid_path = Path(tmp) / "child.pid"
-            child_code = (
-                "import os,time,pathlib; "
-                f"pathlib.Path({str(child_pid_path)!r}).write_text(str(os.getpid())); "
-                "time.sleep(60)"
-            )
-            command = [
-                sys.executable,
-                "-m",
-                "long_task_callback",
-                "run",
-                "--via-daemon",
-                "--session",
-                "sigkill-thread",
-                "--queue-dir",
-                str(root),
-                "--cwd",
-                tmp,
-                "--task",
-                "wrapper sigkill",
-                "--",
-                sys.executable,
-                "-c",
-                child_code,
-            ]
-            env = os.environ.copy()
-            env["PYTHONPATH"] = str(Path(cli.__file__).parents[1])
-            wrapper = subprocess.Popen(
-                command,
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            child_pid = None
-            try:
-                deadline = time.time() + 10.0
-                while time.time() < deadline:
-                    active = list((root / cli.ACTIVE_STATE).glob("*.json"))
-                    if active and child_pid_path.exists():
-                        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
-                        break
-                    time.sleep(0.05)
-                self.assertIsNotNone(child_pid, "wrapper never armed the callback and launched the child")
-
-                os.kill(wrapper.pid, signal.SIGKILL)
-                wrapper.wait(timeout=5)
-                self.assertEqual(cli.recover_active(root), 1)
-
-                pending = list((root / "pending").glob("*.json"))
-                self.assertEqual(len(pending), 1)
-                request = json.loads(pending[0].read_text(encoding="utf-8"))
-                self.assertEqual(request["outcome"], "unknown")
-                self.assertEqual(request["target"], {"kind": "session", "value": "sigkill-thread"})
-                self.assertIn("wrapper disappeared", request["prompt"])
-            finally:
-                if wrapper.poll() is None:
-                    wrapper.kill()
-                    wrapper.wait(timeout=5)
-                if child_pid is not None:
-                    try:
-                        os.kill(child_pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-
-    def test_wrapper_sigint_records_unknown_instead_of_fabricated_completion(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "queue"
-            child_pid_path = Path(tmp) / "sigint-child.pid"
-            child_code = (
-                "import os,time,pathlib; "
-                f"pathlib.Path({str(child_pid_path)!r}).write_text(str(os.getpid())); "
-                "time.sleep(30)"
-            )
-            command = [
-                sys.executable,
-                "-m",
-                "long_task_callback",
-                "run",
-                "--via-daemon",
-                "--session",
-                "sigint-thread",
-                "--queue-dir",
-                str(root),
-                "--cwd",
-                tmp,
-                "--task",
-                "wrapper sigint",
-                "--",
-                sys.executable,
-                "-c",
-                child_code,
-            ]
-            env = os.environ.copy()
-            env["PYTHONPATH"] = str(Path(cli.__file__).parents[1])
-            wrapper = subprocess.Popen(command, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            child_pid = None
-            try:
-                deadline = time.time() + 10.0
-                while time.time() < deadline:
-                    if list((root / cli.ACTIVE_STATE).glob("*.json")) and child_pid_path.exists():
-                        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
-                        break
-                    time.sleep(0.05)
-                self.assertIsNotNone(child_pid)
-
-                os.kill(wrapper.pid, signal.SIGINT)
-                wrapper.wait(timeout=5)
-                pending = list((root / "pending").glob("*.json"))
-                self.assertEqual(len(pending), 1)
-                request = json.loads(pending[0].read_text(encoding="utf-8"))
-                self.assertEqual(request["outcome"], "unknown")
-                self.assertNotIn("exit_code", request)
-                self.assertIn("before it observed a child return code", request["prompt"])
-            finally:
-                if wrapper.poll() is None:
-                    wrapper.kill()
-                    wrapper.wait(timeout=5)
-                if child_pid is not None:
-                    try:
-                        os.kill(child_pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-
-    def test_prearm_failure_refuses_to_launch_unprotected_task(self) -> None:
+    def test_submission_persistence_failure_refuses_to_launch_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "queue"
             args = self._run_args(tmp, root, [sys.executable, "-c", "pass"])
-            args.strict = True
 
             with (
+                mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"),
                 mock.patch.object(cli, "write_request", side_effect=OSError("disk unavailable")),
                 mock.patch.object(cli.subprocess, "run") as wrapped,
             ):
-                self.assertEqual(cli.run(args), 125)
+                self.assertEqual(cli.submit_managed_run(args), 125)
 
             wrapped.assert_not_called()
 
-    def test_non_strict_prearm_failure_runs_with_best_effort_exit_code(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "queue"
-            marker = Path(tmp) / "wrapped-ran"
-            args = self._run_args(
-                tmp,
-                root,
-                [sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).write_text('yes'); raise SystemExit(6)"],
-            )
-
-            def fail_release(lock: tuple[object, Path] | None, *, remove: bool) -> None:
-                if lock is not None:
-                    handle, _ = lock
-                    handle.close()
-                raise OSError("cleanup unavailable")
-
-            with (
-                mock.patch.object(cli, "write_request", side_effect=OSError("disk unavailable")),
-                mock.patch.object(cli, "release_owner_lock", side_effect=fail_release),
-            ):
-                self.assertEqual(cli.run(args), 6)
-
-            self.assertEqual(marker.read_text(encoding="utf-8"), "yes")
-
-    def test_non_strict_finalization_and_lock_cleanup_failures_preserve_task_exit(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "queue"
-            args = self._run_args(tmp, root, [sys.executable, "-c", "pass"])
-
-            with mock.patch.object(cli, "transition_active_to_pending", side_effect=OSError("finalize failed")):
-                self.assertEqual(cli.run(args), 0)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "queue"
-            args = self._run_args(tmp, root, [sys.executable, "-c", "pass"])
-
-            def fail_release(lock: tuple[object, Path] | None, *, remove: bool) -> None:
-                if lock is not None:
-                    handle, _ = lock
-                    handle.close()
-                raise OSError("lock cleanup failed")
-
-            with mock.patch.object(cli, "release_owner_lock", side_effect=fail_release):
-                self.assertEqual(cli.run(args), 0)
-
-    def test_wrapped_launch_exception_records_unknown_and_propagates_exception(self) -> None:
+    def test_screen_worker_launch_failure_queues_unknown_callback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "queue"
             args = self._run_args(tmp, root, ["missing-command"])
+            with mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"):
+                self.assertEqual(cli.submit_managed_run(args), 0)
+            task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
+            task = cli.load_managed_task(task_path)
+            worker = argparse.Namespace(task_file=str(task_path), token=task["token"])
 
-            with mock.patch.object(cli.subprocess, "run", side_effect=OSError("exec failed")):
-                with self.assertRaisesRegex(OSError, "exec failed"):
-                    cli.run(args)
+            with (
+                mock.patch.dict(os.environ, {"STY": "screen-session"}, clear=True),
+                mock.patch.object(cli.subprocess, "run", side_effect=OSError("exec failed")),
+            ):
+                self.assertEqual(cli.run_screen_worker(worker), 127)
 
-            pending = list((root / "pending").glob("*.json"))
-            self.assertEqual(len(pending), 1)
-            request = json.loads(pending[0].read_text(encoding="utf-8"))
-            self.assertEqual(request["outcome"], "unknown")
-            self.assertNotIn("exit_code", request)
-
-    def test_cancel_active_is_tombstone_first_and_does_not_kill_task(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "queue"
-            child_pid_path = Path(tmp) / "cancel-child.pid"
-            child_code = (
-                "import os,time,pathlib; "
-                f"pathlib.Path({str(child_pid_path)!r}).write_text(str(os.getpid())); "
-                "time.sleep(1.0)"
-            )
-            command = [
-                sys.executable,
-                "-m",
-                "long_task_callback",
-                "run",
-                "--via-daemon",
-                "--session",
-                "cancel-thread",
-                "--queue-dir",
-                str(root),
-                "--cwd",
-                tmp,
-                "--task",
-                "cancel active",
-                "--",
-                sys.executable,
-                "-c",
-                child_code,
-            ]
-            env = os.environ.copy()
-            env["PYTHONPATH"] = str(Path(cli.__file__).parents[1])
-            wrapper = subprocess.Popen(command, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            try:
-                deadline = time.time() + 10.0
-                active: list[Path] = []
-                while time.time() < deadline:
-                    active = list((root / cli.ACTIVE_STATE).glob("*.json"))
-                    if active and child_pid_path.exists():
-                        break
-                    time.sleep(0.05)
-                self.assertEqual(len(active), 1)
-                child_pid = int(child_pid_path.read_text(encoding="utf-8"))
-
-                self.assertTrue(cli.cancel_one(root, active[0].stem, "user canceled callback only"))
-                os.kill(child_pid, 0)
-                self.assertIsNone(wrapper.poll())
-                self.assertEqual(wrapper.wait(timeout=5), 0)
-
-                self.assertTrue(cli.request_path(root, "canceled", active[0].stem).exists())
-                self.assertFalse(cli.request_path(root, cli.ACTIVE_STATE, active[0].stem).exists())
-                self.assertFalse(cli.request_path(root, "pending", active[0].stem).exists())
-            finally:
-                if wrapper.poll() is None:
-                    wrapper.kill()
-                    wrapper.wait(timeout=5)
+            task = cli.load_managed_task(task_path)
+            self.assertEqual(task["state"], "interrupted")
+            callback = cli.load_request(root / "pending" / f"{task['id']}.json")
+            self.assertEqual(callback["outcome"], "unknown")
+            self.assertIn("wrapped_command_launch_failed", callback["prompt"])
 
     def test_recover_active_preserves_stranded_completed_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -810,6 +833,61 @@ class CliTests(unittest.TestCase):
             resume.assert_not_called()
             self.assertTrue(cli.request_path(root, "done", "monotonic-ack").exists())
             self.assertTrue(cli.ack_path(root, "monotonic-ack").exists())
+
+    def test_normal_running_ack_does_not_require_target_lock_directory_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            target_locks = Path(tmp) / "target-locks"
+            self._write_request(
+                root,
+                "queue-only-ack",
+                tmp,
+                target={"kind": "session", "value": "queue-only-session"},
+            )
+            cli.ensure_daemon_dirs(root)
+            cli.move_request(cli.request_path(root, "pending", "queue-only-ack"), root / "running")
+            args = argparse.Namespace(queue_dir=str(root), id="queue-only-ack", message="inspected")
+
+            with mock.patch.dict(os.environ, {cli.TARGET_LOCK_DIR_ENV: str(target_locks)}, clear=False):
+                self.assertEqual(cli.ack(args), 0)
+
+            self.assertTrue(cli.ack_path(root, "queue-only-ack").exists())
+            self.assertFalse(target_locks.exists())
+
+    def test_daemon_reconciles_retained_lease_after_sandboxed_ack(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            target_locks = Path(tmp) / "target-locks"
+            self._write_request(
+                root,
+                "deferred-lease-ack",
+                tmp,
+                target={"kind": "session", "value": "deferred-lease-session"},
+            )
+            cli.ensure_daemon_dirs(root)
+            cli.move_request(cli.request_path(root, "pending", "deferred-lease-ack"), root / "failed")
+            failed_path = cli.request_path(root, "failed", "deferred-lease-ack")
+            failed = cli.load_request(failed_path)
+            failed["retain_target_lease"] = True
+            cli.write_request(failed_path, failed)
+            args = argparse.Namespace(queue_dir=str(root), id="deferred-lease-ack", message=None)
+
+            with mock.patch.dict(os.environ, {cli.TARGET_LOCK_DIR_ENV: str(target_locks)}, clear=False):
+                cli.retain_target_lease(root, failed)
+                lease_path = cli.retained_target_lease_path(failed)
+                self.assertIsNotNone(lease_path)
+                with mock.patch.object(
+                    cli,
+                    "acquire_retained_target_lease_lock",
+                    side_effect=OSError("read-only target-locks"),
+                ):
+                    self.assertEqual(cli.ack(args), 0)
+                self.assertTrue(lease_path.exists())
+                cli.reconcile_acknowledged_retained_leases(root)
+                self.assertFalse(lease_path.exists())
+
+            self.assertTrue(cli.request_path(root, "done", "deferred-lease-ack").exists())
+            self.assertTrue(cli.ack_path(root, "deferred-lease-ack").exists())
 
     def test_late_ack_reconciles_failed_request_to_done(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1292,6 +1370,7 @@ class CliTests(unittest.TestCase):
         )
 
         with (
+            mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"),
             mock.patch.object(cli, "install_skill", return_value=0) as install_skill,
             mock.patch.object(cli, "install_systemd", return_value=0) as install_systemd,
         ):
@@ -1306,6 +1385,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual(systemd_args.path, "/bin")
         self.assertTrue(systemd_args.enable)
         self.assertTrue(systemd_args.now)
+
+    def test_setup_refuses_before_installing_when_screen_is_missing(self) -> None:
+        args = argparse.Namespace()
+        with (
+            mock.patch.object(cli, "screen_binary", return_value=None),
+            mock.patch.object(cli, "install_skill") as install_skill,
+            mock.patch.object(cli, "install_systemd") as install_systemd,
+        ):
+            self.assertEqual(cli.setup(args), 2)
+        install_skill.assert_not_called()
+        install_systemd.assert_not_called()
 
     def test_install_systemd_persists_only_proxy_values_in_private_environment_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2430,7 +2520,7 @@ class CliTests(unittest.TestCase):
             message=None,
             session="test-thread",
             last=False,
-            via_daemon=True,
+            via_daemon=False,
             queue_dir=str(root),
             approvals_reviewer="auto_review",
             approval_policy="on-request",

@@ -17,7 +17,7 @@
           font-size="25" fill="#8b949e">when an hours-long task finishes.</text>
     <g transform="translate(4 190)" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="21">
       <text x="0" y="0" fill="#3fb950">$</text>
-      <text x="24" y="0" fill="#e6edf3">ltc run --via-daemon -- python train.py</text>
+      <text x="24" y="0" fill="#e6edf3">ltc run -- python train.py</text>
       <rect x="520" y="-16" width="13" height="24" fill="#3fb950"/>
     </g>
     <text x="4" y="248" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
