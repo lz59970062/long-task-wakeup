@@ -1215,8 +1215,6 @@ class AppServerConnection:
             raise AppServerProtocolError("control socket frame used unsupported RSV bits")
         opcode = header[0] & 0x0F
         masked = bool(header[1] & 0x80)
-        if masked:
-            raise AppServerProtocolError("control socket server frame must not be masked")
         length = header[1] & 0x7F
         if length == 126:
             length = struct.unpack("!H", self._read_exact(2, deadline))[0]
@@ -1226,6 +1224,11 @@ class AppServerConnection:
             raise AppServerProtocolError("control socket sent an invalid control frame")
         if length > 1_048_576:
             raise AppServerProtocolError("control socket frame exceeds 1 MiB")
+        # RFC 6455 servers normally send unmasked frames. Some Codex Desktop
+        # App Server control-socket versions have emitted masked frames,
+        # however. The peer is a same-UID Unix socket verified during connect,
+        # so decode those frames for local compatibility instead of stranding
+        # a successfully started callback turn.
         mask = self._read_exact(4, deadline) if masked else None
         payload = self._read_exact(length, deadline)
         if mask is not None:
@@ -1287,7 +1290,7 @@ class DesktopAppServerDelivery:
         except AppServerProtocolError as exc:
             print(
                 f"ltc: desktop App Server completion stream unavailable: {exc}; "
-                "retaining the callback lease until timeout",
+                "waiting for ACK or timeout",
                 file=sys.stderr,
             )
             self.close()
@@ -1344,7 +1347,7 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
         if turn_id is None:
             print(
                 "ltc: desktop App Server accepted turn/start without a turn id; "
-                "retaining the callback lease until timeout",
+                "waiting for ACK or timeout",
                 file=sys.stderr,
             )
             connection.close()
@@ -1410,6 +1413,13 @@ def delivery_worker_main() -> int:
             while True:
                 acknowledged = Path(str(payload["ack_path"])).exists()
                 canceled = Path(str(payload["canceled_path"])).exists()
+                if acknowledged:
+                    result = {
+                        "returncode": 0,
+                        "delivery": "desktop_app_server",
+                        "skipped": "acknowledged",
+                    }
+                    break
                 if canceled:
                     result = {"returncode": 0, "delivery": "desktop_app_server", "skipped": "canceled"}
                     break

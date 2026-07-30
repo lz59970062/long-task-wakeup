@@ -2142,7 +2142,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertEqual(messages[-1]["method"], "turn/start")
 
-    def test_desktop_delivery_worker_retains_ack_lease_until_turn_completion(self) -> None:
+    def test_desktop_delivery_worker_releases_lease_immediately_after_ack(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ack_marker = Path(tmp) / "acks" / "callback.json"
 
@@ -2188,8 +2188,8 @@ class CliTests(unittest.TestCase):
 
             result = json.loads(output.getvalue())
             self.assertEqual(result["returncode"], 0)
-            self.assertTrue(result["turn_completed"])
-            self.assertGreaterEqual(delivery.waits, 2)
+            self.assertEqual(result["skipped"], "acknowledged")
+            self.assertEqual(delivery.waits, 1)
             self.assertTrue(delivery.closed)
             popen.assert_not_called()
 
@@ -2235,17 +2235,23 @@ class CliTests(unittest.TestCase):
             self.assertEqual(connection.methods, ["initialize", "initialized", "thread/resume", "turn/start"])
             self.assertTrue(connection.closed)
 
-    def test_desktop_app_server_rejects_invalid_protocol_and_ungated_socket_override(self) -> None:
+    def test_desktop_app_server_handles_masked_frames_and_rejects_invalid_protocol(self) -> None:
         deadline = time.monotonic() + 1.0
         for frame in (
             bytes([0xC1, 0x00]),
-            bytes([0x81, 0x80]) + b"mask",
             bytes([0x09, 0x00]),
         ):
             connection = cli.AppServerConnection(Path("/tmp/not-used.sock"), 1.0)
             connection.buffer = frame
             with self.assertRaises(cli.AppServerProtocolError):
                 connection._receive_frame(deadline)
+
+        payload = b'{"id":1,"result":{}}'
+        mask = b"mask"
+        encoded = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+        connection = cli.AppServerConnection(Path("/tmp/not-used.sock"), 1.0)
+        connection.buffer = bytes([0x81, 0x80 | len(payload)]) + mask + encoded
+        self.assertEqual(connection._receive_frame(deadline), (True, 0x1, payload))
 
         connection = cli.AppServerConnection(Path("/tmp/not-used.sock"), 1.0)
         with (

@@ -48,6 +48,11 @@ GNU screen session
 
 No polling is required. Live inspection is available through screen and the task log.
 
+As an execution rule, a command reliably expected to finish within 60 seconds may use one
+foreground wait. Use `ltc run` when it may take about a minute or longer, its duration is
+uncertain, or another status check might be needed. A few-minute task should use callback delivery
+instead of model polling; screen and the daemon wait without spending model turns.
+
 ## Install
 
 GNU screen is required. LTC deliberately has no silent fallback because a fallback would restore
@@ -155,6 +160,8 @@ ltc ack --queue-dir <queue-dir> --id <callback-id>
 ```
 
 An unacknowledged callback is retried with backoff. ACK is monotonic.
+An ACK marker immediately ends Desktop completion-stream waiting and releases the delivery lease,
+even if the App Server completion notification is unavailable.
 The resumed agent writes only the queue ACK marker. Global target-lock cleanup is performed by the
 daemon, so ACK does not require broader filesystem permissions.
 
@@ -243,6 +250,10 @@ daemon 不是训练任务的父进程。它重启时，screen 中的任务继续
 screen，不会重复启动。screen 是必需依赖，缺失时 `setup` 和 `run` 都会拒绝，
 不会退回到不稳定的 agent 回合进程。
 
+使用原则：只有可靠地在 60 秒内结束的命令才允许前台等待一次。预计约一分钟以上、耗时不确定，
+或可能需要第二次状态检查时，从一开始就使用 `ltc run`。几分钟任务也默认走 callback，
+不要为了维持模型缓存而轮询；screen 和 daemon 的等待不产生模型回合。
+
 ```bash
 ltc run --cwd "$PWD" --task "train model" \
   -- python train.py --config configs/exp.yaml
@@ -270,6 +281,8 @@ callback ACK 不会顺带完成 goal。活跃 goal 默认三小时没有新 call
 原会话问询阶段状态；重启恢复后也遵守同一规则。
 普通 ACK 只写 callback queue；全局 target-lock 的清理由 daemon 完成，不需要给恢复后的
 agent 扩大文件系统写权限。
+ACK marker 一旦存在，completion stream 的等待必须立即结束并释放 delivery lease，
+不能继续等待 Desktop App Server 的 `turn/completed` 通知。
 
 旧脚本中的 `--via-daemon` 仍可作为隐藏的无效果兼容参数使用，但新命令不应再写它。`run`
 和 `done` 已经固定走 daemon，不存在直接由 agent 回合执行或投递的模式。

@@ -46,6 +46,23 @@ After a successful submission, report the task id, screen session, and log path,
 agent turn. Do not poll processes, logs, or artifacts on a timer. Live monitoring is allowed only
 when the user asks or callback infrastructure itself is being diagnosed.
 
+## Duration policy
+
+Choose the execution path before launching the command:
+
+- If the command is reliably expected to finish within 60 seconds, one foreground wait is
+  acceptable.
+- If it may take about one minute or longer, its duration is uncertain, or a second status check
+  might be needed, use `ltc run` from the start.
+- Do not keep a prompt cache warm by polling. A few-minute task should normally use callback
+  delivery: the daemon and screen wait without model turns, then resume the same conversation
+  exactly once on completion.
+- If intermediate results genuinely require agent decisions, use sparse milestone callbacks
+  rather than timer-based status polling.
+
+If a supposedly short foreground command unexpectedly remains active, keep the current turn
+responsible for it; do not abandon it as an agent-owned background process.
+
 The command name is `ltc`; `codex-long-task-wakeup` remains a compatibility alias.
 
 ## Install
@@ -165,6 +182,8 @@ ltc ack --queue-dir <queue-dir> --id <callback-id>
 After inspecting the result and choosing whether to continue, stop, or ask, run that command.
 Acknowledgements are monotonic. Missing ACKs retry with backoff. Delivery is at-least-once, so
 always inspect existing processes and artifacts before starting follow-up work.
+An ACK marker immediately ends completion-stream waiting and releases the delivery lease; it must
+not wait for a separate Desktop App Server `turn/completed` notification.
 The resumed agent needs write access only to the callback queue. A normal ACK must not create or
 modify global target-lock files; if a rare retained lease needs cleanup, the daemon reconciles it
 after the durable ACK marker appears.
