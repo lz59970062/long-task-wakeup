@@ -40,6 +40,25 @@ class CliTests(unittest.TestCase):
         env.update(extra)
         return mock.patch.dict(os.environ, env, clear=True)
 
+    @staticmethod
+    def _goal_plan(directory: str, *, status: str = "pending", name: str = "GOAL.yaml") -> Path:
+        path = Path(directory) / name
+        path.write_text(
+            textwrap.dedent(
+                f"""\
+                version: 1
+                revision: 1
+                goal: Finish the test goal
+                path:
+                  - id: finish
+                    title: Finish and verify the work
+                    status: {status}
+                """
+            ),
+            encoding="utf-8",
+        )
+        return path
+
     def test_run_defaults_to_durable_submission_without_starting_task_in_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "queue"
@@ -262,6 +281,7 @@ class CliTests(unittest.TestCase):
                 agent="codex",
                 cwd=tmp,
                 task="finish training stage",
+                plan_file=str(self._goal_plan(tmp)),
                 idle_seconds=1.0,
             )
             self.assertEqual(cli.goal_start(start), 0)
@@ -1831,12 +1851,19 @@ class CliTests(unittest.TestCase):
             root = Path(tmp) / "queue"
             start_args = argparse.Namespace(
                 queue_dir=str(root), id="terminal-goal", session="thread-1", last=False,
-                cwd=tmp, task="finish report", idle_seconds=1.0,
+                cwd=tmp, task="finish report", plan_file=str(self._goal_plan(tmp, status="completed")),
+                idle_seconds=1.0,
             )
             self.assertEqual(cli.goal_start(start_args), 0)
+            self.assertEqual(
+                cli.goal_check(argparse.Namespace(queue_dir=str(root), id="terminal-goal")),
+                0,
+            )
+            plan_digest = cli.load_goal(root, "terminal-goal")["last_plan_check_sha256"]
             ack_args = argparse.Namespace(
                 queue_dir=str(root), id="terminal-goal", state="completed", message="done",
                 condition=None, email_to=None, email_after=cli.DEFAULT_BLOCKED_EMAIL_SECONDS,
+                plan_sha256=plan_digest,
             )
             self.assertEqual(cli.goal_ack(ack_args), 0)
 
@@ -1868,12 +1895,153 @@ class CliTests(unittest.TestCase):
                 1,
             )
 
+    def test_goal_completion_follows_latest_mutable_yaml_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            plan_path = Path(tmp) / "release-goal.yaml"
+
+            def write_plan(revision: int, goal: str, second_status: str, third_status: str | None = None) -> None:
+                third = ""
+                amendments = ""
+                if third_status is not None:
+                    third = (
+                        "  - id: publish\n"
+                        "    title: Publish the revised release\n"
+                        f"    status: {third_status}\n"
+                    )
+                    amendments = textwrap.dedent(
+                        """\
+                        amendments:
+                          - revision: 2
+                            reason: User added a publication step
+                        """
+                    )
+                plan_path.write_text(
+                    textwrap.dedent(
+                        f"""\
+                        version: 1
+                        revision: {revision}
+                        goal: {goal}
+                        path:
+                          - id: implement
+                            title: Implement the feature
+                            status: completed
+                          - id: verify
+                            title: Verify the feature
+                            status: {second_status}
+                        """
+                    )
+                    + third
+                    + amendments,
+                    encoding="utf-8",
+                )
+
+            write_plan(1, "Release version 0.6.2", "pending")
+            start_args = argparse.Namespace(
+                queue_dir=str(root), id="mutable-goal", session="thread-1", last=False,
+                cwd=tmp, task="release", plan_file=str(plan_path), idle_seconds=1.0,
+            )
+            self.assertEqual(cli.goal_start(start_args), 0)
+            self.assertEqual(cli.goal_check(argparse.Namespace(queue_dir=str(root), id="mutable-goal")), 0)
+            first_digest = cli.load_goal(root, "mutable-goal")["last_plan_check_sha256"]
+            incomplete_ack = argparse.Namespace(
+                queue_dir=str(root), id="mutable-goal", state="completed", message=None,
+                condition=None, email_to=None, email_after=cli.DEFAULT_BLOCKED_EMAIL_SECONDS,
+                plan_sha256=first_digest,
+            )
+            self.assertEqual(cli.goal_ack(incomplete_ack), 1)
+
+            write_plan(2, "Release and publish version 0.6.2", "completed", "pending")
+            self.assertEqual(cli.goal_ack(incomplete_ack), 1)
+            output = io.StringIO()
+            with mock.patch("sys.stdout", output):
+                self.assertEqual(cli.goal_check(argparse.Namespace(queue_dir=str(root), id="mutable-goal")), 0)
+            self.assertIn("Plan revision: 2", output.getvalue())
+            self.assertIn("Current item: publish [pending]", output.getvalue())
+            self.assertIn("Release and publish version 0.6.2", output.getvalue())
+
+            write_plan(3, "Release and publish version 0.6.2", "completed", "completed")
+            self.assertEqual(cli.goal_ack(incomplete_ack), 1)
+            self.assertEqual(cli.goal_check(argparse.Namespace(queue_dir=str(root), id="mutable-goal")), 0)
+            final_digest = cli.load_goal(root, "mutable-goal")["last_plan_check_sha256"]
+            incomplete_ack.plan_sha256 = final_digest
+            self.assertEqual(cli.goal_ack(incomplete_ack), 0)
+            goal = cli.load_goal(root, "mutable-goal")
+            self.assertEqual(goal["state"], "completed")
+            self.assertEqual(goal["completion_plan_revision"], 3)
+
+    def test_goal_start_rejects_missing_or_nonsequential_yaml_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            base = dict(
+                queue_dir=str(root), id="invalid-goal", session="thread-1", last=False,
+                cwd=tmp, task="invalid", idle_seconds=1.0,
+            )
+            self.assertEqual(cli.goal_start(argparse.Namespace(**base, plan_file=None)), 2)
+
+            plan_path = Path(tmp) / "invalid.yaml"
+            plan_path.write_text(
+                textwrap.dedent(
+                    """\
+                    version: 1
+                    revision: 1
+                    goal: Invalid skipped path
+                    path:
+                      - id: first
+                        title: First item
+                        status: pending
+                      - id: second
+                        title: Second item
+                        status: completed
+                    """
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(cli.goal_start(argparse.Namespace(**base, plan_file=str(plan_path))), 2)
+
+    def test_goal_set_plan_migrates_legacy_goal_and_clears_old_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            cli.ensure_daemon_dirs(root)
+            cli.write_goal(
+                root,
+                {
+                    "version": 1,
+                    "id": "legacy-goal",
+                    "task": "legacy task",
+                    "cwd": tmp,
+                    "target": {"kind": "session", "value": "thread-1"},
+                    "state": "active",
+                    "created_at": time.time(),
+                    "last_external_callback_at": time.time(),
+                    "last_plan_check_sha256": "obsolete",
+                },
+            )
+            plan_path = self._goal_plan(tmp, status="completed")
+            args = argparse.Namespace(
+                queue_dir=str(root), id="legacy-goal", plan_file=str(plan_path)
+            )
+            self.assertEqual(cli.goal_set_plan(args), 0)
+            goal = cli.load_goal(root, "legacy-goal")
+            self.assertEqual(goal["plan_file"], str(plan_path.resolve()))
+            self.assertNotIn("last_plan_check_sha256", goal)
+
+            no_check_ack = argparse.Namespace(
+                queue_dir=str(root), id="legacy-goal", state="completed", message=None,
+                condition=None, email_to=None, email_after=cli.DEFAULT_BLOCKED_EMAIL_SECONDS,
+                plan_sha256=goal["plan_sha256_when_attached"],
+            )
+            self.assertEqual(cli.goal_ack(no_check_ack), 1)
+            self.assertEqual(cli.goal_check(argparse.Namespace(queue_dir=str(root), id="legacy-goal")), 0)
+            no_check_ack.plan_sha256 = cli.load_goal(root, "legacy-goal")["last_plan_check_sha256"]
+            self.assertEqual(cli.goal_ack(no_check_ack), 0)
+
     def test_goal_reminder_is_deduplicated_and_external_callback_resets_idle_timer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "queue"
             start_args = argparse.Namespace(
                 queue_dir=str(root), id="reminder-goal", session="thread-1", last=False,
-                cwd=tmp, task="train model", idle_seconds=1.0,
+                cwd=tmp, task="train model", plan_file=str(self._goal_plan(tmp)), idle_seconds=1.0,
             )
             self.assertEqual(cli.goal_start(start_args), 0)
             goal = cli.load_goal(root, "reminder-goal")
@@ -1887,8 +2055,11 @@ class CliTests(unittest.TestCase):
             reminder = cli.load_request(pending[0])
             self.assertTrue(reminder["goal_reminder"])
             self.assertIn("goal ack --queue-dir", reminder["prompt"])
+            self.assertIn("goal check --queue-dir", reminder["prompt"])
             self.assertIn("--id reminder-goal", reminder["prompt"])
             self.assertIn("--condition", reminder["prompt"])
+            self.assertIn("Current item: finish [pending]", reminder["prompt"])
+            self.assertIn("Remaining path:", reminder["prompt"])
 
             cli.move_request(pending[0], root / "done")
             goal = cli.load_goal(root, "reminder-goal")
@@ -1907,7 +2078,7 @@ class CliTests(unittest.TestCase):
             root = Path(tmp) / "queue"
             start_args = argparse.Namespace(
                 queue_dir=str(root), id="recovery-goal", session="thread-1", last=False,
-                cwd=tmp, task="run recovery", idle_seconds=1.0,
+                cwd=tmp, task="run recovery", plan_file=str(self._goal_plan(tmp)), idle_seconds=1.0,
             )
             self.assertEqual(cli.goal_start(start_args), 0)
             goal = cli.load_goal(root, "recovery-goal")
@@ -1939,7 +2110,7 @@ class CliTests(unittest.TestCase):
             root = Path(tmp) / "queue"
             start_args = argparse.Namespace(
                 queue_dir=str(root), id="blocked-goal", session="thread-1", last=False,
-                cwd=tmp, task="wait for access", idle_seconds=1.0,
+                cwd=tmp, task="wait for access", plan_file=str(self._goal_plan(tmp)), idle_seconds=1.0,
             )
             self.assertEqual(cli.goal_start(start_args), 0)
             bad_ack_args = argparse.Namespace(
@@ -1971,7 +2142,7 @@ class CliTests(unittest.TestCase):
             root = Path(tmp) / "queue"
             start_args = argparse.Namespace(
                 queue_dir=str(root), id="retry-goal", session="thread-1", last=False,
-                cwd=tmp, task="wait for service", idle_seconds=1.0,
+                cwd=tmp, task="wait for service", plan_file=str(self._goal_plan(tmp)), idle_seconds=1.0,
             )
             self.assertEqual(cli.goal_start(start_args), 0)
             multi_recipient_args = argparse.Namespace(

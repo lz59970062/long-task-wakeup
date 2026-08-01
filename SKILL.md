@@ -192,35 +192,105 @@ Callback ACK confirms one delivery only. It must never implicitly complete a per
 
 ## Goal acknowledgement and automatic inquiry
 
-For a multi-stage goal:
+Every multi-stage goal must use a mutable UTF-8 YAML goal plan. Treat that file as the single
+source of truth for the current overall goal and its ordered path, not the task text remembered
+from an earlier turn. Use this schema:
+
+```yaml
+version: 1
+revision: 1
+goal: Release version 0.6.2
+path:
+  - id: implement
+    title: Implement the change
+    status: completed
+    evidence: tests/test_feature.py
+  - id: verify
+    title: Run tests and inspect the result
+    status: in_progress
+  - id: publish
+    title: Publish the release
+    status: pending
+amendments:
+  - revision: 1
+    reason: Initial path
+```
+
+Statuses are `pending`, `in_progress`, `blocked`, and `completed`. Completed items must form a
+continuous prefix of `path`; there may be at most one `in_progress` or `blocked` item, and it must
+be the first unfinished item.
+
+The plan is intentionally editable. The user or agent may revise later path items, reopen an
+earlier item, append or remove items, or change the overall `goal`. Increment `revision` and record
+the reason in `amendments` when the intended path changes. After each item, update its status and
+evidence. Always follow the latest valid file; do not preserve an obsolete path from memory.
+
+Workflow:
 
 1. Create it once:
 
    ```bash
-   ltc goal start --id <goal-id> --session <session-id> --cwd "$PWD" --task "..."
+   ltc goal start --id <goal-id> --session <session-id> --cwd "$PWD" \
+     --task "..." --plan-file path/to/goal-plan.yaml
    ```
 
 2. Bind each `run` or `done` callback with `--goal-id <goal-id>`.
-3. If the whole goal is complete:
+3. Before saying or implying that the whole goal is complete, check the latest plan:
 
    ```bash
-   ltc goal ack --id <goal-id> --state completed
+   ltc goal check --id <goal-id>
    ```
 
-4. If progress requires a specific missing condition:
+   Inspect the actual work and artifacts against every path item. This command reports the
+   current item, remaining path, and the current plan SHA-256.
+4. Only if every item, including the final item, is confirmed `completed`:
+
+   ```bash
+   ltc goal ack --id <goal-id> --state completed --plan-sha256 <checked-sha256>
+   ```
+
+5. If progress requires a specific missing condition:
 
    ```bash
    ltc goal ack --id <goal-id> --state blocked_conditions \
      --condition "specific prerequisite"
    ```
 
-5. When that condition is met:
+6. When that condition is met:
 
    ```bash
    ltc goal resume --id <goal-id>
    ```
 
-Completion is terminal. A callback ACK does not count as goal completion.
+The completion gate rejects an unchecked plan, a stale digest, an invalid/nonsequential path, or
+any unfinished item. Editing the YAML invalidates an earlier check, so the agent must reread the
+new overall goal and path. Completion is terminal. A callback ACK does not count as goal
+completion.
+
+For an active goal created before YAML plans were required, or to move a plan file, attach the
+latest plan and then check it again:
+
+```bash
+ltc goal set-plan --id <goal-id> --plan-file path/to/goal-plan.yaml
+ltc goal check --id <goal-id>
+```
+
+### Plan file lifecycle and user agreement
+
+- Use one plan file for one independent goal. Prefer a stable project-local path such as
+  `.ltc/goals/<goal-id>.yaml`. Never recycle a completed goal's file for another goal.
+- Before `goal start`, derive the overall goal, acceptance conditions, and ordered path from the
+  user's request, then create the YAML. For a clear, conventional, low-risk path, create it and
+  tell the user its location and main items without waiting for another approval. If the path
+  requires a strategic choice, materially different resource use, changed acceptance criteria,
+  or another consequential tradeoff, agree on those points with the user before starting.
+- Keep using the same file when the goal is blocked, resumed, or revised. The user may edit it at
+  any time; their latest valid revision overrides the agent's remembered path. A follow-on
+  objective after terminal completion is a new goal with a new file.
+- After completion, preserve the YAML at its recorded path as the audit record. Do not delete it
+  automatically. If the user wants it under an archive directory, move it while the goal is still
+  active, run `goal set-plan` with the archive path, and then perform the final `goal check` and
+  completion ACK.
 
 After three hours without a newly queued ordinary callback, the daemon automatically restores the
 same conversation and asks it to continue, ACK completion, or state the exact blocking condition.

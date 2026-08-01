@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import yaml
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - the durable run lifecycle is POSIX-only
@@ -47,6 +49,7 @@ CLAUDE_BIN_ENV = "LONG_TASK_WAKEUP_CLAUDE_BIN"
 CLAUDE_PERMISSION_MODE_ENV = "LONG_TASK_WAKEUP_CLAUDE_PERMISSION_MODE"
 DEFAULT_CLAUDE_PERMISSION_MODE = "auto"
 AGENT_NAMES = ("codex", "claude")
+GOAL_PATH_STATUSES = ("pending", "in_progress", "blocked", "completed")
 AGENT_DISPLAY_NAMES = {"codex": "Codex", "claude": "Claude Code"}
 AGENT_THREAD_ID_ENVS = {"codex": CODEX_THREAD_ID_ENV, "claude": CLAUDE_THREAD_ID_ENV}
 SHELL_HOOK_BEGIN = "# >>> codex-long-task-wakeup pending status >>>"
@@ -599,6 +602,111 @@ def write_goal(root: Path, goal: dict[str, object]) -> None:
     if not isinstance(goal_id, str):
         raise ValueError("goal requires an id")
     write_request(goal_path(root, goal_id), goal)
+
+
+def read_goal_plan_file(path: Path) -> tuple[dict[str, object], str, str]:
+    try:
+        if not path.is_file():
+            raise ValueError(f"goal plan is not a regular file: {path}")
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"goal plan must be UTF-8 YAML: {path}") from exc
+    except OSError as exc:
+        raise ValueError(f"cannot read goal plan {path}: {exc}") from exc
+    if not content.strip():
+        raise ValueError(f"goal plan must not be empty: {path}")
+    try:
+        data = yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"invalid goal plan YAML {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("goal plan must be a YAML mapping")
+    if data.get("version") != 1:
+        raise ValueError("goal plan version must be 1")
+    revision = data.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        raise ValueError("goal plan requires a positive integer 'revision'")
+    if not isinstance(data.get("goal"), str) or not str(data["goal"]).strip():
+        raise ValueError("goal plan requires a non-empty 'goal' string")
+    amendments = data.get("amendments", [])
+    if not isinstance(amendments, list) or not all(isinstance(item, dict) for item in amendments):
+        raise ValueError("goal plan 'amendments' must be a list of mappings when present")
+    steps = data.get("path")
+    if not isinstance(steps, list) or not steps:
+        raise ValueError("goal plan requires a non-empty ordered 'path' list")
+
+    seen_ids: set[str] = set()
+    first_unfinished: int | None = None
+    active_indices: list[int] = []
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            raise ValueError(f"goal path item {index + 1} must be a mapping")
+        step_id = step.get("id")
+        if not isinstance(step_id, str) or not step_id.strip():
+            raise ValueError(f"goal path item {index + 1} requires a non-empty 'id'")
+        if step_id in seen_ids:
+            raise ValueError(f"duplicate goal path id: {step_id}")
+        seen_ids.add(step_id)
+        title = step.get("title")
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError(f"goal path item {step_id} requires a non-empty 'title'")
+        status = step.get("status")
+        if status not in GOAL_PATH_STATUSES:
+            raise ValueError(
+                f"goal path item {step_id} has invalid status; expected one of: "
+                f"{', '.join(GOAL_PATH_STATUSES)}"
+            )
+        if status != "completed" and first_unfinished is None:
+            first_unfinished = index
+        if first_unfinished is not None and index > first_unfinished and status == "completed":
+            raise ValueError(
+                f"goal path item {step_id} is completed after an unfinished item; "
+                "completed items must form a continuous prefix"
+            )
+        if status in ("in_progress", "blocked"):
+            active_indices.append(index)
+    if len(active_indices) > 1:
+        raise ValueError("goal path may contain at most one in_progress or blocked item")
+    if active_indices and active_indices[0] != first_unfinished:
+        raise ValueError("the in_progress or blocked item must be the first unfinished path item")
+
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return data, content, digest
+
+
+def resolve_goal_plan_file(cwd: str, value: str | None) -> tuple[Path, dict[str, object], str]:
+    if not value or not value.strip():
+        raise ValueError("--plan-file is required")
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path(cwd) / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"cannot resolve goal plan {candidate}: {exc}") from exc
+    plan, _, digest = read_goal_plan_file(resolved)
+    return resolved, plan, digest
+
+
+def goal_plan_snapshot(goal: dict[str, object]) -> tuple[Path, dict[str, object], str, str]:
+    value = goal.get("plan_file")
+    if not isinstance(value, str) or not value:
+        raise ValueError(
+            "goal has no YAML plan; create a new goal with --plan-file before completing it"
+        )
+    path = Path(value)
+    plan, content, digest = read_goal_plan_file(path)
+    return path, plan, content, digest
+
+
+def goal_plan_progress(plan: dict[str, object]) -> tuple[int, int, dict[str, object] | None, list[dict[str, object]]]:
+    steps = plan["path"]
+    assert isinstance(steps, list)
+    typed_steps = [step for step in steps if isinstance(step, dict)]
+    completed = sum(step.get("status") == "completed" for step in typed_steps)
+    remaining = [step for step in typed_steps if step.get("status") != "completed"]
+    current = remaining[0] if remaining else None
+    return completed, len(typed_steps), current, remaining
 
 
 def goal_lock_id(goal_id: str) -> str:
@@ -2219,9 +2327,43 @@ def process_goal_reminders(root: Path) -> bool:
                 shlex.quote(part)
                 for part in [console_script_path(), "goal", "ack", "--queue-dir", str(root), "--id", goal_id]
             )
-            prompt = (f"[goal-inactivity-reminder]\nGoal: {goal.get('task', goal_id)}\n"
+            goal_check_command = " ".join(
+                shlex.quote(part)
+                for part in [console_script_path(), "goal", "check", "--queue-dir", str(root), "--id", goal_id]
+            )
+            try:
+                plan_path, plan, _, _ = goal_plan_snapshot(goal)
+                completed, total, current, remaining = goal_plan_progress(plan)
+                current_text = (
+                    "none; final path item completed"
+                    if current is None
+                    else f"{current['id']} [{current['status']}] - {current['title']}"
+                )
+                remaining_text = (
+                    "none"
+                    if not remaining
+                    else "; ".join(
+                        f"{step['id']} [{step['status']}] - {step['title']}" for step in remaining
+                    )
+                )
+                plan_text = (
+                    f"Current YAML goal: {plan['goal']}\nPlan revision: {plan['revision']}\n"
+                    f"YAML goal plan: {plan_path}\nProgress: {completed}/{total}\n"
+                    f"Current item: {current_text}\nRemaining path: {remaining_text}\n"
+                )
+            except ValueError as exc:
+                plan_text = (
+                    f"YAML goal plan: {goal.get('plan_file', '(missing)')}\n"
+                    f"Plan needs repair before progress can continue: {exc}\n"
+                )
+            prompt = (f"[goal-inactivity-reminder]\nGoal record: {goal.get('task', goal_id)}\n"
+                      f"{plan_text}"
                       f"No new callback has been queued for {idle_seconds / 3600:.0f} hour(s). "
-                      f"If complete, run: {goal_ack_command} --state completed. If conditions are not ready, run: "
+                      f"Run {goal_check_command} to inspect the ordered goal path, current item, and remaining items. "
+                      "Update that YAML after each path item. Compare the actual work and artifacts with the plan. "
+                      f"Only after the final path item is confirmed completed, run: {goal_ack_command} "
+                      "--state completed --plan-sha256 <sha256 printed by goal check>. "
+                      "If conditions are not ready, run: "
                       f"{goal_ack_command} --state blocked_conditions --condition \"specific missing prerequisite\". "
                       "Otherwise continue the goal and schedule the next callback.")
             if enqueue_existing_request(root, request, prompt) != 0:
@@ -3479,6 +3621,13 @@ def goal_start(args: argparse.Namespace) -> int:
     if args.idle_seconds <= 0:
         print("ltc: error: --idle-seconds must be positive", file=sys.stderr)
         return 2
+    try:
+        plan_path, plan, plan_digest = resolve_goal_plan_file(
+            args.cwd, getattr(args, "plan_file", None)
+        )
+    except ValueError as exc:
+        print(f"ltc: error: {exc}", file=sys.stderr)
+        return 2
     lock = acquire_owner_lock(root, goal_lock_id(goal_id), blocking=True)
     try:
         if path.exists():
@@ -3487,10 +3636,114 @@ def goal_start(args: argparse.Namespace) -> int:
         now = time.time()
         write_goal(root, {"version": 1, "id": goal_id, "task": args.task, "cwd": args.cwd, "target": target,
                           "target_source": source, "agent": resolve_agent(args), "state": "active", "created_at": now,
-                          "last_external_callback_at": now, "idle_seconds": args.idle_seconds})
+                          "last_external_callback_at": now, "idle_seconds": args.idle_seconds,
+                          "plan_file": str(plan_path), "plan_goal": plan["goal"],
+                          "plan_sha256_at_start": plan_digest})
     finally:
         release_owner_lock(lock, remove=False)
     print(goal_id)
+    return 0
+
+
+def goal_check(args: argparse.Namespace) -> int:
+    root = queue_dir(args)
+    try:
+        goal_path(root, args.id)
+    except ValueError as exc:
+        print(f"ltc: error: {exc}", file=sys.stderr)
+        return 2
+    lock = acquire_owner_lock(root, goal_lock_id(args.id), blocking=True)
+    try:
+        try:
+            goal = load_goal(root, args.id)
+            plan_path, plan, content, digest = goal_plan_snapshot(goal)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"ltc: error: {exc}", file=sys.stderr)
+            return 1
+        if goal.get("state") == "completed":
+            print(f"ltc: error: completed goal {args.id} is terminal", file=sys.stderr)
+            return 1
+        completed, total, current, remaining = goal_plan_progress(plan)
+        now = time.time()
+        goal["last_plan_checked_at"] = now
+        goal["last_plan_check_sha256"] = digest
+        goal["plan_goal"] = plan["goal"]
+        goal["plan_revision"] = plan["revision"]
+        goal["plan_completed_items"] = completed
+        goal["plan_total_items"] = total
+        write_goal(root, goal)
+    finally:
+        release_owner_lock(lock, remove=False)
+
+    print(f"Goal: {plan['goal']}")
+    print(f"Plan revision: {plan['revision']}")
+    print(f"Plan file: {plan_path}")
+    print(f"Progress: {completed}/{total} path items completed")
+    if current is None:
+        print("Current item: none; the final path item is completed")
+    else:
+        print(
+            f"Current item: {current['id']} [{current['status']}] - {current['title']}"
+        )
+        print("Remaining path:")
+        for step in remaining:
+            print(f"- {step['id']} [{step['status']}] - {step['title']}")
+    print(f"Plan SHA-256: {digest}")
+    print("\n--- YAML goal plan begin ---")
+    print(content, end="" if content.endswith("\n") else "\n")
+    print("--- YAML goal plan end ---")
+    print(
+        "Compare actual work and artifacts with every path item above. Do not report the goal "
+        "complete unless the final item and every preceding item are confirmed completed."
+    )
+    return 0
+
+
+def goal_set_plan(args: argparse.Namespace) -> int:
+    root = queue_dir(args)
+    try:
+        goal_path(root, args.id)
+    except ValueError as exc:
+        print(f"ltc: error: {exc}", file=sys.stderr)
+        return 2
+    lock = acquire_owner_lock(root, goal_lock_id(args.id), blocking=True)
+    try:
+        try:
+            goal = load_goal(root, args.id)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"ltc: error: {exc}", file=sys.stderr)
+            return 1
+        if goal.get("state") == "completed":
+            print(f"ltc: error: completed goal {args.id} is terminal", file=sys.stderr)
+            return 1
+        try:
+            plan_path, plan, plan_digest = resolve_goal_plan_file(
+                str(goal.get("cwd", os.getcwd())), args.plan_file
+            )
+        except ValueError as exc:
+            print(f"ltc: error: {exc}", file=sys.stderr)
+            return 2
+        goal.update(
+            {
+                "plan_file": str(plan_path),
+                "plan_goal": plan["goal"],
+                "plan_revision": plan["revision"],
+                "plan_sha256_when_attached": plan_digest,
+                "plan_attached_at": time.time(),
+            }
+        )
+        for field in (
+            "last_plan_checked_at",
+            "last_plan_check_sha256",
+            "plan_completed_items",
+            "plan_total_items",
+        ):
+            goal.pop(field, None)
+        write_goal(root, goal)
+    finally:
+        release_owner_lock(lock, remove=False)
+    print(f"ltc: goal {args.id} now follows YAML plan {plan_path}")
+    print("ltc: run goal check before acknowledging completion")
     return 0
 
 
@@ -3525,6 +3778,36 @@ def goal_ack(args: argparse.Namespace) -> int:
         if goal.get("state") == "completed" and args.state != "completed":
             print(f"ltc: error: completed goal {args.id} is terminal", file=sys.stderr)
             return 1
+        if args.state == "completed":
+            try:
+                plan_path, plan, _, plan_digest = goal_plan_snapshot(goal)
+            except ValueError as exc:
+                print(f"ltc: error: {exc}", file=sys.stderr)
+                return 1
+            supplied_digest = getattr(args, "plan_sha256", None)
+            if not supplied_digest:
+                print(
+                    f"ltc: error: run 'ltc goal check --id {args.id}' and pass its digest "
+                    "with --plan-sha256 before completing the goal",
+                    file=sys.stderr,
+                )
+                return 2
+            checked_digest = goal.get("last_plan_check_sha256")
+            if supplied_digest != plan_digest or checked_digest != plan_digest:
+                print(
+                    f"ltc: error: YAML goal plan changed or was not checked: {plan_path}; "
+                    f"rerun 'ltc goal check --id {args.id}' and compare the work again",
+                    file=sys.stderr,
+                )
+                return 1
+            completed_items, total_items, current, _ = goal_plan_progress(plan)
+            if current is not None:
+                print(
+                    f"ltc: error: goal path is only {completed_items}/{total_items} complete; "
+                    f"current item is {current['id']} [{current['status']}] - {current['title']}",
+                    file=sys.stderr,
+                )
+                return 1
         now = time.time()
         goal["state"] = args.state
         goal["state_changed_at"] = now
@@ -3538,6 +3821,9 @@ def goal_ack(args: argparse.Namespace) -> int:
         else:
             goal.pop("condition", None)
             clear_blocked_goal_email(goal)
+            goal["completion_plan_sha256"] = plan_digest
+            goal["completion_plan_revision"] = plan["revision"]
+            goal["completion_plan_checked_at"] = goal["last_plan_checked_at"]
         write_goal(root, goal)
     finally:
         release_owner_lock(lock, remove=False)
@@ -3847,11 +4133,29 @@ def main() -> int:
     )
     goal_start_parser.add_argument("--cwd", default=os.getcwd())
     goal_start_parser.add_argument("--task", required=True)
+    goal_start_parser.add_argument(
+        "--plan-file",
+        required=True,
+        help="Mutable UTF-8 YAML goal path that governs progress and completion",
+    )
     goal_start_parser.add_argument("--idle-seconds", type=float, default=DEFAULT_GOAL_IDLE_SECONDS)
+    goal_check_parser = goal_sub.add_parser("check", help="Inspect and record the current YAML goal path")
+    goal_check_parser.add_argument("--queue-dir", help="Queue root that owns the goal")
+    goal_check_parser.add_argument("--id", required=True)
+    goal_set_plan_parser = goal_sub.add_parser(
+        "set-plan", help="Attach or replace the mutable YAML plan for an existing goal"
+    )
+    goal_set_plan_parser.add_argument("--queue-dir", help="Queue root that owns the goal")
+    goal_set_plan_parser.add_argument("--id", required=True)
+    goal_set_plan_parser.add_argument("--plan-file", required=True)
     goal_ack_parser = goal_sub.add_parser("ack", help="Acknowledge completion or blocked conditions")
     goal_ack_parser.add_argument("--queue-dir", help="Queue root that owns the goal")
     goal_ack_parser.add_argument("--id", required=True)
     goal_ack_parser.add_argument("--state", choices=["completed", "blocked_conditions"], required=True)
+    goal_ack_parser.add_argument(
+        "--plan-sha256",
+        help="Digest printed by the latest goal check; required for completed",
+    )
     goal_ack_parser.add_argument("--message")
     goal_ack_parser.add_argument("--condition")
     goal_ack_parser.add_argument("--email-to")
@@ -3905,6 +4209,10 @@ def main() -> int:
     if args.mode == "goal":
         if args.goal_mode == "start":
             return goal_start(args)
+        if args.goal_mode == "check":
+            return goal_check(args)
+        if args.goal_mode == "set-plan":
+            return goal_set_plan(args)
         if args.goal_mode == "ack":
             return goal_ack(args)
         return goal_resume(args)

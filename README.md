@@ -168,12 +168,56 @@ daemon, so ACK does not require broader filesystem permissions.
 Goal ACK answers a different question: whether the whole multi-stage objective is finished or
 cannot proceed:
 
+```yaml
+# goal-plan.yaml
+version: 1
+revision: 1
+goal: Finish and publish the report
+path:
+  - id: draft
+    title: Complete the draft
+    status: completed
+  - id: verify
+    title: Verify figures and references
+    status: in_progress
+  - id: publish
+    title: Publish the final report
+    status: pending
+amendments:
+  - revision: 1
+    reason: Initial path
+```
+
 ```bash
-ltc goal start --id report-goal --session <session-id> --cwd "$PWD" --task "finish the report"
-ltc goal ack --id report-goal --state completed
+ltc goal start --id report-goal --session <session-id> --cwd "$PWD" \
+  --task "finish the report" --plan-file goal-plan.yaml
+ltc goal check --id report-goal
+ltc goal ack --id report-goal --state completed --plan-sha256 <checked-sha256>
 ltc goal ack --id report-goal --state blocked_conditions --condition "awaiting dataset access"
 ltc goal resume --id report-goal
 ```
+
+The YAML file is the mutable source of truth. Its ordered `path` uses `pending`, `in_progress`,
+`blocked`, and `completed`; completed items must be a continuous prefix. It tells the resumed
+agent exactly which item is current and what remains. Users may revise later items, reopen work,
+append steps, or change the top-level goal, preferably incrementing `revision` and recording the
+reason in `amendments`.
+
+Before reporting completion, the agent must run `goal check` and compare actual work and artifacts
+with the latest file. `goal ack --state completed` is rejected unless the supplied digest matches
+that check and every path item, including the final one, is `completed`. Any YAML edit invalidates
+the previous digest and forces a fresh check, so a remembered obsolete plan cannot finish a goal.
+Existing active goals created before 0.6.2 can be migrated with
+`ltc goal set-plan --id <goal-id> --plan-file goal-plan.yaml`; attaching or replacing a plan also
+clears the previous check.
+
+Use one file per independent goal, preferably `.ltc/goals/<goal-id>.yaml`. A clear, low-risk path
+may be drafted by the agent and announced without a blocking approval; strategic choices,
+material resource changes, or changed acceptance criteria should be agreed with the user first.
+Blocked, resumed, and revised work keeps the same file. A follow-on goal gets a new file. Completed
+plans remain at their recorded paths as audit records and are never automatically deleted or
+reused. If archival relocation is desired, move and reattach the file with `goal set-plan` before
+the final check and completion ACK.
 
 Callback ACK never completes the goal. While an active goal has no newly queued ordinary callback,
 the daemon automatically asks the same conversation for its status every three hours by default.
@@ -276,6 +320,53 @@ tail -f ~/.codex/long-task-wakeup/tasks/<task-id>/attempt-1.log
 
 1. `ltc ack` 表示本次 callback 已收到并检查；
 2. `ltc goal ack --state completed|blocked_conditions` 表示整个阶段目标完成或满足阻塞条件。
+
+从 0.6.2 开始，goal 必须绑定一个可修改的 YAML 目标计划文件：
+
+```yaml
+version: 1
+revision: 1
+goal: 完成并发布 0.6.2
+path:
+  - id: implement
+    title: 实现功能
+    status: completed
+  - id: verify
+    title: 验证功能和回归测试
+    status: in_progress
+  - id: publish
+    title: 发布版本
+    status: pending
+amendments:
+  - revision: 1
+    reason: 初始执行路径
+```
+
+`path` 是有顺序的小目标路径，状态可为 `pending`、`in_progress`、`blocked` 或
+`completed`；已完成项必须构成连续前缀。用户可以修改后续小目标、重新打开前面的步骤、增加或
+删除步骤，也可以修改顶层大目标。建议同时递增 `revision`，并在 `amendments` 记录修改原因。
+后续提醒与检查始终读取文件的最新版本，而不是沿用 AI 记忆中的旧目标。
+
+```bash
+ltc goal start --id release-goal --session <session-id> --cwd "$PWD" \
+  --task "发布 0.6.2" --plan-file goal-plan.yaml
+ltc goal check --id release-goal
+ltc goal ack --id release-goal --state completed --plan-sha256 <本次检查输出的摘要>
+```
+
+AI 在回复“目标已完成”之前必须执行 `goal check`，并把实际工作和产物逐项对照最新 YAML。
+只有最后一个项目以及之前所有项目均确认 `completed`，且完成命令携带本次检查的文件摘要时，
+CLI 才接受 goal 完成。文件一旦修改，旧摘要立即失效，必须重新检查新路径。
+0.6.1 已存在的活跃 goal 可用
+`ltc goal set-plan --id <goal-id> --plan-file goal-plan.yaml` 绑定或更换计划文件；绑定后旧检查
+记录会被清除。
+
+每个独立 goal 使用一个独立文件，推荐路径为 `.ltc/goals/<goal-id>.yaml`。目标和路线清晰、
+风险低时，AI 可以直接起草文件，告知用户文件位置和主要步骤后继续，不必额外停下来等待确认；
+如果涉及路线选择、明显的资源变化、验收标准变化或其他重要取舍，应先和用户协商。阻塞、恢复和
+修订继续使用同一文件，终态完成后衍生出的任务则创建新 goal 和新文件。完成文件默认留在原路径
+作为审计记录，不自动删除或复用；如需移入归档目录，应在 goal 仍活跃时移动文件，使用
+`goal set-plan` 更新路径，再执行最后一次检查和完成 ACK。
 
 callback ACK 不会顺带完成 goal。活跃 goal 默认三小时没有新 callback 时，daemon 会自动恢复
 原会话问询阶段状态；重启恢复后也遵守同一规则。
