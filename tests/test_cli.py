@@ -1392,6 +1392,7 @@ class CliTests(unittest.TestCase):
         with (
             mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"),
             mock.patch.object(cli, "install_skill", return_value=0) as install_skill,
+            mock.patch.object(cli, "ensure_callback_hook_file") as ensure_callback_hook_file,
             mock.patch.object(cli, "install_systemd", return_value=0) as install_systemd,
         ):
             self.assertEqual(cli.setup(args), 0)
@@ -1399,12 +1400,40 @@ class CliTests(unittest.TestCase):
         skill_args = install_skill.call_args.args[0]
         self.assertEqual(skill_args.path, "/tmp/skills")
         self.assertTrue(skill_args.force)
+        ensure_callback_hook_file.assert_called_once_with()
 
         systemd_args = install_systemd.call_args.args[0]
         self.assertEqual(systemd_args.queue_dir, "/tmp/queue")
         self.assertEqual(systemd_args.path, "/bin")
         self.assertTrue(systemd_args.enable)
         self.assertTrue(systemd_args.now)
+
+    def test_callback_hook_file_is_created_once_and_preserves_user_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex-home"
+            with mock.patch.object(cli, "codex_home", return_value=home):
+                path = cli.ensure_callback_hook_file()
+                self.assertEqual(path, home / "long-task-wakeup" / "callback-hook.md")
+                self.assertEqual(path.read_text(encoding="utf-8"), "")
+
+                path.write_text("Always summarize the final metrics.\n", encoding="utf-8")
+                self.assertEqual(cli.ensure_callback_hook_file(), path)
+                self.assertEqual(path.read_text(encoding="utf-8"), "Always summarize the final metrics.\n")
+
+    def test_callback_hook_is_reloaded_for_each_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "callback-hook.md"
+            path.write_text("First instruction.\n", encoding="utf-8")
+            first = cli.attach_callback_hook("wake up", path)
+            self.assertEqual(first, "wake up\n\n[long-task-callback-user-hook]\nFirst instruction.")
+
+            path.write_text("Second instruction.\n", encoding="utf-8")
+            second = cli.attach_callback_hook("wake up", path)
+            self.assertNotIn("First instruction.", second)
+            self.assertIn("Second instruction.", second)
+
+            path.write_text("\n", encoding="utf-8")
+            self.assertEqual(cli.attach_callback_hook("wake up", path), "wake up")
 
     def test_setup_refuses_before_installing_when_screen_is_missing(self) -> None:
         args = argparse.Namespace()
@@ -2458,9 +2487,12 @@ class CliTests(unittest.TestCase):
 
     def test_desktop_delivery_worker_uses_cli_after_explicit_rejection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            hook = Path(tmp) / "callback-hook.md"
+            hook.write_text("Use the custom callback policy.\n", encoding="utf-8")
             payload = {
                 "command": ["codex", "exec", "resume"],
                 "prompt": "wake up",
+                "callback_hook_path": str(hook),
                 "cwd": tmp,
                 "request": {},
                 "timeout": 1.0,
@@ -2485,6 +2517,13 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(json.loads(output.getvalue())["returncode"], 0)
             popen.assert_called_once()
+            process.communicate.assert_called_once_with(
+                input=(
+                    "wake up\n\n[long-task-callback-user-hook]\n"
+                    "Use the custom callback policy."
+                ),
+                timeout=1.0,
+            )
 
     def test_desktop_delivery_worker_suppresses_cli_on_unknown_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

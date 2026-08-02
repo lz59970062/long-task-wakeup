@@ -74,7 +74,11 @@ ltc setup --force --enable --now
 ```
 
 `setup` installs this skill for Codex and Claude Code and installs the callback daemon. It refuses
-to proceed when screen cannot be found.
+to proceed when screen cannot be found. It creates the user-editable fixed prompt hook at
+`${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-hook.md` without overwriting existing content.
+The daemon reloads that UTF-8 file before every callback delivery attempt, so changes apply without
+a restart. Non-empty content is appended under `[long-task-callback-user-hook]`; hook read failures
+must warn and continue with the original callback prompt.
 
 ## Run: submit new work
 

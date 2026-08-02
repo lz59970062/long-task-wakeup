@@ -67,7 +67,12 @@ ltc setup --force --enable --now
 ```
 
 `setup` installs the bundled skill for Codex and Claude Code and installs the callback daemon as a
-user service. It refuses to continue when GNU screen is unavailable.
+user service. It also creates an empty, user-editable callback prompt hook at
+`${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-hook.md`. Existing hook content is never
+overwritten, including by `setup --force`. The file is read again immediately before every
+delivery attempt, so edits apply to the next callback without restarting the daemon. Non-empty
+content is appended to the callback prompt under `[long-task-callback-user-hook]`; a missing,
+empty, or temporarily unreadable file does not block callback delivery.
 
 Verify:
 
@@ -293,6 +298,13 @@ GNU screen 会话
 daemon 不是训练任务的父进程。它重启时，screen 中的任务继续运行；daemon 回来后识别已有
 screen，不会重复启动。screen 是必需依赖，缺失时 `setup` 和 `run` 都会拒绝，
 不会退回到不稳定的 agent 回合进程。
+
+`ltc setup` 会创建用户可编辑的固定提示词钩子
+`${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-hook.md`。该文件已有内容时不会被覆盖，
+即使使用 `setup --force` 也是如此。每次实际投递（包括重试）前都会重新读取文件，因此修改后
+无需重启 daemon，下一次 callback 就会生效。非空内容会以
+`[long-task-callback-user-hook]` 段落追加到 callback 提示词；文件缺失、为空或暂时不可读时，
+原 callback 仍会正常投递。
 
 使用原则：只有可靠地在 60 秒内结束的命令才允许前台等待一次。预计约一分钟以上、耗时不确定，
 或可能需要第二次状态检查时，从一开始就使用 `ltc run`。几分钟任务也默认走 callback，

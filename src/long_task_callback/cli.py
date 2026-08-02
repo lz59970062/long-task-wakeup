@@ -60,6 +60,8 @@ SCREEN_BIN_ENV = "LONG_TASK_WAKEUP_SCREEN_BIN"
 TASKS_DIR_NAME = "tasks"
 TARGET_LOCK_DIR_ENV = "CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR"
 PROXY_ENV_FILE_ENV = "CODEX_LONG_TASK_WAKEUP_PROXY_ENV_FILE"
+CALLBACK_HOOK_FILE_NAME = "callback-hook.md"
+CALLBACK_HOOK_SECTION = "[long-task-callback-user-hook]"
 DESKTOP_APP_SERVER_ENV = "CODEX_LONG_TASK_WAKEUP_DESKTOP_APP_SERVER"
 APP_SERVER_SOCKET_ENV = "CODEX_LONG_TASK_WAKEUP_APP_SERVER_SOCKET"
 ALLOW_APP_SERVER_SOCKET_OVERRIDE_ENV = "CODEX_LONG_TASK_WAKEUP_ALLOW_APP_SERVER_SOCKET_OVERRIDE"
@@ -1497,6 +1499,10 @@ def delivery_worker_main() -> int:
     payload = json.load(sys.stdin)
     command = payload["command"]
     prompt = str(payload["prompt"])
+    hook_path = payload.get("callback_hook_path")
+    if isinstance(hook_path, str) and hook_path:
+        prompt = attach_callback_hook(prompt, Path(hook_path))
+        payload["prompt"] = prompt
     timeout = max(1.0, float(payload["timeout"]))
     result: dict[str, object] = {"returncode": 127}
     process: subprocess.Popen[str] | None = None
@@ -1680,6 +1686,7 @@ def run_resume_until_exit_or_ack(
     payload = {
         "command": command,
         "prompt": str(request["prompt"]),
+        "callback_hook_path": str(callback_hook_path()),
         "cwd": str(request["cwd"]),
         "request": request,
         "queue_dir": str(root),
@@ -3123,6 +3130,35 @@ def daemon_state_dir() -> Path:
     return codex_home() / "long-task-wakeup"
 
 
+def callback_hook_path() -> Path:
+    return daemon_state_dir() / CALLBACK_HOOK_FILE_NAME
+
+
+def ensure_callback_hook_file() -> Path:
+    path = callback_hook_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.open("x", encoding="utf-8").close()
+    except FileExistsError:
+        pass
+    print(f"Callback prompt hook: {path}")
+    return path
+
+
+def attach_callback_hook(prompt: str, path: Path | None = None) -> str:
+    source = path or callback_hook_path()
+    try:
+        hook = source.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return prompt
+    except (OSError, UnicodeError) as exc:
+        print(f"ltc: warning: could not load callback prompt hook {source}: {exc}", file=sys.stderr)
+        return prompt
+    if not hook.strip():
+        return prompt
+    return f"{prompt.rstrip()}\n\n{CALLBACK_HOOK_SECTION}\n{hook.rstrip()}"
+
+
 def service_proxy_env_path() -> Path:
     return daemon_state_dir() / "service-proxy.env"
 
@@ -3549,6 +3585,7 @@ def setup(args: argparse.Namespace) -> int:
     skill_status = install_skill(skill_args)
     if skill_status != 0:
         return skill_status
+    ensure_callback_hook_file()
 
     systemd_args = argparse.Namespace(
         name=args.name,
