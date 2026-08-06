@@ -149,6 +149,32 @@ class CliTests(unittest.TestCase):
             self.assertEqual(cli.main(), 0)
         self.assertTrue(parsed_run.call_args.args[0].via_daemon)
 
+    def test_screen_worker_parser_accepts_dash_prefixed_token(self) -> None:
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["ltc", "_screen-worker", "--task-file", "/tmp/task.json", "--token=-abc"],
+            ),
+            mock.patch.object(cli, "run_screen_worker", return_value=0) as worker,
+        ):
+            self.assertEqual(cli.main(), 0)
+
+        self.assertEqual(worker.call_args.args[0].token, "-abc")
+
+    def test_submitted_worker_token_has_safe_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            args = self._run_args(tmp, root, [sys.executable, "-c", "pass"])
+            with (
+                mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"),
+                mock.patch.object(cli.secrets, "token_urlsafe", return_value="-abc"),
+            ):
+                self.assertEqual(cli.run(args), 0)
+
+            task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
+            self.assertEqual(cli.load_managed_task(task_path)["token"], "ltc_-abc")
+
     def test_daemon_launches_submitted_task_through_screen(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "queue"
@@ -156,6 +182,9 @@ class CliTests(unittest.TestCase):
             with mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"):
                 self.assertEqual(cli.run(args), 0)
             task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
+            task = cli.load_managed_task(task_path)
+            task["token"] = "-abc"
+            cli.write_managed_task(root, task)
 
             completed = subprocess.CompletedProcess(["screen"], 0)
             with (
@@ -170,8 +199,108 @@ class CliTests(unittest.TestCase):
             self.assertEqual(command[:3], ["/usr/bin/screen", "-dmS", f"ltc-{task_path.parent.name}"])
             self.assertIn("-Logfile", command)
             self.assertIn("_screen-worker", command)
+            self.assertIn("--token=-abc", command)
+            self.assertNotIn("--token", command)
             task = cli.load_managed_task(task_path)
             self.assertEqual(task["state"], "launching")
+            self.assertEqual(task["launch_attempt_count"], 1)
+
+    def test_launching_task_waits_for_worker_handshake_before_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            args = self._run_args(tmp, root, [sys.executable, "-c", "pass"])
+            with mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"):
+                self.assertEqual(cli.run(args), 0)
+            task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
+
+            completed = subprocess.CompletedProcess(["screen"], 0)
+            with (
+                mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"),
+                mock.patch.object(cli, "screen_session_exists", return_value=False),
+                mock.patch.object(cli.subprocess, "run", return_value=completed) as launch,
+                mock.patch.object(cli, "MANAGED_WORKER_HANDSHAKE_SECONDS", 60.0),
+            ):
+                self.assertEqual(cli.recover_managed_tasks(root), 1)
+                self.assertEqual(cli.recover_managed_tasks(root), 0)
+
+            self.assertEqual(launch.call_count, 1)
+            task = cli.load_managed_task(task_path)
+            self.assertEqual(task["state"], "launching")
+            self.assertEqual(task["launch_attempt_count"], 1)
+
+    def test_worker_handshake_failure_has_bounded_retries_and_one_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            args = self._run_args(tmp, root, [sys.executable, "-c", "pass"])
+            with mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"):
+                self.assertEqual(cli.run(args), 0)
+            task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
+
+            completed = subprocess.CompletedProcess(["screen"], 0)
+            with (
+                mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"),
+                mock.patch.object(cli, "screen_session_exists", return_value=False),
+                mock.patch.object(cli.subprocess, "run", return_value=completed) as launch,
+                mock.patch.object(cli, "MANAGED_WORKER_HANDSHAKE_SECONDS", 0.0),
+                mock.patch.object(cli, "MANAGED_LAUNCH_MAX_ATTEMPTS", 2),
+            ):
+                self.assertEqual(cli.recover_managed_tasks(root), 1)
+                self.assertEqual(cli.recover_managed_tasks(root), 1)
+
+                task = cli.load_managed_task(task_path)
+                self.assertEqual(task["state"], "submitted")
+                task["next_launch_at"] = 0.0
+                cli.write_managed_task(root, task)
+
+                self.assertEqual(cli.recover_managed_tasks(root), 1)
+                self.assertEqual(cli.recover_managed_tasks(root), 1)
+                self.assertEqual(cli.recover_managed_tasks(root), 0)
+
+            self.assertEqual(launch.call_count, 2)
+            task = cli.load_managed_task(task_path)
+            self.assertEqual(task["state"], "launch_failed")
+            self.assertEqual(task["launch_attempt_count"], 2)
+            self.assertIn("worker_start_handshake_failed_after_2_attempts", task["recovery_reason"])
+            self.assertNotIn("token", task)
+            self.assertFalse(Path(str(task["environment_path"])).exists())
+            callbacks = list((root / "pending").glob("*.json"))
+            self.assertEqual(len(callbacks), 1)
+            callback = cli.load_request(callbacks[0])
+            self.assertEqual(callback["managed_task_state"], "launch_failed")
+            self.assertIn("not automatically restarted", callback["prompt"])
+
+    def test_legacy_launching_task_is_not_automatically_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            args = self._run_args(tmp, root, [sys.executable, "-c", "pass"])
+            with mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"):
+                self.assertEqual(cli.run(args), 0)
+            task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
+            task = cli.load_managed_task(task_path)
+            task.update(
+                {
+                    "state": "launching",
+                    "token": "-legacy-token",
+                    "screen_submitted_at": 0.0,
+                }
+            )
+            task.pop("launch_attempt_count", None)
+            cli.write_managed_task(root, task)
+
+            with (
+                mock.patch.object(cli, "current_machine_id", return_value=str(task["machine_id"])),
+                mock.patch.object(cli, "screen_session_exists", return_value=False),
+                mock.patch.object(cli.subprocess, "run") as relaunch,
+            ):
+                self.assertEqual(cli.recover_managed_tasks(root), 1)
+                self.assertEqual(cli.recover_managed_tasks(root), 0)
+
+            relaunch.assert_not_called()
+            task = cli.load_managed_task(task_path)
+            self.assertEqual(task["state"], "launch_failed")
+            self.assertIn("legacy_attempt_count_unknown", task["recovery_reason"])
+            self.assertNotIn("token", task)
+            self.assertEqual(len(list((root / "pending").glob("*.json"))), 1)
 
     def test_screen_worker_records_result_and_queues_same_id_callback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -181,12 +310,19 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(cli.run(run_args), 0)
             task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
             task = cli.load_managed_task(task_path)
+            task["state"] = "launching"
+            cli.write_managed_task(root, task)
             worker = argparse.Namespace(task_file=str(task_path), token=task["token"])
 
-            completed = subprocess.CompletedProcess(run_args.wrapped_command, 7)
+            def complete(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                running = cli.load_managed_task(task_path)
+                self.assertEqual(running["state"], "running")
+                self.assertIn("worker_ready_at", running)
+                return subprocess.CompletedProcess(command, 7)
+
             with (
                 mock.patch.dict(os.environ, {"STY": "screen-session"}, clear=True),
-                mock.patch.object(cli.subprocess, "run", return_value=completed),
+                mock.patch.object(cli.subprocess, "run", side_effect=complete),
             ):
                 self.assertEqual(cli.run_screen_worker(worker), 7)
 
@@ -378,6 +514,8 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(cli.submit_managed_run(args), 0)
             task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
             task = cli.load_managed_task(task_path)
+            task["state"] = "launching"
+            cli.write_managed_task(root, task)
             worker = argparse.Namespace(task_file=str(task_path), token=task["token"])
 
             with (

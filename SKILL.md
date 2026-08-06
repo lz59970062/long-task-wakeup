@@ -156,6 +156,16 @@ If the recorded screen session is alive, do nothing. The screen-owned task conti
 be relaunched. If a durable result exists but its callback is missing, reconstruct the callback
 with the same task/callback id.
 
+### Worker startup handshake
+
+A launched screen worker must durably move its task from `launching` to `running`. Allow a
+one-second handshake window. If screen disappears first, record the failed launch and retry no
+more than three total attempts with exponential backoff. After the final failure, set
+`launch_failed`, remove the launch credentials, queue exactly one recovery callback, and never
+automatically relaunch that task. Generate worker tokens with an `ltc_` prefix and pass them only
+as a single `--token=value` argument. Treat a legacy `launching` record without an attempt counter
+as an unknown prior launch failure and never automatically retry it during upgrade.
+
 ### Same-host reboot
 
 Screen does not survive a host reboot. Never automatically rerun the command and do not add a

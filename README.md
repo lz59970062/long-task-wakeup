@@ -136,6 +136,17 @@ GNU screen keeps running. After the daemon returns, it discovers the live named 
 not launch a duplicate. If the task completed while the daemon was unavailable, its durable result
 is turned into the normal callback.
 
+### Worker startup handshake
+
+Each screen launch must complete a durable handshake by changing the task from `launching` to
+`running`. LTC allows a one-second startup window. If screen disappears before that transition,
+the daemon records the failed attempt and retries at most three times with exponential backoff.
+After the final attempt, the task becomes `launch_failed`, its one-time recovery callback is
+queued, and it is never launched again automatically. Worker tokens use an `ltc_` prefix and are
+passed as one `--token=value` argument so a token can never be parsed as another command-line
+option. A legacy `launching` record without an attempt counter is treated as an unknown prior
+launch failure and is never automatically retried during upgrade.
+
 ### Same-host reboot
 
 GNU screen cannot survive a host reboot. LTC therefore does **not** guess or automatically rerun
@@ -298,6 +309,12 @@ GNU screen 会话
 daemon 不是训练任务的父进程。它重启时，screen 中的任务继续运行；daemon 回来后识别已有
 screen，不会重复启动。screen 是必需依赖，缺失时 `setup` 和 `run` 都会拒绝，
 不会退回到不稳定的 agent 回合进程。
+
+screen worker 启动时必须把任务从 `launching` 持久化为 `running`，这一步就是启动握手。
+LTC 等待一秒；若 screen 在握手前消失，则记录失败并按指数退避重试，最多三次。最终失败后任务
+进入 `launch_failed`，只生成一次恢复 callback，且不再自动启动。worker token 固定添加
+`ltc_` 前缀，并以单个 `--token=value` 参数传递，避免以 `-` 开头的值被误解析为新选项。
+升级时，缺少尝试计数的旧版 `launching` 记录会被视为历史启动失败，不会自动重跑。
 
 `ltc setup` 会创建用户可编辑的固定提示词钩子
 `${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-hook.md`。该文件已有内容时不会被覆盖，

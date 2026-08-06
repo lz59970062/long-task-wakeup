@@ -38,6 +38,11 @@ DEFAULT_RETRIES = 3
 DEFAULT_RETRY_DELAY = 30.0
 DEFAULT_RETRY_BACKOFF = 2.0
 DEFAULT_RESUME_TIMEOUT = 3600.0
+MANAGED_WORKER_TOKEN_PREFIX = "ltc_"
+MANAGED_WORKER_HANDSHAKE_SECONDS = 1.0
+MANAGED_LAUNCH_MAX_ATTEMPTS = 3
+MANAGED_LAUNCH_RETRY_DELAY = 1.0
+MANAGED_LAUNCH_RETRY_BACKOFF = 2.0
 DEFAULT_GOAL_IDLE_SECONDS = 3 * 60 * 60
 DEFAULT_BLOCKED_EMAIL_SECONDS = 12 * 60 * 60
 DEFAULT_SUPERVISOR_CONF_DIR = "/etc/supervisor/conf.d"
@@ -2694,6 +2699,74 @@ def mark_managed_task_foreign_host(root: Path, task: dict[str, object]) -> None:
     )
 
 
+def managed_launch_attempt_count(task: dict[str, object]) -> int:
+    value = task.get("launch_attempt_count", 0)
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def managed_launch_retry_delay(attempt_count: int) -> float:
+    return MANAGED_LAUNCH_RETRY_DELAY * (MANAGED_LAUNCH_RETRY_BACKOFF ** max(0, attempt_count - 1))
+
+
+def discard_managed_launch_credentials(task: dict[str, object]) -> None:
+    task.pop("token", None)
+    environment_path = task.get("environment_path")
+    if not isinstance(environment_path, str):
+        return
+    path = Path(environment_path)
+    try:
+        path.unlink()
+        fsync_directory(path.parent)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"ltc: warning: could not remove failed launch environment {path}: {exc}", file=sys.stderr)
+
+
+def mark_managed_task_launch_failed(root: Path, task: dict[str, object], reason: str) -> bool:
+    task["state"] = "launch_failed"
+    task["outcome"] = "unknown"
+    task["recovery_reason"] = reason
+    task["launch_failed_at"] = time.time()
+    task.pop("next_launch_at", None)
+    task.pop("exit_code", None)
+    discard_managed_launch_credentials(task)
+    write_managed_task(root, task)
+    queue_managed_task_callback(root, task)
+    return True
+
+
+def record_managed_launch_failure(root: Path, task: dict[str, object], reason: str) -> bool:
+    if task.get("state") == "launching" and "launch_attempt_count" not in task:
+        return mark_managed_task_launch_failed(
+            root,
+            task,
+            f"{reason}_legacy_attempt_count_unknown",
+        )
+    attempt_count = managed_launch_attempt_count(task)
+    now = time.time()
+    task["last_launch_failure"] = reason
+    task["last_launch_failure_at"] = now
+    if attempt_count >= MANAGED_LAUNCH_MAX_ATTEMPTS:
+        return mark_managed_task_launch_failed(
+            root,
+            task,
+            f"{reason}_after_{attempt_count}_attempts",
+        )
+
+    delay = managed_launch_retry_delay(attempt_count)
+    task["state"] = "submitted"
+    task["outcome"] = "pending"
+    task["next_launch_at"] = now + delay
+    write_managed_task(root, task)
+    print(
+        f"ltc: managed task {task['id']} worker launch attempt {attempt_count}/"
+        f"{MANAGED_LAUNCH_MAX_ATTEMPTS} failed ({reason}); retrying in {delay:.1f}s",
+        file=sys.stderr,
+    )
+    return True
+
+
 def launch_managed_screen(root: Path, task: dict[str, object]) -> bool:
     command = screen_binary()
     if command is None:
@@ -2704,9 +2777,19 @@ def launch_managed_screen(root: Path, task: dict[str, object]) -> bool:
     environment_path = Path(str(task["environment_path"]))
     if not environment_path.exists():
         return mark_managed_task_interrupted(root, task, "launch_environment_missing")
+    attempt_count = managed_launch_attempt_count(task)
+    if attempt_count >= MANAGED_LAUNCH_MAX_ATTEMPTS:
+        return mark_managed_task_launch_failed(
+            root,
+            task,
+            f"worker_start_handshake_failed_after_{attempt_count}_attempts",
+        )
+    attempt_count += 1
     task["state"] = "launching"
+    task["launch_attempt_count"] = attempt_count
     task["launch_requested_at"] = time.time()
     task["screen_submitted_at"] = time.time()
+    task.pop("next_launch_at", None)
     write_managed_task(root, task)
     screen_command = [
         command,
@@ -2719,8 +2802,7 @@ def launch_managed_screen(root: Path, task: dict[str, object]) -> bool:
         "_screen-worker",
         "--task-file",
         str(managed_task_path(root, str(task["id"]))),
-        "--token",
-        str(task["token"]),
+        f"--token={task['token']}",
     ]
     result = subprocess.run(screen_command, check=False)
     if result.returncode == 0:
@@ -2736,7 +2818,7 @@ def launch_managed_screen(root: Path, task: dict[str, object]) -> bool:
     if latest.get("state") in ("running", "completed") or screen_session_exists(session):
         return False
     latest["screen_exit_code"] = result.returncode
-    return mark_managed_task_interrupted(root, latest, f"screen_launch_failed_exit_{result.returncode}")
+    return record_managed_launch_failure(root, latest, f"screen_launch_failed_exit_{result.returncode}")
 
 
 def recover_managed_tasks(root: Path) -> int:
@@ -2793,6 +2875,21 @@ def recover_managed_tasks(root: Path) -> int:
             if task.get("submission_boot_id") != current_boot:
                 if mark_managed_task_interrupted(root, task, "not_started_before_host_reboot"):
                     processed += 1
+                continue
+            if state == "launching":
+                if screen_session_exists(str(task["screen_session"])):
+                    continue
+                submitted_at = task.get("screen_submitted_at")
+                if (
+                    isinstance(submitted_at, (int, float))
+                    and time.time() - float(submitted_at) < MANAGED_WORKER_HANDSHAKE_SECONDS
+                ):
+                    continue
+                if record_managed_launch_failure(root, task, "worker_start_handshake_failed"):
+                    processed += 1
+                continue
+            next_launch_at = task.get("next_launch_at")
+            if isinstance(next_launch_at, (int, float)) and time.time() < float(next_launch_at):
                 continue
             if launch_managed_screen(root, task):
                 processed += 1
@@ -2860,7 +2957,7 @@ def submit_managed_run(args: argparse.Namespace) -> int:
         "screen_session": f"ltc-{task_id}",
         "log_path": str(log_path),
         "environment_path": str(environment_path),
-        "token": secrets.token_urlsafe(32),
+        "token": MANAGED_WORKER_TOKEN_PREFIX + secrets.token_urlsafe(32),
     }
     try:
         task_directory.mkdir(parents=True, exist_ok=False)
@@ -2898,6 +2995,14 @@ def run_screen_worker(args: argparse.Namespace) -> int:
         print("ltc: could not acquire managed task ownership", file=sys.stderr)
         return 125
     try:
+        try:
+            task = load_managed_task(task_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"ltc: invalid managed task record after worker handoff {task_path}: {exc}", file=sys.stderr)
+            return 125
+        if task.get("token") != args.token or task.get("state") != "launching":
+            print("ltc: refusing stale or unauthorized screen worker", file=sys.stderr)
+            return 125
         return run_screen_worker_locked(root, task)
     finally:
         release_owner_lock(lock, remove=False)
@@ -2930,6 +3035,7 @@ def run_screen_worker_locked(root: Path, task: dict[str, object]) -> int:
     task["outcome"] = "running"
     task["boot_id"] = current_boot_id()
     task["started_at"] = time.time()
+    task["worker_ready_at"] = task["started_at"]
     task["wrapper_pid"] = os.getpid()
     write_managed_task(root, task)
     exit_code = 127
