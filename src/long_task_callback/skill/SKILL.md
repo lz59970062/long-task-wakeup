@@ -82,6 +82,10 @@ The daemon reloads that UTF-8 file before every callback delivery attempt, so ch
 a restart. Non-empty content is appended under `[long-task-callback-user-hook]`; hook read failures
 must warn and continue with the original callback prompt.
 
+`setup` also checks for the Claude Code CLI and runs `claude auth status` with output suppressed.
+This check is advisory and must not block Codex-only installation or print credentials/account
+details. Claude configuration must be present in the shell that later submits `ltc agent claude`.
+
 ## Run: submit new work
 
 Use this when the agent is launching the long command:
@@ -132,6 +136,11 @@ use `ltc agent claude` instead of manually wrapping `claude -p` with `ltc run`: 
 the launching configuration, authentication, proxy, and custom environment while removing parent
 session markers that prevent a clean child launch. Do not put credentials in the task prompt, and
 do not add `--bare` by default.
+
+Before the first Claude child, confirm `command -v claude` and `claude auth status`. Do not require
+`ANTHROPIC_API_KEY` specifically: OAuth/keychain and supported cloud providers are valid too. When
+used, `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_CONFIG_DIR`, proxy/certificate settings,
+and other custom values must be available in the submission environment; never print their values.
 
 LTC owns the private prompt and result files in the managed task directory. The caller does not
 choose those paths. On callback, inspect the child result and relevant artifacts, acknowledge the

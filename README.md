@@ -76,6 +76,11 @@ delivery attempt, so edits apply to the next callback without restarting the dae
 content is appended to the callback prompt under `[long-task-callback-user-hook]`; a missing,
 empty, or temporarily unreadable file does not block callback delivery.
 
+During setup, LTC checks whether the Claude Code CLI is available and runs `claude auth status`
+with output suppressed. This is advisory: setup continues when Claude is absent or authentication
+cannot be confirmed because command and Codex workflows remain valid. The check never prints
+credential values or account details.
+
 Verify:
 
 ```bash
@@ -136,6 +141,21 @@ For Claude Code, LTC carries the submission-time configuration, authentication, 
 environment into the child while removing `CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`, and
 `CLAUDECODE`. Those values identify a parent conversation or nested Claude process and must not
 become the identity of the fresh child. Agent mode does not enable Claude's `--bare` mode.
+
+### Claude Code configuration
+
+Configure Claude Code in the shell that submits `ltc agent claude`, then verify it locally:
+
+```bash
+command -v claude
+claude auth status
+```
+
+No single environment variable is universally required. Claude Code may use OAuth/keychain,
+`ANTHROPIC_API_KEY` (and an optional `ANTHROPIC_BASE_URL`), or a supported cloud provider such as
+Bedrock, Vertex, or Foundry. LTC also carries `CLAUDE_CONFIG_DIR`, proxy/certificate variables,
+and other custom environment values present at submission. Environment captured when the daemon
+was installed is not a substitute for the environment present when `ltc agent claude` is called.
 
 ## Done: report an externally managed task
 
@@ -354,6 +374,10 @@ LTC 等待一秒；若 screen 在握手前消失，则记录失败并按指数�
 `[long-task-callback-user-hook]` 段落追加到 callback 提示词；文件缺失、为空或暂时不可读时，
 原 callback 仍会正常投递。
 
+安装时还会检查 Claude Code CLI，并在隐藏输出的情况下运行 `claude auth status`。该检查只做
+提示，不会阻断安装，也不会打印凭据值或账户信息；Claude 未配置时，普通命令和 Codex 功能仍然
+可以使用。
+
 使用原则：只有可靠地在 60 秒内结束的命令才允许前台等待一次。预计约一分钟以上、耗时不确定，
 或可能需要第二次状态检查时，从一开始就使用 `ltc run`。几分钟任务也默认走 callback，
 不要为了维持模型缓存而轮询；screen 和 daemon 的等待不产生模型回合。
@@ -386,6 +410,12 @@ ltc agent codex --cwd "$PWD" --task "fix parser" \
 无需传入路径。Claude 子代理继承提交时的认证、配置、代理和自定义环境，但不会继承
 `CODEX_THREAD_ID`、`CLAUDE_CODE_SESSION_ID` 和 `CLAUDECODE` 这些父会话标记；默认也不会
 启用 `--bare`。
+
+Claude Code 必须在实际提交 `ltc agent claude` 的 shell 中配置好，可先运行
+`command -v claude` 和 `claude auth status`。OAuth/keychain 不要求设置 `ANTHROPIC_API_KEY`；
+也可以使用 `ANTHROPIC_API_KEY`、可选的 `ANTHROPIC_BASE_URL`，或 Claude Code 支持的云厂商
+认证。LTC 会继承提交时存在的 `CLAUDE_CONFIG_DIR`、代理、证书和其他自定义环境；安装 daemon
+时的环境不能代替提交子代理时的环境。
 
 主机重启后 screen 不会保留。LTC 不自动重跑，而是恢复最初绑定的 Codex 或 Claude Code
 会话，把任务、日志、checkpoint 相关上下文和中断原因交回该 agent。agent 自己检查本地产物，

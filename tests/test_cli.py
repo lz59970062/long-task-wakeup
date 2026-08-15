@@ -1713,6 +1713,7 @@ class CliTests(unittest.TestCase):
             mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"),
             mock.patch.object(cli, "install_skill", return_value=0) as install_skill,
             mock.patch.object(cli, "ensure_callback_hook_file") as ensure_callback_hook_file,
+            mock.patch.object(cli, "report_claude_agent_readiness") as report_claude_agent_readiness,
             mock.patch.object(cli, "install_systemd", return_value=0) as install_systemd,
         ):
             self.assertEqual(cli.setup(args), 0)
@@ -1721,12 +1722,59 @@ class CliTests(unittest.TestCase):
         self.assertEqual(skill_args.path, "/tmp/skills")
         self.assertTrue(skill_args.force)
         ensure_callback_hook_file.assert_called_once_with()
+        report_claude_agent_readiness.assert_called_once_with(args)
 
         systemd_args = install_systemd.call_args.args[0]
         self.assertEqual(systemd_args.queue_dir, "/tmp/queue")
         self.assertEqual(systemd_args.path, "/bin")
         self.assertTrue(systemd_args.enable)
         self.assertTrue(systemd_args.now)
+
+    def test_claude_readiness_check_preserves_config_without_parent_markers(self) -> None:
+        args = argparse.Namespace(claude_bin=None)
+        completed = subprocess.CompletedProcess(["claude", "auth", "status", "--json"], 0)
+        output = io.StringIO()
+        with (
+            mock.patch.object(cli.shutil, "which", return_value="/opt/claude/bin/claude"),
+            mock.patch.object(cli.subprocess, "run", return_value=completed) as auth_status,
+            mock.patch.dict(
+                os.environ,
+                {
+                    "ANTHROPIC_API_KEY": "private-value",
+                    "CLAUDE_CONFIG_DIR": "/tmp/claude-config",
+                    "CODEX_THREAD_ID": "parent-codex",
+                    "CLAUDE_CODE_SESSION_ID": "parent-claude",
+                    "CLAUDECODE": "1",
+                },
+                clear=True,
+            ),
+            mock.patch("sys.stdout", output),
+        ):
+            cli.report_claude_agent_readiness(args)
+
+        call = auth_status.call_args
+        self.assertEqual(call.args[0], ["/opt/claude/bin/claude", "auth", "status", "--json"])
+        child_env = call.kwargs["env"]
+        self.assertEqual(child_env["ANTHROPIC_API_KEY"], "private-value")
+        self.assertEqual(child_env["CLAUDE_CONFIG_DIR"], "/tmp/claude-config")
+        self.assertNotIn("CODEX_THREAD_ID", child_env)
+        self.assertNotIn("CLAUDE_CODE_SESSION_ID", child_env)
+        self.assertNotIn("CLAUDECODE", child_env)
+        self.assertNotIn("private-value", output.getvalue())
+        self.assertIn("configuration values were not printed", output.getvalue())
+
+    def test_claude_readiness_check_warns_without_blocking_when_cli_is_missing(self) -> None:
+        errors = io.StringIO()
+        with (
+            mock.patch.object(cli.shutil, "which", return_value=None),
+            mock.patch.object(cli.subprocess, "run") as auth_status,
+            mock.patch("sys.stderr", errors),
+        ):
+            cli.report_claude_agent_readiness(argparse.Namespace(claude_bin=None))
+
+        auth_status.assert_not_called()
+        self.assertIn("setup will continue", errors.getvalue())
+        self.assertIn("ltc agent claude", errors.getvalue())
 
     def test_callback_hook_file_is_created_once_and_preserves_user_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

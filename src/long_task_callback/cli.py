@@ -253,6 +253,39 @@ def claude_bin_path(args: argparse.Namespace) -> str:
     return command or "claude"
 
 
+def report_claude_agent_readiness(args: argparse.Namespace) -> None:
+    configured = claude_bin_path(args)
+    command = shutil.which(configured)
+    if command is None:
+        print(
+            "ltc: warning: Claude Code was not found; setup will continue, but `ltc agent claude` "
+            "requires `claude` on PATH or an explicit --claude-bin path",
+            file=sys.stderr,
+        )
+        return
+    try:
+        result = subprocess.run(
+            [command, "auth", "status", "--json"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10.0,
+            env=child_agent_environment(dict(os.environ)),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        result = None
+    if result is not None and result.returncode == 0:
+        print(
+            "Claude Code agent mode: CLI and local authentication detected; configuration values were not printed."
+        )
+        return
+    print(
+        "ltc: warning: Claude Code was found, but `claude auth status` could not confirm authentication. "
+        "Configure Claude in the shell that will launch `ltc agent claude`; setup will continue.",
+        file=sys.stderr,
+    )
+
+
 def systemd_service_text(args: argparse.Namespace) -> str:
     command = daemon_command(args)
     exec_start = " ".join(systemd_quote(part) for part in command)
@@ -3855,6 +3888,7 @@ def setup(args: argparse.Namespace) -> int:
     if skill_status != 0:
         return skill_status
     ensure_callback_hook_file()
+    report_claude_agent_readiness(args)
 
     systemd_args = argparse.Namespace(
         name=args.name,
