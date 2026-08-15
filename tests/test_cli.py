@@ -127,6 +127,188 @@ class CliTests(unittest.TestCase):
             self.assertFalse(cli.managed_tasks_root(root).exists())
             self.assertIn("daemon submission -> GNU screen", output.getvalue())
 
+    def test_agent_parser_matches_run_style_and_preserves_prompt(self) -> None:
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "ltc",
+                    "agent",
+                    "claude",
+                    "--session",
+                    "parent-thread",
+                    "--task",
+                    "review parser",
+                    "--",
+                    "Inspect parser.py and report defects.",
+                ],
+            ),
+            mock.patch.object(cli, "agent", return_value=0) as parsed_agent,
+        ):
+            self.assertEqual(cli.main(), 0)
+
+        args = parsed_agent.call_args.args[0]
+        self.assertEqual(args.agent_worker, "claude")
+        self.assertEqual(args.task, "review parser")
+        self.assertEqual(args.agent_prompt, ["--", "Inspect parser.py and report defects."])
+
+    def test_codex_agent_submission_owns_prompt_and_result_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            args = self._agent_args(tmp, root, "codex", "Fix the confirmed parser defect.")
+            with (
+                mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"),
+                mock.patch.dict(
+                    os.environ,
+                    {"CODEX_LONG_TASK_WAKEUP_CODEX_BIN": "/opt/codex/bin/codex"},
+                    clear=False,
+                ),
+            ):
+                self.assertEqual(cli.agent(args), 0)
+
+            task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
+            task = cli.load_managed_task(task_path)
+            prompt_path = Path(str(task["agent_prompt_path"]))
+            result_path = Path(str(task["agent_result_path"]))
+            self.assertEqual(task["task_kind"], "agent")
+            self.assertEqual(task["agent_worker"], "codex")
+            self.assertEqual(prompt_path.read_text(encoding="utf-8"), "Fix the confirmed parser defect.")
+            self.assertEqual(stat.S_IMODE(prompt_path.stat().st_mode), 0o600)
+            self.assertEqual(result_path.parent, task_path.parent)
+            self.assertEqual(
+                task["wrapped_command"],
+                [
+                    "/opt/codex/bin/codex",
+                    "exec",
+                    "--ephemeral",
+                    "-C",
+                    tmp,
+                    "-s",
+                    "workspace-write",
+                    "--approve-for-me",
+                    "-o",
+                    str(result_path),
+                    "-",
+                ],
+            )
+            self.assertNotIn("Fix the confirmed parser defect.", task_path.read_text(encoding="utf-8"))
+
+    def test_codex_agent_worker_reads_prompt_and_saves_final_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            fake_codex = self._fake_child_agent(Path(tmp))
+            args = self._agent_args(tmp, root, "codex", "Implement the parser fix and run tests.")
+            with (
+                mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "CODEX_LONG_TASK_WAKEUP_CODEX_BIN": str(fake_codex),
+                        "CODEX_THREAD_ID": "parent-codex-thread",
+                        "CLAUDE_CODE_SESSION_ID": "stale-claude-thread",
+                        "CLAUDECODE": "1",
+                        "LTC_TEST_SENTINEL": "codex-submission-environment",
+                    },
+                    clear=False,
+                ),
+            ):
+                self.assertEqual(cli.agent(args), 0)
+
+            task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
+            task = cli.load_managed_task(task_path)
+            task["state"] = "launching"
+            cli.write_managed_task(root, task)
+            worker = argparse.Namespace(task_file=str(task_path), token=task["token"])
+            with mock.patch.dict(os.environ, {"STY": "screen-session"}, clear=True):
+                self.assertEqual(cli.run_screen_worker(worker), 0)
+
+            task = cli.load_managed_task(task_path)
+            result_path = Path(str(task["agent_result_path"]))
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["prompt"], "Implement the parser fix and run tests.")
+            self.assertEqual(result["sentinel"], "codex-submission-environment")
+            self.assertIsNone(result["codex_thread_id"])
+            self.assertIsNone(result["claude_session_id"])
+            self.assertIsNone(result["claudecode"])
+            self.assertEqual(stat.S_IMODE(result_path.stat().st_mode), 0o600)
+            callback = cli.load_request(root / "pending" / f"{task['id']}.json")
+            self.assertEqual(callback["agent_worker"], "codex")
+            self.assertIn("Child agent: Codex", callback["prompt"])
+
+    def test_claude_agent_injects_submitter_environment_without_parent_session_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "queue"
+            fake_claude = self._fake_child_agent(Path(tmp))
+            args = self._agent_args(tmp, root, "claude", "Audit the parser and return evidence.")
+            submit_environment = {
+                "LONG_TASK_WAKEUP_CLAUDE_BIN": str(fake_claude),
+                "CODEX_THREAD_ID": "codex-parent",
+                "CLAUDE_CODE_SESSION_ID": "claude-parent",
+                "CLAUDECODE": "1",
+                "CLAUDE_CONFIG_DIR": str(Path(tmp) / "claude-config"),
+                "ANTHROPIC_API_KEY": "secret-sentinel-value",
+                "ANTHROPIC_BASE_URL": "https://example.invalid/anthropic",
+                "LTC_TEST_SENTINEL": "submission-environment",
+            }
+            with (
+                mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"),
+                mock.patch.dict(os.environ, submit_environment, clear=False),
+            ):
+                self.assertEqual(cli.agent(args), 0)
+
+            task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
+            task = cli.load_managed_task(task_path)
+            environment_path = Path(str(task["environment_path"]))
+            self.assertEqual(stat.S_IMODE(environment_path.stat().st_mode), 0o600)
+            self.assertNotIn("--bare", task["wrapped_command"])
+            self.assertEqual(
+                task["wrapped_command"],
+                [
+                    str(fake_claude),
+                    "-p",
+                    "--no-session-persistence",
+                    "--permission-mode",
+                    "auto",
+                    "--output-format",
+                    "text",
+                ],
+            )
+            task["state"] = "launching"
+            cli.write_managed_task(root, task)
+            worker = argparse.Namespace(task_file=str(task_path), token=task["token"])
+            output = io.StringIO()
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"STY": "screen-session", "CLAUDECODE": "daemon-environment-must-not-leak"},
+                    clear=True,
+                ),
+                mock.patch("sys.stdout", output),
+            ):
+                self.assertEqual(cli.run_screen_worker(worker), 0)
+
+            task = cli.load_managed_task(task_path)
+            result_path = Path(str(task["agent_result_path"]))
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["prompt"], "Audit the parser and return evidence.")
+            self.assertEqual(result["sentinel"], "submission-environment")
+            self.assertTrue(result["api_key_present"])
+            self.assertEqual(result["base_url"], "https://example.invalid/anthropic")
+            self.assertEqual(result["config_dir"], str(Path(tmp) / "claude-config"))
+            self.assertIsNone(result["codex_thread_id"])
+            self.assertIsNone(result["claude_session_id"])
+            self.assertIsNone(result["claudecode"])
+            self.assertEqual(stat.S_IMODE(result_path.stat().st_mode), 0o600)
+            self.assertFalse(environment_path.exists())
+            self.assertNotIn("secret-sentinel-value", output.getvalue())
+            callback = cli.load_request(root / "pending" / f"{task['id']}.json")
+            self.assertEqual(callback["agent"], "codex")
+            self.assertEqual(callback["agent_worker"], "claude")
+            self.assertIn(f"Agent result: {result_path}", callback["prompt"])
+            self.assertIn("Child agent: Claude Code", callback["prompt"])
+            self.assertNotIn("secret-sentinel-value", json.dumps(callback))
+
     def test_via_daemon_is_hidden_compatibility_flag(self) -> None:
         help_output = io.StringIO()
         with (
@@ -2883,6 +3065,53 @@ class CliTests(unittest.TestCase):
             strict=False,
             wrapped_command=command,
         )
+
+    def _agent_args(
+        self,
+        cwd: str,
+        root: Path,
+        worker: str,
+        prompt: str,
+    ) -> argparse.Namespace:
+        args = self._run_args(cwd, root, [])
+        args.agent = "codex"
+        args.agent_worker = worker
+        args.agent_prompt = ["--", prompt]
+        args.permission_mode = "auto"
+        return args
+
+    def _fake_child_agent(self, directory: Path) -> Path:
+        script = directory / "fake-claude"
+        script.write_text(
+            textwrap.dedent(
+                f"""\
+                #!{sys.executable}
+                import json
+                import os
+                import sys
+
+                from pathlib import Path
+
+                payload = {{
+                    "prompt": sys.stdin.read(),
+                    "sentinel": os.environ.get("LTC_TEST_SENTINEL"),
+                    "api_key_present": bool(os.environ.get("ANTHROPIC_API_KEY")),
+                    "base_url": os.environ.get("ANTHROPIC_BASE_URL"),
+                    "config_dir": os.environ.get("CLAUDE_CONFIG_DIR"),
+                    "codex_thread_id": os.environ.get("CODEX_THREAD_ID"),
+                    "claude_session_id": os.environ.get("CLAUDE_CODE_SESSION_ID"),
+                    "claudecode": os.environ.get("CLAUDECODE"),
+                }}
+                if "-o" in sys.argv:
+                    Path(sys.argv[sys.argv.index("-o") + 1]).write_text(json.dumps(payload), encoding="utf-8")
+                else:
+                    json.dump(payload, sys.stdout)
+                """
+            ),
+            encoding="utf-8",
+        )
+        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+        return script
 
     def _fake_codex(
         self,

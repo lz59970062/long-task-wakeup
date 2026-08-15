@@ -63,6 +63,9 @@ ACTIVE_STATE = "active"
 LOCKS_STATE = "locks"
 SCREEN_BIN_ENV = "LONG_TASK_WAKEUP_SCREEN_BIN"
 TASKS_DIR_NAME = "tasks"
+AGENT_PROMPT_FILE_NAME = "agent-prompt.txt"
+AGENT_RESULT_FILE_NAME = "agent-result.txt"
+CHILD_AGENT_PARENT_ENV_NAMES = (CODEX_THREAD_ID_ENV, CLAUDE_THREAD_ID_ENV, CLAUDE_MARKER_ENV)
 TARGET_LOCK_DIR_ENV = "CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR"
 PROXY_ENV_FILE_ENV = "CODEX_LONG_TASK_WAKEUP_PROXY_ENV_FILE"
 CALLBACK_HOOK_FILE_NAME = "callback-hook.md"
@@ -1788,6 +1791,25 @@ def write_request(path: Path, request: dict[str, object]) -> None:
         raise
 
 
+def write_private_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        fsync_directory(path.parent)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def move_request(source: Path, destination_dir: Path) -> Path:
     destination_dir.mkdir(parents=True, exist_ok=True)
     destination = destination_dir / source.name
@@ -2609,6 +2631,14 @@ def managed_task_prompt(
         f"Screen session: {screen_session}",
         f"Screen log: {log_path}",
     ]
+    if task.get("task_kind") == "agent":
+        worker = str(task.get("agent_worker", "unknown"))
+        details.extend(
+            [
+                f"Child agent: {agent_display_name(worker)}",
+                f"Agent result: {task.get('agent_result_path')}",
+            ]
+        )
     if outcome != "completed":
         reason = str(task.get("recovery_reason") or outcome)
         details.extend(
@@ -2643,6 +2673,10 @@ def managed_callback_request(task: dict[str, object], prompt: str) -> dict[str, 
         request["exit_code"] = task["exit_code"]
     if task.get("recovery_reason"):
         request["recovery_reason"] = task["recovery_reason"]
+    if task.get("task_kind") == "agent":
+        request["task_kind"] = "agent"
+        request["agent_worker"] = task.get("agent_worker")
+        request["agent_result_path"] = task.get("agent_result_path")
     return request
 
 
@@ -2910,6 +2944,57 @@ def validate_managed_goal(root: Path, goal_id: object) -> None:
         raise ValueError(f"goal {goal_id} is not active")
 
 
+def agent_prompt_text(parts: list[str]) -> str:
+    prompt_parts = list(parts)
+    if prompt_parts and prompt_parts[0] == "--":
+        prompt_parts = prompt_parts[1:]
+    if not prompt_parts:
+        raise SystemExit("agent mode requires a task prompt after --")
+    return prompt_parts[0] if len(prompt_parts) == 1 else " ".join(prompt_parts)
+
+
+def agent_wrapped_command(
+    worker: str,
+    *,
+    cwd: str,
+    result_path: Path,
+    sandbox_mode: str,
+    permission_mode: str,
+) -> list[str]:
+    if worker == "codex":
+        return [
+            codex_command(),
+            "exec",
+            "--ephemeral",
+            "-C",
+            cwd,
+            "-s",
+            sandbox_mode,
+            "--approve-for-me",
+            "-o",
+            str(result_path),
+            "-",
+        ]
+    if worker == "claude":
+        return [
+            claude_command(),
+            "-p",
+            "--no-session-persistence",
+            "--permission-mode",
+            permission_mode,
+            "--output-format",
+            "text",
+        ]
+    raise ValueError(f"unknown child agent {worker!r}")
+
+
+def child_agent_environment(environment: dict[str, str]) -> dict[str, str]:
+    child = dict(environment)
+    for name in CHILD_AGENT_PARENT_ENV_NAMES:
+        child.pop(name, None)
+    return child
+
+
 def submit_managed_run(args: argparse.Namespace) -> int:
     if screen_binary() is None:
         print(f"ltc: refusing to submit task: {screen_required_error()}", file=sys.stderr)
@@ -2926,6 +3011,20 @@ def submit_managed_run(args: argparse.Namespace) -> int:
     task_directory = managed_task_dir(root, task_id)
     environment_path = task_directory / "environment.json"
     log_path = task_directory / "attempt-1.log"
+    task_kind = str(getattr(args, "task_kind", "command"))
+    wrapped_command = list(getattr(args, "wrapped_command", []))
+    agent_prompt_path: Path | None = None
+    agent_result_path: Path | None = None
+    if task_kind == "agent":
+        agent_prompt_path = task_directory / AGENT_PROMPT_FILE_NAME
+        agent_result_path = task_directory / AGENT_RESULT_FILE_NAME
+        wrapped_command = agent_wrapped_command(
+            str(args.agent_worker),
+            cwd=os.path.abspath(args.cwd),
+            result_path=agent_result_path,
+            sandbox_mode=str(args.sandbox_mode),
+            permission_mode=str(args.permission_mode),
+        )
     environment = {
         name: value
         for name, value in os.environ.items()
@@ -2941,8 +3040,8 @@ def submit_managed_run(args: argparse.Namespace) -> int:
         "outcome": "pending",
         "task": args.task,
         "cwd": os.path.abspath(args.cwd),
-        "command": args.command or shlex.join(args.wrapped_command),
-        "wrapped_command": list(args.wrapped_command),
+        "command": args.command or shlex.join(wrapped_command),
+        "wrapped_command": wrapped_command,
         "message": args.message,
         "queue_dir": str(root),
         "agent": resolve_agent(args),
@@ -2959,9 +3058,20 @@ def submit_managed_run(args: argparse.Namespace) -> int:
         "environment_path": str(environment_path),
         "token": MANAGED_WORKER_TOKEN_PREFIX + secrets.token_urlsafe(32),
     }
+    if task_kind == "agent" and agent_prompt_path is not None and agent_result_path is not None:
+        task.update(
+            {
+                "task_kind": "agent",
+                "agent_worker": str(args.agent_worker),
+                "agent_prompt_path": str(agent_prompt_path),
+                "agent_result_path": str(agent_result_path),
+            }
+        )
     try:
         task_directory.mkdir(parents=True, exist_ok=False)
         os.chmod(task_directory, 0o700)
+        if agent_prompt_path is not None:
+            write_private_text(agent_prompt_path, str(args.agent_prompt_text))
         write_request(environment_path, {"version": 1, "environment": environment})
         write_managed_task(root, task)
     except OSError as exc:
@@ -2970,6 +3080,8 @@ def submit_managed_run(args: argparse.Namespace) -> int:
     print(f"ltc: submitted managed task {task_id}", file=sys.stderr)
     print(f"ltc: screen session: {task['screen_session']}", file=sys.stderr)
     print(f"ltc: screen log: {log_path}", file=sys.stderr)
+    if agent_result_path is not None:
+        print(f"ltc: agent result: {agent_result_path}", file=sys.stderr)
     return 0
 
 
@@ -3040,13 +3152,41 @@ def run_screen_worker_locked(root: Path, task: dict[str, object]) -> int:
     write_managed_task(root, task)
     exit_code = 127
     try:
-        completed = subprocess.run(
-            [str(part) for part in task["wrapped_command"]],
-            cwd=str(task["cwd"]),
-            shell=False,
-            check=False,
-            close_fds=True,
-        )
+        command = [str(part) for part in task["wrapped_command"]]
+        run_kwargs: dict[str, object] = {
+            "cwd": str(task["cwd"]),
+            "shell": False,
+            "check": False,
+            "close_fds": True,
+        }
+        if task.get("task_kind") == "agent":
+            prompt_path = Path(str(task["agent_prompt_path"]))
+            result_path = Path(str(task["agent_result_path"]))
+            prompt = prompt_path.read_text(encoding="utf-8")
+            run_kwargs.update(
+                {
+                    "input": prompt,
+                    "text": True,
+                    "env": child_agent_environment(environment),
+                }
+            )
+            if task.get("agent_worker") == "claude":
+                run_kwargs["stdout"] = subprocess.PIPE
+            completed = subprocess.run(command, **run_kwargs)
+            if task.get("agent_worker") == "claude":
+                output = completed.stdout if isinstance(completed.stdout, str) else ""
+                write_private_text(result_path, output)
+                if output:
+                    sys.stdout.write(output)
+                    if not output.endswith("\n"):
+                        sys.stdout.write("\n")
+                    sys.stdout.flush()
+            elif result_path.exists():
+                os.chmod(result_path, 0o600)
+            else:
+                write_private_text(result_path, "")
+        else:
+            completed = subprocess.run(command, **run_kwargs)
         exit_code = completed.returncode
         completed_at = time.time()
         result = {
@@ -3062,7 +3202,7 @@ def run_screen_worker_locked(root: Path, task: dict[str, object]) -> int:
         write_managed_task(root, task)
         queue_managed_task_callback(root, task)
         return exit_code
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         task["state"] = "interrupted"
         task["outcome"] = "unknown"
         task["recovery_reason"] = f"wrapped_command_launch_failed: {exc}"
@@ -3095,6 +3235,29 @@ def run(args: argparse.Namespace) -> int:
     return submit_managed_run(args)
 
 
+def agent(args: argparse.Namespace) -> int:
+    args.agent_prompt_text = agent_prompt_text(list(args.agent_prompt))
+    args.task_kind = "agent"
+    args.command = args.command or f"ltc agent {args.agent_worker}"
+    args.wrapped_command = []
+    bind_target(args)
+    if args.dry_run:
+        print(
+            "\n".join(
+                [
+                    "[long-task-agent-submission-dry-run]",
+                    f"Task: {args.task}",
+                    f"Working directory: {os.path.abspath(args.cwd)}",
+                    f"Child agent: {agent_display_name(args.agent_worker)}",
+                    "Execution: daemon submission -> GNU screen -> LTC worker -> child agent",
+                    "No task record was written and no child agent was started.",
+                ]
+            )
+        )
+        return 0
+    return submit_managed_run(args)
+
+
 def add_common_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--agent",
@@ -3111,7 +3274,7 @@ def add_common_flags(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Unsafely resume the most recent agent session instead of binding the launching thread",
     )
-    parser.add_argument("--cwd", default=os.getcwd(), help="Working directory for the resumed agent")
+    parser.add_argument("--cwd", default=os.getcwd(), help="Working directory for the task and resumed agent")
     parser.add_argument("--task", default="long task", help="Human-readable task name")
     parser.add_argument("--command", help="Original command text")
     parser.add_argument("--exit-code", type=int, help="Completed task exit code")
@@ -3136,12 +3299,12 @@ def add_common_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--sandbox-mode",
         default=os.environ.get("CODEX_LONG_TASK_WAKEUP_SANDBOX_MODE", DEFAULT_SANDBOX_MODE),
-        help="Codex-only: sandbox_mode config value used when resuming (default: workspace-write)",
+        help="Codex-only: sandbox mode used by child agents and resumed callbacks (default: workspace-write)",
     )
     parser.add_argument(
         "--permission-mode",
         default=os.environ.get(CLAUDE_PERMISSION_MODE_ENV, DEFAULT_CLAUDE_PERMISSION_MODE),
-        help="Claude Code-only: --permission-mode used when resuming (default: auto)",
+        help="Claude Code-only: permission mode used by child agents and resumed callbacks (default: auto)",
     )
     parser.add_argument(
         "--dry-run",
@@ -4190,6 +4353,13 @@ def main() -> int:
     add_common_flags(run_parser)
     run_parser.add_argument("wrapped_command", nargs=argparse.REMAINDER)
 
+    agent_parser = sub.add_parser("agent", help="Preview: run a durable fresh Codex or Claude Code child agent")
+    agent_sub = agent_parser.add_subparsers(dest="agent_worker", required=True)
+    for worker in AGENT_NAMES:
+        child_parser = agent_sub.add_parser(worker, help=f"Run a fresh {agent_display_name(worker)} child agent")
+        add_common_flags(child_parser)
+        child_parser.add_argument("agent_prompt", nargs=argparse.REMAINDER)
+
     screen_worker_parser = sub.add_parser("_screen-worker", help=argparse.SUPPRESS)
     screen_worker_parser.add_argument("--task-file", required=True)
     screen_worker_parser.add_argument("--token", required=True)
@@ -4337,6 +4507,8 @@ def main() -> int:
         if args.wrapped_command and args.wrapped_command[0] == "--":
             args.wrapped_command = args.wrapped_command[1:]
         return run(args)
+    if args.mode == "agent":
+        return agent(args)
     if args.mode == "_screen-worker":
         return run_screen_worker(args)
     if args.mode == "daemon":

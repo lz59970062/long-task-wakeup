@@ -10,10 +10,12 @@ description: Explicit callback workflow for long-running agent tasks. Use the da
 Use an explicit callback when requested or when a command may outlive the current Codex or Claude
 Code turn.
 
-There are two public workflows:
+There are three public workflows:
 
 - `ltc run -- <command>` submits a new long-running task. The daemon launches it in
   GNU screen.
+- `ltc agent codex|claude -- <prompt>` submits a fresh child agent through the same durable
+  lifecycle. This mode is a preview in `0.6.5a1`.
 - `ltc done ...` queues a completion callback for work already owned by screen, tmux,
   Slurm, another scheduler, or an existing script.
 
@@ -33,7 +35,7 @@ systemd user service
 
 GNU screen session
   └─ LTC worker
-      └─ wrapped task
+      └─ wrapped command or fresh child agent
 ```
 
 The daemon must not own the training process as its child. It persists the submission and creates
@@ -42,9 +44,9 @@ the detached screen session; screen owns the worker and the worker owns the task
 GNU screen is mandatory. If it is missing, stop and ask the user to install it. Never fall back to
 an agent-owned wrapper.
 
-After a successful submission, report the task id, screen session, and log path, then end the
-agent turn. Do not poll processes, logs, or artifacts on a timer. Live monitoring is allowed only
-when the user asks or callback infrastructure itself is being diagnosed.
+After a successful submission, report the task id, screen session, log path, and agent result path
+when present, then end the agent turn. Do not poll processes, logs, or artifacts on a timer. Live
+monitoring is allowed only when the user asks or callback infrastructure itself is being diagnosed.
 
 ## Duration policy
 
@@ -101,6 +103,39 @@ tail -f ~/.codex/long-task-wakeup/tasks/<task-id>/attempt-1.log
 ```
 
 Detaching with `Ctrl-a d` leaves the task running.
+
+## Agent: submit a durable fresh child agent (preview)
+
+Use `ltc agent` when a fresh Codex or Claude Code process should perform an independent task and
+the work needs screen ownership, durable artifacts, or a completion callback. For short work that
+fits an in-turn native subagent, LTC is unnecessary.
+
+```bash
+ltc agent claude \
+  --cwd "$PWD" \
+  --task "review parser edge cases" \
+  -- "Inspect parser.py and its tests. Report concrete defects and suggested fixes."
+
+ltc agent codex \
+  --cwd "$PWD" \
+  --task "implement parser fixes" \
+  -- "Fix the confirmed parser defects and run the relevant tests."
+```
+
+The `codex|claude` subcommand selects the child process. The existing `--agent` option still
+selects the parent agent to wake when explicit callback binding is needed. The text after `--` is
+the child's task, not a shell command. State the objective, relevant paths or context, expected
+deliverable, and real constraints; do not impose a fixed task template when they are unnecessary.
+
+LTC snapshots the launching environment and prepares a fresh child environment. For Claude Code,
+use `ltc agent claude` instead of manually wrapping `claude -p` with `ltc run`: agent mode keeps
+the launching configuration, authentication, proxy, and custom environment while removing parent
+session markers that prevent a clean child launch. Do not put credentials in the task prompt, and
+do not add `--bare` by default.
+
+LTC owns the private prompt and result files in the managed task directory. The caller does not
+choose those paths. On callback, inspect the child result and relevant artifacts, acknowledge the
+callback, and continue the original goal when the next action is clear.
 
 ## Done: report externally managed work
 

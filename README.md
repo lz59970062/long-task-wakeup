@@ -11,10 +11,12 @@
 **Long Task Callback (ltc)** gives long-running agent work a durable process owner and an explicit
 way back to the same conversation.
 
-There are only two normal entry points:
+There are three normal entry points:
 
 - **Run** — `ltc run -- <command>` submits a new task. The daemon starts it in GNU
   screen, so it is not owned by the agent turn.
+- **Agent (preview)** — `ltc agent codex|claude -- <prompt>` starts a fresh child agent with the
+  same durable ownership and callback lifecycle.
 - **Done** — `ltc done ...` reports completion of a task that is already owned by
   screen, tmux, Slurm, another scheduler, or an existing script.
 
@@ -35,10 +37,10 @@ systemd user service
 
 GNU screen session
   └─ LTC worker
-      └─ training / benchmark / build
+      └─ training / benchmark / build / child agent
 ```
 
-1. Codex or Claude Code submits `ltc run`. LTC persists the command, environment,
+1. Codex or Claude Code submits `ltc run` or `ltc agent`. LTC persists the work, environment,
    original agent/session binding, goal binding, screen name, and log path.
 2. The systemd-managed daemon notices the submission and starts a detached GNU screen session.
 3. The screen-owned task runs independently of the agent turn and of daemon restarts.
@@ -107,6 +109,33 @@ tail -f ~/.codex/long-task-wakeup/tasks/<task-id>/attempt-1.log
 ```
 
 Detach from screen with `Ctrl-a d`; detaching does not stop the task.
+
+## Agent: submit a fresh child agent (0.6.5a1 preview)
+
+Agent mode follows the same public design as `run`: LTC options come first, and `--` separates
+them from the actual child task.
+
+```bash
+ltc agent claude \
+  --cwd "$PWD" \
+  --task "review parser edge cases" \
+  -- "Inspect parser.py and its tests. Report concrete defects and suggested fixes."
+
+ltc agent codex \
+  --cwd "$PWD" \
+  --task "implement parser fixes" \
+  -- "Fix the confirmed parser defects and run the relevant tests."
+```
+
+`codex|claude` selects the child process. Callback routing remains independent: LTC auto-detects
+the launching conversation, or the existing `--agent` and `--session` options can bind it
+explicitly. LTC creates private prompt and result files under its managed task directory and
+prints the result path at submission; callers do not supply file paths.
+
+For Claude Code, LTC carries the submission-time configuration, authentication, proxy, and custom
+environment into the child while removing `CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`, and
+`CLAUDECODE`. Those values identify a parent conversation or nested Claude process and must not
+become the identity of the fresh child. Agent mode does not enable Claude's `--bare` mode.
 
 ## Done: report an externally managed task
 
@@ -288,10 +317,12 @@ mode and no fallback to one.
 
 ## 中文说明
 
-**Long Task Callback (ltc)** 只有两个需要记住的入口：
+**Long Task Callback (ltc)** 有三个入口：
 
 - **Run**：`ltc run -- <命令>`。提交一个新任务；daemon 收到记录后，用 GNU
   screen 启动 LTC worker 和训练任务。
+- **Agent（预览）**：`ltc agent codex|claude -- <任务>`。用同一套持久化和 callback
+  生命周期启动一个全新的 Codex 或 Claude Code 子代理。
 - **Done**：`ltc done ...`。任务已经由 screen、tmux、Slurm 或其他调度器托管时，
   只报告结束并投递 callback。
 
@@ -339,6 +370,22 @@ screen -ls
 screen -r ltc-<task-id>
 tail -f ~/.codex/long-task-wakeup/tasks/<task-id>/attempt-1.log
 ```
+
+`0.6.5a1` 的 Agent 预览模式沿用 `run` 的命令语言：
+
+```bash
+ltc agent claude --cwd "$PWD" --task "review parser" \
+  -- "Inspect parser.py and report concrete defects."
+
+ltc agent codex --cwd "$PWD" --task "fix parser" \
+  -- "Fix the confirmed defects and run the relevant tests."
+```
+
+`codex|claude` 选择被启动的子代理；callback 目标仍由启动现场自动识别，必要时继续使用已有的
+`--agent` 和 `--session` 显式绑定。提示词和最终回答文件由 LTC 自动放入私有任务目录，用户
+无需传入路径。Claude 子代理继承提交时的认证、配置、代理和自定义环境，但不会继承
+`CODEX_THREAD_ID`、`CLAUDE_CODE_SESSION_ID` 和 `CLAUDECODE` 这些父会话标记；默认也不会
+启用 `--bare`。
 
 主机重启后 screen 不会保留。LTC 不自动重跑，而是恢复最初绑定的 Codex 或 Claude Code
 会话，把任务、日志、checkpoint 相关上下文和中断原因交回该 agent。agent 自己检查本地产物，
