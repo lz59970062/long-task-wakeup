@@ -3027,6 +3027,8 @@ def agent_wrapped_command(
         raise ValueError("--reasoning-effort is supported only for Codex children")
     effort_flags = ["-c", f'model_reasoning_effort={json.dumps(reasoning_effort)}'] if reasoning_effort else []
     if worker == "codex":
+        # --approve-for-me conflicts with --sandbox in Codex 0.153.4. Set its
+        # approval configuration explicitly so the requested sandbox is preserved.
         return [
             codex_command(),
             "exec",
@@ -3037,7 +3039,10 @@ def agent_wrapped_command(
             cwd,
             "-s",
             sandbox_mode,
-            "--approve-for-me",
+            "-c",
+            f"approvals_reviewer={json.dumps(DEFAULT_APPROVALS_REVIEWER)}",
+            "-c",
+            f"approval_policy={json.dumps(DEFAULT_APPROVAL_POLICY)}",
             "-o",
             str(result_path),
             "-",

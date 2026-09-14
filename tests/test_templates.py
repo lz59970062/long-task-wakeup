@@ -79,7 +79,7 @@ class TemplateContractTests(unittest.TestCase):
         self.assertIsNone(task.get("child_model"))
         self.assertIsNone(task.get("child_reasoning_effort"))
         self.assertNotIn("--model", task["wrapped_command"])
-        self.assertNotIn("-c", task["wrapped_command"])
+        self.assertFalse(any(arg.startswith("model_reasoning_effort=") for arg in task["wrapped_command"]))
         self.assertEqual(Path(task["agent_prompt_path"]).read_text(encoding="utf-8"), prompt)
 
     def test_claude_template_inherits_cli_model_and_does_not_receive_codex_effort(self):

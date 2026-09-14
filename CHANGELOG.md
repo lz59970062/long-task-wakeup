@@ -2,6 +2,9 @@
 
 ## 0.6.5 — 2026-09-14
 
+- Fix Codex child startup on CLI 0.153.4: use explicit automatic-review and
+  approval-policy configuration alongside the requested sandbox, instead of the
+  mutually exclusive `--approve-for-me` / `--sandbox` combination.
 - Promote durable `ltc agent codex|claude` execution from preview to stable.
 - Add `--template test`: an independent child authors requirement-based tests and
   a reviewable handoff; the parent executes tests and reports actual outcomes.
