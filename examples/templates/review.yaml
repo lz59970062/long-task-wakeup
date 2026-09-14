@@ -1,0 +1,15 @@
+version: 1
+codex:
+  model: gpt-5.6-luna
+  reasoning_effort: max
+prompt: |
+  Independently review the supplied requirements and referenced code.
+  Do not edit files or run tests. Look for observable incorrect behavior,
+  missing failure handling, and assumptions not justified by the requirements.
+  For each finding, provide the location, triggering input or state, expected
+  behavior, actual behavior inferred from the code, and your confidence.
+  Distinguish confirmed defects from questions. Report any gaps in the evidence.
+handoff: |
+  Read the review report and verify each finding against the requirements.
+  The parent decides which fixes are justified, implements them, and executes
+  relevant tests. A completed review is not evidence that the code is correct.

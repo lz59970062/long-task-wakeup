@@ -154,7 +154,8 @@ ltc agent codex --template test --model gpt-5.6-luna --reasoning-effort max \
   --task "write parser tests" -- "Test the documented parser contract."
 ```
 
-`--template test` expands the bundled independent test-authoring prompt. Supply concrete
+`--template test` expands the bundled independent test-authoring prompt unless a user template
+with that name overrides it. The built-in behavior is described below. Supply concrete
 requirements or specification paths after `--`; a bare `test` in the prompt is ordinary text.
 All LTC flags must precede `--`. Codex defaults to `gpt-5.6-luna` with reasoning effort `max`;
 explicit child options override these defaults. The selected model must be available to your
@@ -177,9 +178,68 @@ and report before execution. A failed, empty, blocked, or partial handoff requir
 Use `--dry-run` to inspect the expanded prompt and resolved profile without launching a child.
 LTC freezes the template name/version, model/effort, command, and expanded prompt at submission;
 queued tasks keep that snapshot across upgrades. Inherited CLI defaults are not resolved by
-LTC and can change before execution; specify a model/effort to pin them. The editable source template is
-`src/long_task_callback/templates/test.md`; new templates can be registered in `templates.py`.
+LTC and can change before execution; specify a model/effort to pin them.
 
+
+### Custom templates
+
+Create `~/.config/ltc/templates/review.yaml` (or `.yml`) with:
+
+```yaml
+version: 1
+codex:
+  model: gpt-5.6-luna
+  reasoning_effort: max
+prompt: |
+  Independently review the requirements and referenced code without editing files.
+  Report defects with file locations, triggering inputs, expected behavior,
+  and evidence. Distinguish confirmed problems from unresolved questions.
+handoff: |
+  The parent verifies each finding, implements justified fixes, and runs tests.
+```
+
+```bash
+ltc agent codex --template review -- "Review parser.py against docs/spec.md"
+
+# Or select a file directly, without copying it into the user directory:
+ltc agent codex --template-file ./examples/templates/review.yaml \
+  -- "Review parser.py against docs/spec.md"
+
+# Inspect the resolved source, profile, prompt and handoff without starting work:
+ltc agent codex --template review --dry-run -- "Review parser.py"
+```
+
+A ready-to-copy example is [examples/templates/review.yaml](examples/templates/review.yaml).
+The directory is `$LTC_TEMPLATE_DIR` when set, otherwise
+`${XDG_CONFIG_HOME:-~/.config}/ltc/templates/`. No reinstall or daemon restart is
+needed after creating or editing a template. Template names start with a letter
+or digit and contain only letters, digits, `_` and `-`. `--template-file` paths are
+relative to the submitting shell's directory, independently of the child's `--cwd`.
+Its filename stem is the template name and follows the same naming rule.
+
+`version` (a positive integer revision) and `prompt` (non-empty text) are required.
+Optional `codex` accepts `model` and `reasoning_effort`; optional `claude` accepts
+`model` only. `handoff` is optional text for the parent callback, not the child's
+prompt. For example, add `claude: {model: sonnet}` to configure a Claude child.
+Omitted per-agent defaults inherit that CLI's configuration. Explicit `--model`
+and `--reasoning-effort` override template defaults. The selected model must support
+the chosen effort. Recognized effort values are `minimal`, `low`, `medium`, `high`,
+`xhigh`, `max`, and `ultra`; availability depends on the model.
+
+User templates take precedence over same-named built-ins. A user `test.yaml`
+**replaces** the built-in prompt, model defaults, and test-specific handoff;
+include your desired parent execution instructions in `handoff`. Built-in defaults
+are not implicitly merged. Removing the override restores the built-in template.
+An invalid override fails rather than silently falling back. Unknown fields,
+duplicate YAML keys, empty text, and simultaneous `.yaml`/`.yml` files for a name
+are rejected before a task is queued. `--template` and `--template-file` are mutually
+exclusive. YAML is safely parsed as configuration; no expressions or placeholders
+are evaluated. Requirements after `--` are appended literally to the prompt.
+
+LTC saves the resolved source path, revision, expanded prompt, model/effort, and
+handoff at submission. Editing or deleting the file afterward does not change an
+already submitted task or its callback instructions. Templates are user-authored
+instructions, not an enforcement boundary; inspect results before acting on them.
 
 ### Claude Code configuration
 

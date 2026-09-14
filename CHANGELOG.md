@@ -5,6 +5,10 @@
 - Promote durable `ltc agent codex|claude` execution from preview to stable.
 - Add `--template test`: an independent child authors requirement-based tests and
   a reviewable handoff; the parent executes tests and reports actual outcomes.
+- Add user YAML templates in `~/.config/ltc/templates/` and `--template-file`.
+  Configure prompts, per-agent model defaults and parent handoff instructions
+  without reinstalling. User templates can override built-ins; submission freezes
+  the template source and handoff alongside the expanded prompt and configuration.
 - Default Codex test authors to `gpt-5.6-luna` with `max` reasoning. Add child-only
   `--model` and Codex `--reasoning-effort` overrides. Claude inherits its own model
   unless overridden; generic agent commands retain existing defaults.

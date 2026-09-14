@@ -21,6 +21,9 @@ class TemplateContractTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.cwd = Path(self.tmp.name)
         self.queue = self.cwd / "test-queue"
+        template_env = mock.patch.dict(os.environ, {"LTC_TEMPLATE_DIR": str(self.cwd / "templates")})
+        template_env.start()
+        self.addCleanup(template_env.stop)
 
     def invoke(self, worker="codex", options=(), prompt="Reject negative amounts; accept zero."):
         argv = ["ltc", "agent", worker, "--cwd", str(self.cwd),

@@ -414,3 +414,25 @@ the tests and reports actual results. Child completion is not a passing-test res
 failed/empty/partial handoffs before execution; never weaken assertions merely to get green.
 The shared workspace is not isolated: these are prompt constraints, so inspect actual changes.
 Use `--dry-run` to inspect the expanded prompt and resolved model before submission.
+
+## User-defined child templates
+
+Load `--template NAME` from `${LTC_TEMPLATE_DIR}` when set, otherwise
+`${XDG_CONFIG_HOME:-~/.config}/ltc/templates/NAME.yaml` (or `.yml`), or use
+`--template-file PATH` for an explicit file. These options are mutually exclusive.
+A relative file path uses the submitting shell directory, not the child's `--cwd`.
+Template names/filename stems start with a letter or digit and otherwise use only
+letters, digits, underscores and hyphens. No reinstall is needed when files change.
+
+YAML requires `version: 1` (positive integer revision) and non-empty `prompt: |` text.
+Optional `codex: {model: gpt-5.6-luna, reasoning_effort: max}` and
+`claude: {model: sonnet}` set worker-specific defaults; CLI options take precedence.
+Optional `handoff: |` text instructs the parent on callback. No variable interpolation
+or code evaluation occurs. Unknown/duplicate fields or invalid values fail before
+submission. Use `--dry-run` to inspect source, prompt, defaults and handoff.
+
+A same-named user template replaces the entire built-in profile, including its
+callback guidance; a custom `test` must supply its own test handoff instructions.
+Do not silently fall back from a malformed user file to the built-in. Both `.yaml`
+and `.yml` existing for one name is an error. Submission freezes source, revision,
+prompt, model/effort and handoff, so edits do not alter queued work.
