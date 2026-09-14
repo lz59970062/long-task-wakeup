@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover - the durable run lifecycle is POSIX-onl
     fcntl = None
 
 from . import __version__
+from .templates import TEMPLATES, render_template
 
 DEFAULT_APPROVALS_REVIEWER = "auto_review"
 DEFAULT_APPROVAL_POLICY = "on-request"
@@ -2672,6 +2673,20 @@ def managed_task_prompt(
                 f"Agent result: {task.get('agent_result_path')}",
             ]
         )
+    if task.get("agent_template"):
+        details.extend([
+            f"Agent template: {task['agent_template']} v{task.get('agent_template_version')}",
+            f"Child model: {task.get('child_model') or 'CLI default'}",
+            f"Child reasoning effort: {task.get('child_reasoning_effort') or 'CLI default'}",
+        ])
+    if task.get("agent_template") == "test":
+        details.extend([
+            f"Test author process exit code: {task.get('exit_code', 'unknown')}",
+            "This is a test-authoring handoff, NOT a test execution result. Tests are expected to be unexecuted; verify the report.",
+            "First inspect the child exit status, result report and changed files. If the child failed, the report is empty, or delivery is blocked/partial, diagnose and resolve the incomplete handoff before running tests.",
+            "The parent agent must check requirement coverage and proposed commands, then execute the tests and report actual commands and results.",
+            "Distinguish implementation defects, test defects, environment failures and ambiguous requirements. Never weaken assertions merely to get green results; justify changes against the requirements.",
+        ])
     if outcome != "completed":
         reason = str(task.get("recovery_reason") or outcome)
         details.extend(
@@ -2710,6 +2725,9 @@ def managed_callback_request(task: dict[str, object], prompt: str) -> dict[str, 
         request["task_kind"] = "agent"
         request["agent_worker"] = task.get("agent_worker")
         request["agent_result_path"] = task.get("agent_result_path")
+        for key in ("agent_template", "agent_template_version", "child_model", "child_reasoning_effort"):
+            if key in task:
+                request[key] = task[key]
     return request
 
 
@@ -2993,12 +3011,20 @@ def agent_wrapped_command(
     result_path: Path,
     sandbox_mode: str,
     permission_mode: str,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> list[str]:
+    model_flags = ["--model", model] if model else []
+    if reasoning_effort and worker != "codex":
+        raise ValueError("--reasoning-effort is supported only for Codex children")
+    effort_flags = ["-c", f'model_reasoning_effort={json.dumps(reasoning_effort)}'] if reasoning_effort else []
     if worker == "codex":
         return [
             codex_command(),
             "exec",
             "--ephemeral",
+            *model_flags,
+            *effort_flags,
             "-C",
             cwd,
             "-s",
@@ -3013,6 +3039,7 @@ def agent_wrapped_command(
             claude_command(),
             "-p",
             "--no-session-persistence",
+            *model_flags,
             "--permission-mode",
             permission_mode,
             "--output-format",
@@ -3057,6 +3084,8 @@ def submit_managed_run(args: argparse.Namespace) -> int:
             result_path=agent_result_path,
             sandbox_mode=str(args.sandbox_mode),
             permission_mode=str(args.permission_mode),
+            model=getattr(args, "child_model", None),
+            reasoning_effort=getattr(args, "child_reasoning_effort", None),
         )
     environment = {
         name: value
@@ -3096,6 +3125,10 @@ def submit_managed_run(args: argparse.Namespace) -> int:
             {
                 "task_kind": "agent",
                 "agent_worker": str(args.agent_worker),
+                "agent_template": getattr(args, "template", None),
+                "agent_template_version": getattr(args, "template_version", None),
+                "child_model": getattr(args, "child_model", None),
+                "child_reasoning_effort": getattr(args, "child_reasoning_effort", None),
                 "agent_prompt_path": str(agent_prompt_path),
                 "agent_result_path": str(agent_result_path),
             }
@@ -3270,6 +3303,24 @@ def run(args: argparse.Namespace) -> int:
 
 def agent(args: argparse.Namespace) -> int:
     args.agent_prompt_text = agent_prompt_text(list(args.agent_prompt))
+    args.template = getattr(args, "template", None)
+    args.child_model = getattr(args, "child_model", None)
+    args.child_reasoning_effort = getattr(args, "child_reasoning_effort", None)
+    if not args.agent_prompt_text.strip():
+        raise SystemExit("agent mode requires non-empty task requirements")
+    if args.child_model is not None and not args.child_model.strip():
+        raise SystemExit("--model must not be empty")
+    if args.child_reasoning_effort and args.agent_worker != "codex":
+        raise SystemExit("--reasoning-effort is supported only for Codex children")
+    if args.template:
+        if args.template not in TEMPLATES:
+            raise SystemExit(f"unknown agent template {args.template!r}")
+        profile = TEMPLATES[args.template]
+        args.template_version = profile["version"]
+        if args.agent_worker == "codex":
+            args.child_model = args.child_model or profile["codex_model"]
+            args.child_reasoning_effort = args.child_reasoning_effort or profile["codex_effort"]
+        args.agent_prompt_text = render_template(args.template, args.agent_prompt_text)
     args.task_kind = "agent"
     args.command = args.command or f"ltc agent {args.agent_worker}"
     args.wrapped_command = []
@@ -3282,6 +3333,10 @@ def agent(args: argparse.Namespace) -> int:
                     f"Task: {args.task}",
                     f"Working directory: {os.path.abspath(args.cwd)}",
                     f"Child agent: {agent_display_name(args.agent_worker)}",
+                    f"Template: {args.template or 'none'} (version {getattr(args, 'template_version', None)})",
+                    f"Child model: {args.child_model or 'CLI default'}",
+                    f"Child reasoning effort: {args.child_reasoning_effort or 'CLI default'}",
+                    f"Expanded prompt:\n{args.agent_prompt_text}",
                     "Execution: daemon submission -> GNU screen -> LTC worker -> child agent",
                     "No task record was written and no child agent was started.",
                 ]
@@ -4387,11 +4442,14 @@ def main() -> int:
     add_common_flags(run_parser)
     run_parser.add_argument("wrapped_command", nargs=argparse.REMAINDER)
 
-    agent_parser = sub.add_parser("agent", help="Preview: run a durable fresh Codex or Claude Code child agent")
+    agent_parser = sub.add_parser("agent", help="Run a durable fresh Codex or Claude Code child agent")
     agent_sub = agent_parser.add_subparsers(dest="agent_worker", required=True)
     for worker in AGENT_NAMES:
         child_parser = agent_sub.add_parser(worker, help=f"Run a fresh {agent_display_name(worker)} child agent")
         add_common_flags(child_parser)
+        child_parser.add_argument("--template", choices=sorted(TEMPLATES), help="Preset child task instructions (test: independent test authoring)")
+        child_parser.add_argument("--model", dest="child_model", help="Child model only; overrides template default")
+        child_parser.add_argument("--reasoning-effort", dest="child_reasoning_effort", choices=["minimal", "low", "medium", "high", "xhigh", "max", "ultra"], help="Codex child reasoning effort; model must support it")
         child_parser.add_argument("agent_prompt", nargs=argparse.REMAINDER)
 
     screen_worker_parser = sub.add_parser("_screen-worker", help=argparse.SUPPRESS)

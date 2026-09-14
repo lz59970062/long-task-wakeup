@@ -15,7 +15,7 @@ There are three public workflows:
 - `ltc run -- <command>` submits a new long-running task. The daemon launches it in
   GNU screen.
 - `ltc agent codex|claude -- <prompt>` submits a fresh child agent through the same durable
-  lifecycle. This mode is a preview in `0.6.5a1`.
+  lifecycle. Available since `0.6.5`.
 - `ltc done ...` queues a completion callback for work already owned by screen, tmux,
   Slurm, another scheduler, or an existing script.
 
@@ -108,7 +108,7 @@ tail -f ~/.codex/long-task-wakeup/tasks/<task-id>/attempt-1.log
 
 Detaching with `Ctrl-a d` leaves the task running.
 
-## Agent: submit a durable fresh child agent (preview)
+## Agent: submit a durable fresh child agent
 
 Use `ltc agent` when a fresh Codex or Claude Code process should perform an independent task and
 the work needs screen ownership, durable artifacts, or a completion callback. For short work that
@@ -398,3 +398,19 @@ ltc cancel --queue-dir <queue-dir> --all --message "no longer needed"
 ```
 
 `cancel` does not kill a screen-owned task.
+
+## Independent test authoring preset
+
+Use `ltc agent codex --template test --task "write independent tests" -- "Requirements and specification paths"`
+when a separate agent should author tests for the parent to execute. The default child is
+`gpt-5.6-luna` with `max` reasoning; override using `--model` and `--reasoning-effort`.
+These flags affect the child only; `--agent` continues to select the parent callback agent.
+Claude supports the template and `--model`, inherits its own model by default, and rejects
+`--reasoning-effort`. Put all flags before `--`; provide concrete requirements after it.
+
+The child writes requirement-derived tests and a handoff, without running tests or modifying
+production code. The parent reviews the changed files, requirements and commands, then runs
+the tests and reports actual results. Child completion is not a passing-test result. Diagnose
+failed/empty/partial handoffs before execution; never weaken assertions merely to get green.
+The shared workspace is not isolated: these are prompt constraints, so inspect actual changes.
+Use `--dry-run` to inspect the expanded prompt and resolved model before submission.

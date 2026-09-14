@@ -15,7 +15,7 @@ There are three normal entry points:
 
 - **Run** — `ltc run -- <command>` submits a new task. The daemon starts it in GNU
   screen, so it is not owned by the agent turn.
-- **Agent (preview)** — `ltc agent codex|claude -- <prompt>` starts a fresh child agent with the
+- **Agent** — `ltc agent codex|claude -- <prompt>` starts a fresh child agent with the
   same durable ownership and callback lifecycle.
 - **Done** — `ltc done ...` reports completion of a task that is already owned by
   screen, tmux, Slurm, another scheduler, or an existing script.
@@ -115,7 +115,7 @@ tail -f ~/.codex/long-task-wakeup/tasks/<task-id>/attempt-1.log
 
 Detach from screen with `Ctrl-a d`; detaching does not stop the task.
 
-## Agent: submit a fresh child agent (0.6.5a1 preview)
+## Agent: submit a fresh child agent (0.6.5)
 
 Agent mode follows the same public design as `run`: LTC options come first, and `--` separates
 them from the actual child task.
@@ -141,6 +141,45 @@ For Claude Code, LTC carries the submission-time configuration, authentication, 
 environment into the child while removing `CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`, and
 `CLAUDECODE`. Those values identify a parent conversation or nested Claude process and must not
 become the identity of the fresh child. Agent mode does not enable Claude's `--bare` mode.
+
+## Preset child tasks (0.6.5)
+
+```bash
+ltc agent codex --template test --cwd "$PWD" \
+  --task "write independent parser tests" \
+  -- "Use docs/parser-contract.md to test parser.py, including invalid input and boundaries."
+
+# Override the child model and its reasoning effort:
+ltc agent codex --template test --model gpt-5.6-luna --reasoning-effort max \
+  --task "write parser tests" -- "Test the documented parser contract."
+```
+
+`--template test` expands the bundled independent test-authoring prompt. Supply concrete
+requirements or specification paths after `--`; a bare `test` in the prompt is ordinary text.
+All LTC flags must precede `--`. Codex defaults to `gpt-5.6-luna` with reasoning effort `max`;
+explicit child options override these defaults. The selected model must be available to your
+CLI/account and support the selected effort; LTC does not silently substitute another model.
+`--model` also works for Claude, which otherwise inherits its CLI model configuration.
+`--reasoning-effort` is Codex-only. Without a template or explicit model options, existing
+agent commands retain their CLI defaults. `--agent` still selects the **parent callback** agent.
+
+The child derives expected behavior from requirements before examining implementation, writes
+tests and test-only fixtures, and returns a requirement-to-test mapping, plausible defects
+caught, changed files, exact execution commands, and gaps. It must not execute tests or modify
+production code. Missing contracts must be reported, rather than inferred from current outputs.
+The parent reviews the handoff, executes the tests, and diagnoses failures without weakening
+assertions simply to obtain passing results. Child exit zero does not mean tests passed.
+
+These are prompt-level responsibilities in a shared workspace, not enforced filesystem or
+execution isolation. Avoid concurrent edits to the same files. Review the child's actual diff
+and report before execution. A failed, empty, blocked, or partial handoff requires diagnosis.
+
+Use `--dry-run` to inspect the expanded prompt and resolved profile without launching a child.
+LTC freezes the template name/version, model/effort, command, and expanded prompt at submission;
+queued tasks keep that snapshot across upgrades. Inherited CLI defaults are not resolved by
+LTC and can change before execution; specify a model/effort to pin them. The editable source template is
+`src/long_task_callback/templates/test.md`; new templates can be registered in `templates.py`.
+
 
 ### Claude Code configuration
 
@@ -395,7 +434,7 @@ screen -r ltc-<task-id>
 tail -f ~/.codex/long-task-wakeup/tasks/<task-id>/attempt-1.log
 ```
 
-`0.6.5a1` 的 Agent 预览模式沿用 `run` 的命令语言：
+`0.6.5` 的 Agent 模式沿用 `run` 的命令语言：
 
 ```bash
 ltc agent claude --cwd "$PWD" --task "review parser" \

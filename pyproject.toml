@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-long-task-callback"
-version = "0.6.5a1"
+version = "0.6.5"
 description = "Long Task Callback: explicit callback CLI for waking a Codex or Claude Code session after a long-running task finishes"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -22,4 +22,4 @@ codex-long-task-wakeup = "long_task_callback.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-long_task_callback = ["skill/SKILL.md", "skill/agents/openai.yaml"]
+long_task_callback = ["skill/SKILL.md", "skill/agents/openai.yaml", "templates/*.md"]
