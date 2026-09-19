@@ -3079,9 +3079,20 @@ def submit_managed_run(args: argparse.Namespace) -> int:
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"ltc: refusing to submit task: {exc}", file=sys.stderr)
         return 125
-    task_id = uuid.uuid4().hex
     target, target_source = bind_target(args)
-    task_directory = managed_task_dir(root, task_id)
+    try:
+        while True:
+            task_id = secrets.token_hex(4)
+            task_directory = managed_task_dir(root, task_id)
+            try:
+                # Reserve atomically so concurrent submissions cannot share an ID.
+                task_directory.mkdir(mode=0o700, parents=True, exist_ok=False)
+            except FileExistsError:
+                continue
+            break
+    except OSError as exc:
+        print(f"ltc: refusing to submit task because its durable record could not be written: {exc}", file=sys.stderr)
+        return 125
     environment_path = task_directory / "environment.json"
     log_path = task_directory / "attempt-1.log"
     task_kind = str(getattr(args, "task_kind", "command"))
@@ -3149,7 +3160,6 @@ def submit_managed_run(args: argparse.Namespace) -> int:
             }
         )
     try:
-        task_directory.mkdir(parents=True, exist_ok=False)
         os.chmod(task_directory, 0o700)
         if agent_prompt_path is not None:
             write_private_text(agent_prompt_path, str(args.agent_prompt_text))

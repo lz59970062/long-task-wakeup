@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Use 8-character random hexadecimal IDs for new managed tasks, with atomic
+  directory reservation and retry on collision. Existing task IDs remain valid.
+
 ## 0.6.5 — 2026-09-14
 
 - Fix Codex child startup on CLI 0.153.4: use explicit automatic-review and
