@@ -5,3 +5,6 @@ build/
 dist/
 .venv/
 .pytest_cache/
+
+# Local review discussions and reports
+.committee-reviews/
