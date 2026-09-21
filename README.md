@@ -142,7 +142,7 @@ environment into the child while removing `CODEX_THREAD_ID`, `CLAUDE_CODE_SESSIO
 `CLAUDECODE`. Those values identify a parent conversation or nested Claude process and must not
 become the identity of the fresh child. Agent mode does not enable Claude's `--bare` mode.
 
-## Callback reminder intervals
+## Callback reminder intervals (0.6.6)
 
 Repeated standard instructions and the user callback hook have separate intervals:
 

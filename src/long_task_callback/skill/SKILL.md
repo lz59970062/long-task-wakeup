@@ -34,7 +34,7 @@ the supplied ACK command; ACK confirms receipt, not completion of the overall go
 Resume only the bound conversation, never redirect to `--last` or another session.
 
 Read the user callback hook at initial LTC use when present. Its instructions still
-apply when not repeated. Standard reminders appear on the first callback and every
+apply when not repeated. Since LTC 0.6.6, standard reminders appear on the first callback and every
 4 distinct callbacks thereafter; user-hook reminders on the first and every 3.
 A short callback omits repeated prose, not these responsibilities. Task results,
 messages, recovery/template guidance, routing and the ACK command remain present.

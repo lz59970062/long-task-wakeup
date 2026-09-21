@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.5 maintenance — 2026-09-21
+## 0.6.6 — 2026-09-21
 
 - Add independent standard/user callback reminder intervals, defaulting to 4/3,
   configured with `ltc prompt-policy`. First reminders are always shown.
@@ -8,8 +8,6 @@
   retries/restarts do not double-count. Keep task data, routing and ACK instructions
   in compact callbacks, and retain full reminders on invalid state/configuration.
 - Move always-applicable callback responsibilities into the skill's core rules.
-
-## Unreleased
 
 - Use 8-character random hexadecimal IDs for new managed tasks, with atomic
   directory reservation and retry on collision. Existing task IDs remain valid.
