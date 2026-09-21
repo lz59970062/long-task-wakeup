@@ -1,6 +1,6 @@
 ---
 name: long-task-callback
-description: Explicit callback workflow for long-running agent tasks. Use the daemon handoff whenever Codex or Claude Code launches or edits a long-running command, training run, benchmark, test suite, build, deployment, Slurm job, data job, or script and should arrange for that task to resume the same agent session when it finishes.
+description: Explicit callback workflow for long-running agent tasks. Use the daemon handoff whenever Codex or Claude Code launches or edits a long-running command, training run, benchmark, test suite, build, deployment, Slurm job, data job, or script and should arrange for that task to resume the same agent session when it finishes. On callback, inspect results, ACK receipt in the bound session, and continue the original goal; periodic reminder text may be omitted but these duties still apply.
 ---
 
 # Long Task Callback
@@ -24,6 +24,27 @@ written commands; old scripts may still pass it as a hidden no-op compatibility 
 invent another public launch flag or a direct-mode flag. Do not use a direct recursive
 `codex exec resume` or `claude -p --resume` call from an agent tool sandbox. Do not let callback
 behavior change the task's original exit code unless the user explicitly requests `--strict`.
+
+## Callback rules that always apply
+
+On every callback, inspect the result and relevant artifacts, decide whether the
+original goal is complete, blocked, or needs another action, and continue when the
+next step is clear and safe. Inspect existing work before relaunching it. Then run
+the supplied ACK command; ACK confirms receipt, not completion of the overall goal.
+Resume only the bound conversation, never redirect to `--last` or another session.
+
+Read the user callback hook at initial LTC use when present. Its instructions still
+apply when not repeated. Standard reminders appear on the first callback and every
+4 distinct callbacks thereafter; user-hook reminders on the first and every 3.
+A short callback omits repeated prose, not these responsibilities. Task results,
+messages, recovery/template guidance, routing and the ACK command remain present.
+
+Configure with `ltc prompt-policy --system-every 4 --user-every 3`; no options shows
+the effective policy. `1` means every callback. The file is
+`${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-prompts.yaml`. Counters are per
+queue, agent and bound session, allocated at first delivery attempt. Retries reuse
+the same sequence and reminder decisions across restarts. Queuing/dry-run does not
+count. An unsafe `--last` target keeps full reminders because its identity is unknown.
 
 ## Ownership invariant
 
@@ -78,9 +99,9 @@ ltc setup --force --enable --now
 `setup` installs this skill for Codex and Claude Code and installs the callback daemon. It refuses
 to proceed when screen cannot be found. It creates the user-editable fixed prompt hook at
 `${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-hook.md` without overwriting existing content.
-The daemon reloads that UTF-8 file before every callback delivery attempt, so changes apply without
-a restart. Non-empty content is appended under `[long-task-callback-user-hook]`; hook read failures
-must warn and continue with the original callback prompt.
+The delivery worker reads that UTF-8 file on attempts whose saved user-reminder decision is
+due, so edits apply on the next due attempt without a restart. Non-empty content is appended
+under `[long-task-callback-user-hook]`; hook read failures warn and continue with the callback.
 
 `setup` also checks for the Claude Code CLI and runs `claude auth status` with output suppressed.
 This check is advisory and must not block Codex-only installation or print credentials/account

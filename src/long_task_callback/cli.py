@@ -71,6 +71,13 @@ TARGET_LOCK_DIR_ENV = "CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR"
 PROXY_ENV_FILE_ENV = "CODEX_LONG_TASK_WAKEUP_PROXY_ENV_FILE"
 CALLBACK_HOOK_FILE_NAME = "callback-hook.md"
 CALLBACK_HOOK_SECTION = "[long-task-callback-user-hook]"
+CALLBACK_PROMPT_POLICY_FILE_NAME = "callback-prompts.yaml"
+DEFAULT_CALLBACK_PROMPT_POLICY = {"system_every": 4, "user_every": 3}
+STANDARD_CALLBACK_GUIDANCE = "\n".join([
+    "Please inspect the result and any relevant artifacts.",
+    "Decide whether the original goal is complete, blocked, or needs another action.",
+    "Continue if the next step is clear and safe; otherwise ask the user one concise question.",
+])
 DESKTOP_APP_SERVER_ENV = "CODEX_LONG_TASK_WAKEUP_DESKTOP_APP_SERVER"
 APP_SERVER_SOCKET_ENV = "CODEX_LONG_TASK_WAKEUP_APP_SERVER_SOCKET"
 ALLOW_APP_SERVER_SOCKET_OVERRIDE_ENV = "CODEX_LONG_TASK_WAKEUP_ALLOW_APP_SERVER_SOCKET_OVERRIDE"
@@ -122,14 +129,7 @@ def build_prompt(
     if args.message:
         lines.extend(["", "Callback message:", args.message])
 
-    lines.extend(
-        [
-            "",
-            "Please inspect the result and any relevant artifacts.",
-            "Decide whether the original goal is complete, blocked, or needs another action.",
-            "Continue if the next step is clear and safe; otherwise ask the user one concise question.",
-        ]
-    )
+    lines.extend(["", STANDARD_CALLBACK_GUIDANCE])
     if acknowledgement:
         lines.extend(["", build_acknowledgement_text(acknowledgement, agent=resolve_agent(args))])
     return "\n".join(lines)
@@ -498,6 +498,21 @@ def prepare_request_for_queue(root: Path, request: dict[str, object], prompt: st
     )
     routed_prompt = attach_routing_text(prompt, request)
     request["prompt"] = f"{routed_prompt}\n\n{build_acknowledgement_text(acknowledgement, agent=request_agent(request))}"
+    # Only remove the known generated wrapper, never task-specific messages,
+    # template handoffs, recovery instructions, or routing constraints.
+    compact = prompt
+    for agent in AGENT_NAMES:
+        prefix = f"[long-task-callback]\nA long-running task explicitly called back into {agent_display_name(agent)}.\n"
+        if compact.startswith(prefix):
+            compact = "[long-task-callback]\n" + compact[len(prefix):]
+            suffix = "\n\n" + STANDARD_CALLBACK_GUIDANCE
+            if compact.endswith(suffix):
+                compact = compact[:-len(suffix)]
+            break
+    request["prompt_compact"] = (
+        f"{attach_routing_text(compact, request)}\n\n"
+        f"Callback acknowledgement (after inspecting the result):\n{acknowledgement}"
+    )
     return request
 
 
@@ -1541,10 +1556,10 @@ def delivery_worker_main() -> int:
     payload = json.load(sys.stdin)
     command = payload["command"]
     prompt = str(payload["prompt"])
-    hook_path = payload.get("callback_hook_path")
-    if isinstance(hook_path, str) and hook_path:
-        prompt = attach_callback_hook(prompt, Path(hook_path))
-        payload["prompt"] = prompt
+    # Recheck here as well as in the parent: an ACK/cancel may arrive while the
+    # worker starts. A callback already skipped must not consume a sequence.
+    if not (Path(str(payload["ack_path"])).exists() or Path(str(payload["canceled_path"])).exists()):
+        prompt = select_delivery_prompt(payload)
     timeout = max(1.0, float(payload["timeout"]))
     result: dict[str, object] = {"returncode": 127}
     process: subprocess.Popen[str] | None = None
@@ -3528,6 +3543,143 @@ def callback_hook_path() -> Path:
     return daemon_state_dir() / CALLBACK_HOOK_FILE_NAME
 
 
+def read_callback_prompt_policy(path: Path | None = None) -> dict[str, int]:
+    source = path or daemon_state_dir() / CALLBACK_PROMPT_POLICY_FILE_NAME
+    try:
+        data = yaml.safe_load(source.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return dict(DEFAULT_CALLBACK_PROMPT_POLICY)
+    if not isinstance(data, dict) or any(key not in DEFAULT_CALLBACK_PROMPT_POLICY for key in data):
+        raise ValueError("callback prompt policy accepts only system_every and user_every")
+    policy = dict(DEFAULT_CALLBACK_PROMPT_POLICY)
+    policy.update(data)
+    if any(type(value) is not int or value < 1 for value in policy.values()):
+        raise ValueError("callback prompt intervals must be positive integers (1 means every callback)")
+    return policy
+
+
+def positive_prompt_interval(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("interval must be a positive integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("interval must be a positive integer")
+    return parsed
+
+
+def callback_prompt_policy(args: argparse.Namespace) -> int:
+    path = daemon_state_dir() / CALLBACK_PROMPT_POLICY_FILE_NAME
+    updates = {key: getattr(args, key, None) for key in DEFAULT_CALLBACK_PROMPT_POLICY}
+    updates = {key: value for key, value in updates.items() if value is not None}
+    lock = None
+    try:
+        if updates:
+            if any(type(value) is not int or value < 1 for value in updates.values()):
+                raise ValueError("callback prompt intervals must be positive integers")
+            lock = acquire_path_lock(path.with_suffix(".lock"), blocking=True)
+        policy = read_callback_prompt_policy(path)
+        if updates:
+            policy.update(updates)
+            write_private_text(path, yaml.safe_dump(policy, sort_keys=True))
+        print(f"Callback prompt policy: {path}")
+        print(yaml.safe_dump(policy, sort_keys=True), end="")
+        return 0
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        print(f"ltc: could not configure callback prompts: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        if lock is not None:
+            release_owner_lock(lock, remove=False)
+
+
+def allocate_prompt_cadence(
+    root: Path, request: dict[str, object], policy_path: Path | None = None,
+) -> dict[str, object] | None:
+    """Allocate once per callback at first delivery, under an atomic ledger lock.
+
+    The ledger stores both the sequence and decisions in one atomic replacement,
+    so a crash/retry cannot consume a second ordinal or change reminder decisions.
+    """
+    target = request.get("target")
+    request_id = request.get("id")
+    if (not isinstance(target, dict) or target.get("kind") != "session"
+            or not isinstance(target.get("value"), str) or not target["value"]
+            or not isinstance(request_id, str) or not request_id):
+        return None  # --last cannot safely share a conversation counter.
+    agent = request_agent(request)
+    session = target["value"]
+    digest = hashlib.sha256(json.dumps([agent, session]).encode("utf-8")).hexdigest()
+    path = root / "prompt-counters" / f"{digest}.json"
+    lock = None
+    try:
+        lock = acquire_owner_lock(root, f"prompt-cadence-{digest}", blocking=True)
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            state = {"version": 1, "agent": agent, "session": session, "count": 0, "callbacks": {}}
+        if (not isinstance(state, dict) or state.get("version") != 1
+                or state.get("agent") != agent or state.get("session") != session
+                or type(state.get("count")) is not int or state["count"] < 0
+                or not isinstance(state.get("callbacks"), dict)):
+            raise ValueError(f"invalid callback prompt counter {path}")
+        callbacks = state["callbacks"]
+        sequences = set()
+        for allocation in callbacks.values():
+            if (not isinstance(allocation, dict)
+                    or any(type(allocation.get(key)) is not int or allocation[key] < 1
+                           for key in ("sequence", "system_every", "user_every"))):
+                raise ValueError(f"invalid callback prompt allocation in {path}")
+            if allocation["sequence"] > state["count"]:
+                raise ValueError(f"invalid callback prompt sequence in {path}")
+            for category in ("system", "user"):
+                due = (allocation["sequence"] - 1) % allocation[f"{category}_every"] == 0
+                if type(allocation.get(f"{category}_due")) is not bool or allocation[f"{category}_due"] != due:
+                    raise ValueError(f"invalid callback prompt decision in {path}")
+            sequences.add(allocation["sequence"])
+        if len(callbacks) != state["count"] or len(sequences) != state["count"]:
+            raise ValueError(f"inconsistent callback prompt counter {path}")
+        if request_id in callbacks:
+            return dict(callbacks[request_id])
+        policy = read_callback_prompt_policy(policy_path)
+        sequence = state["count"] + 1
+        allocation = {
+            "sequence": sequence, **policy,
+            "system_due": (sequence - 1) % policy["system_every"] == 0,
+            "user_due": (sequence - 1) % policy["user_every"] == 0,
+        }
+        state["count"] = sequence
+        callbacks[request_id] = allocation
+        write_request(path, state)
+        return allocation
+    except (OSError, ValueError, RuntimeError, yaml.YAMLError) as exc:
+        print(f"ltc: prompt cadence unavailable; keeping full reminders: {exc}", file=sys.stderr)
+        return None
+    finally:
+        if lock is not None:
+            release_owner_lock(lock, remove=False)
+
+
+def select_delivery_prompt(payload: dict[str, object]) -> str:
+    prompt = str(payload["prompt"])
+    request = payload.get("request")
+    queue_root = payload.get("queue_dir")
+    hook_path = payload.get("callback_hook_path")
+    cadence = None
+    if isinstance(request, dict) and isinstance(queue_root, str) and queue_root:
+        policy_path = Path(hook_path).parent / CALLBACK_PROMPT_POLICY_FILE_NAME if isinstance(hook_path, str) and hook_path else None
+        cadence = allocate_prompt_cadence(Path(queue_root), request, policy_path)
+    if cadence is not None:
+        if not cadence["system_due"] and isinstance(request.get("prompt_compact"), str):
+            prompt = request["prompt_compact"]
+        prompt += (f"\n\nReminder cadence: callback #{cadence['sequence']}; "
+                   f"system every {cadence['system_every']}; user every {cadence['user_every']}.")
+    if (cadence is None or cadence["user_due"]) and isinstance(hook_path, str) and hook_path:
+        prompt = attach_callback_hook(prompt, Path(hook_path))
+    payload["prompt"] = prompt  # Both Desktop and CLI transports use this choice.
+    return prompt
+
+
 def ensure_callback_hook_file() -> Path:
     path = callback_hook_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -4472,6 +4624,10 @@ def main() -> int:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="mode", required=True)
 
+    prompt_policy_parser = sub.add_parser("prompt-policy", help="Show or set callback reminder intervals")
+    prompt_policy_parser.add_argument("--system-every", type=positive_prompt_interval, help="Show standard reminders every N distinct callbacks (default: 4)")
+    prompt_policy_parser.add_argument("--user-every", type=positive_prompt_interval, help="Show callback-hook reminders every N distinct callbacks (default: 3)")
+
     done_parser = sub.add_parser("done", help="Queue a callback after an externally managed task finishes")
     add_common_flags(done_parser)
 
@@ -4650,6 +4806,8 @@ def main() -> int:
         return install_skill(args)
     if args.mode == "setup":
         return setup(args)
+    if args.mode == "prompt-policy":
+        return callback_prompt_policy(args)
     if args.mode == "ack":
         return ack(args)
     if args.mode == "goal":

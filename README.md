@@ -71,8 +71,8 @@ ltc setup --force --enable --now
 `setup` installs the bundled skill for Codex and Claude Code and installs the callback daemon as a
 user service. It also creates an empty, user-editable callback prompt hook at
 `${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-hook.md`. Existing hook content is never
-overwritten, including by `setup --force`. The file is read again immediately before every
-delivery attempt, so edits apply to the next callback without restarting the daemon. Non-empty
+overwritten, including by `setup --force`. The file is read again before each due user-reminder
+attempt, so edits apply to the next due callback without restarting the daemon. Non-empty
 content is appended to the callback prompt under `[long-task-callback-user-hook]`; a missing,
 empty, or temporarily unreadable file does not block callback delivery.
 
@@ -141,6 +141,52 @@ For Claude Code, LTC carries the submission-time configuration, authentication, 
 environment into the child while removing `CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`, and
 `CLAUDECODE`. Those values identify a parent conversation or nested Claude process and must not
 become the identity of the fresh child. Agent mode does not enable Claude's `--bare` mode.
+
+## Callback reminder intervals
+
+Repeated standard instructions and the user callback hook have separate intervals:
+
+```bash
+ltc prompt-policy --system-every 4 --user-every 3
+ltc prompt-policy                       # show effective settings without modifying state
+ltc prompt-policy --user-every 1        # change just the user interval; keep the other
+```
+
+Both values must be positive integers; `1` restores reminders on every callback.
+Settings are saved in `${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-prompts.yaml`:
+
+```yaml
+system_every: 4
+user_every: 3
+```
+
+Each queue counts separately for each agent and bound session. The first callback
+shows both reminders. With the defaults, standard reminders appear at #1, #5, #9,
+… and user reminders at #1, #4, #7, … . A compact cadence line shows the callback
+number and intervals. Goal reminder callbacks use the same conversation counter.
+The number counts distinct callbacks reaching their first
+delivery attempt, not successful ACKs; a failed delivery can consume one number.
+Retries and daemon restarts reuse the same stored number and decisions. Queuing,
+canceling before delivery, and dry-run do not consume numbers. Changing settings
+applies to new allocations; retrying an old callback retains its original schedule.
+
+Only repeated generic prose is reduced: the introductory sentence, generic
+inspect/decide/continue reminder and verbose ACK explanation. Task results, messages,
+logs, recovery instructions, template handoffs, routing restrictions and the exact
+ACK command remain on every callback. These responsibilities also appear in the
+skill's core rules and still apply when their reminder prose is omitted.
+
+User text in `callback-hook.md` is appended only on due attempts, and is reread on
+each such attempt, including retries. Editing it needs no restart. An empty hook
+adds no text. Policy changes likewise need no restart once the new delivery worker
+is installed. Existing queued callbacks without a compact prompt keep their full
+standard text; their user hook can still follow the new cadence. `--last` always
+keeps full reminders because its actual conversation identity is not pinned.
+
+The counter and per-callback allocations are atomically saved together under
+`<queue>/prompt-counters/`, with a separate file lock. If configuration or counter
+state cannot be read/validated/written, LTC warns and sends full reminders instead
+of suppressing them or blocking the result. It does not overwrite corrupt history.
 
 ## Preset child tasks (0.6.5)
 
@@ -468,8 +514,8 @@ LTC 等待一秒；若 screen 在握手前消失，则记录失败并按指数�
 
 `ltc setup` 会创建用户可编辑的固定提示词钩子
 `${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-hook.md`。该文件已有内容时不会被覆盖，
-即使使用 `setup --force` 也是如此。每次实际投递（包括重试）前都会重新读取文件，因此修改后
-无需重启 daemon，下一次 callback 就会生效。非空内容会以
+即使使用 `setup --force` 也是如此。默认首次及其后每 3 条回调显示一次用户提示，
+到期投递（包括这条回调的重试）会重新读取文件，修改后无需重启 daemon。非空内容会以
 `[long-task-callback-user-hook]` 段落追加到 callback 提示词；文件缺失、为空或暂时不可读时，
 原 callback 仍会正常投递。
 
