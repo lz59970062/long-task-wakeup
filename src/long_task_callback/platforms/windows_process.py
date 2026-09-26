@@ -322,6 +322,12 @@ def _forwarding_command(path: Path, content: str, env: MutableMapping[str, str])
         position = token.end()
     if not arguments or not arguments[0] or prefix[position:].strip():
         return None
+    # Bare cmd builtins are not executable forwarding targets, even if a
+    # same-named Unix utility happens to be present on the Windows PATH.
+    if arguments[0].lower() in {"echo", "set", "cd", "chdir", "dir", "exit", "call",
+                                "start", "if", "for", "goto", "rem", "type", "copy",
+                                "del", "erase", "move", "ren", "rename", "pause"}:
+        return None
     for key, value in assignments:
         value = re.sub(r"%([^%]+)%", lambda item: _environment_value(env, item.group(1)), value)
         existing = next((name for name in env if name.upper() == key.upper()), key)

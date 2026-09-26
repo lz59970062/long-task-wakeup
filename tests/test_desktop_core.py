@@ -69,9 +69,12 @@ class CoreUnitTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {core.REAL_CODEX_ENV: "relative.exe"}):
             with self.assertRaises(core.RelayError):
                 core.real_core()
-        with mock.patch.dict(os.environ, {core.REAL_CODEX_ENV: str(Path("ltc-desktop-core.exe").resolve())}), mock.patch.object(Path, "is_file", return_value=True):
-            with self.assertRaisesRegex(core.RelayError, "wrapper itself"):
-                core.real_core()
+        with tempfile.TemporaryDirectory() as directory:
+            wrapper = Path(directory).resolve() / "ltc-desktop-core.exe"
+            wrapper.touch()
+            with mock.patch.dict(os.environ, {core.REAL_CODEX_ENV: str(wrapper)}):
+                with self.assertRaisesRegex(core.RelayError, "wrapper itself"):
+                    core.real_core()
 
     def test_fragmented_text_handles_ping_and_preserves_partial_reads(self):
         client, server = socket.socketpair()

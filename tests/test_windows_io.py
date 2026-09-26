@@ -22,7 +22,7 @@ class WindowsIOTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
 
-    def acl(self, path: Path) -> str:
+    def acl(self, path: Path | None, *, sid: str | None = None) -> str:
         advapi = ctypes.WinDLL("advapi32", use_last_error=True)
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         advapi.GetNamedSecurityInfoW.argtypes = [wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD,
@@ -35,10 +35,18 @@ class WindowsIOTests(unittest.TestCase):
         kernel.LocalFree.argtypes = [ctypes.c_void_p]
         kernel.LocalFree.restype = ctypes.c_void_p
         descriptor, text = ctypes.c_void_p(), wintypes.LPWSTR()
-        error = advapi.GetNamedSecurityInfoW(str(path), 1, 4, None, None, None, None,
-                                            ctypes.byref(descriptor))
-        if error:
-            raise ctypes.WinError(error)
+        if sid is None:
+            error = advapi.GetNamedSecurityInfoW(str(path), 1, 4, None, None, None, None,
+                                                ctypes.byref(descriptor))
+            if error:
+                raise ctypes.WinError(error)
+        else:
+            convert = advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW
+            convert.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
+                                ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+            convert.restype = wintypes.BOOL
+            if not convert(f"D:P(A;;FA;;;{sid})", 1, ctypes.byref(descriptor), None):
+                raise ctypes.WinError(ctypes.get_last_error())
         try:
             if not advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
                     descriptor, 1, 4, ctypes.byref(text), None):
@@ -54,7 +62,10 @@ class WindowsIOTests(unittest.TestCase):
         self.assertTrue(sddl.startswith("D:P"), sddl)
         self.assertEqual(sddl.count("("), 2, sddl)
         self.assertIn(";;;SY)", sddl)
-        self.assertIn(f";;;{windows_io.current_user_sid()})", sddl)
+        # Windows renders the built-in Administrator SID as LA on CI runners.
+        # Obtain its canonical spelling from the same native conversion API.
+        expected = self.acl(None, sid=windows_io.current_user_sid()).split(";;;")[1]
+        self.assertIn(f";;;{expected}", sddl)
 
     def start_child(self, code: str, *args: str, **kwargs) -> subprocess.Popen:
         environment = dict(os.environ)

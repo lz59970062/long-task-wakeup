@@ -68,7 +68,7 @@ class HandshakeTests(unittest.TestCase):
             server.close()
         client, server = socket.socketpair()
         try:
-            with self.assertRaises((TimeoutError, bridge.BridgeError)):
+            with self.assertRaisesRegex(bridge.BridgeError, "timed out"):
                 bridge.read_http_header(server, 0.03)
         finally:
             client.close()
@@ -228,6 +228,8 @@ class NativeBridgeTests(unittest.TestCase):
         self.shim = self.root / "fake codex.cmd"
         self.shim.write_text(f'@echo off\n"{sys.executable}" "{fixture}" %*\n', encoding="utf-8")
         self.env = os.environ.copy()
+        # Exercise redirected legacy-code-page output with a Unicode profile.
+        self.env["PYTHONIOENCODING"] = "ascii"
         self.env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
         self.command = [sys.executable, "-m", "long_task_callback.desktop_bridge", "--codex-home", str(self.profile),
                         "--codex-bin", str(self.shim), "--startup-timeout", "3", "--handshake-timeout", "0.4"]

@@ -139,7 +139,10 @@ def read_http_header(connection: socket.socket, timeout: float) -> tuple[bytes, 
         if remaining <= 0:
             raise BridgeError("Websocket handshake timed out")
         connection.settimeout(remaining)
-        chunk = connection.recv(min(8192, HEADER_LIMIT - len(data)))
+        try:
+            chunk = connection.recv(min(8192, HEADER_LIMIT - len(data)))
+        except socket.timeout as exc:
+            raise BridgeError("Websocket handshake timed out") from exc
         if not chunk:
             raise BridgeError("Websocket handshake ended early")
         data.extend(chunk)
@@ -614,7 +617,9 @@ def main(argv: list[str] | None = None) -> int:
             bridge = DesktopBridge(args.codex_home, args.codex_bin, metadata,
                                    startup_timeout=args.startup_timeout, handshake_timeout=args.handshake_timeout)
             bridge.start()
-            print(json.dumps(bridge.record, ensure_ascii=False), flush=True)
+            # Redirected Windows consoles may use a legacy code page. Metadata
+            # paths can contain Unicode; JSON escapes preserve them losslessly.
+            print(json.dumps(bridge.record, ensure_ascii=True), flush=True)
             bridge.serve()
         return 0
     except KeyboardInterrupt:

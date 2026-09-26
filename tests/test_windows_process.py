@@ -59,7 +59,7 @@ class WindowsCommandTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="ltc process 中文 ")
         self.addCleanup(temporary.cleanup)
-        self.directory = Path(temporary.name)
+        self.directory = Path(temporary.name).resolve()
 
     def test_native_executable_preserves_literal_arguments(self):
         arguments = ["& echo injected", 'a"b', "%PATH%", "!x!", "中文", "", "C:\\trailing\\"]
