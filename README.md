@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="Long Task Callback (ltc): keep a long task in GNU screen and wake the same Codex or Claude Code session when it finishes">
+  <img src="./assets/readme/hero.svg" width="100%" alt="Long Task Callback (ltc): run a task under an independent Linux owner and wake the same Codex or Claude Code session when it finishes">
 </p>
 
 <p align="center">
@@ -13,54 +13,113 @@ way back to the same conversation.
 
 There are three normal entry points:
 
-- **Run** — `ltc run -- <command>` submits a new task. The daemon starts it in GNU
-  screen, so it is not owned by the agent turn.
+- **Run** — `ltc run -- <command>` submits a new task. The daemon requests an independent
+  Linux task owner, so the task is not owned by the agent turn.
 - **Agent** — `ltc agent codex|claude -- <prompt>` starts a fresh child agent with the
   same durable ownership and callback lifecycle.
 - **Done** — `ltc done ...` reports completion of a task that is already owned by
   screen, tmux, Slurm, another scheduler, or an existing script.
 
 The daemon is the control and callback-delivery process. It does not become the parent of the
-training process. GNU screen owns the LTC worker and the worker owns the task.
+training process. A separate systemd user service (or the screen compatibility backend) owns the LTC worker, which owns the task.
 
 [中文说明](#中文说明) · Formerly `codex-long-task-wakeup` (the old command remains an alias)
+
+## 0.7.0 preview
+
+**0.7.0a1 is the Linux architecture preview.** It separates native execution
+backends, Agent adapters, private persistence and compact callback rendering.
+New Linux tasks prefer an independent systemd user service; screen remains the
+compatibility fallback and continues to own existing tasks.
+
+```bash
+python3 -m pip install .
+ltc run --backend systemd --task "build project" -- make
+# Or explicitly select the existing owner:
+ltc run --backend screen --task "build project" -- make
+```
+
+Use an isolated queue with a 0.7 daemon while evaluating this preview; the installed
+0.6 daemon does not understand the new backend. For example, pass the same
+`--queue-dir /absolute/path/to/preview-queue` to `ltc daemon`, `ltc run` and `ltc ack`.
+The submitting shell must carry the original Agent session ID (or pass `--session`).
+
+Task-completion callbacks now carry a short result envelope and artifact/ACK paths. Full evidence
+is saved privately in `details/<callback-id>.md`; custom instructions are marked
+for reading before acting. Use `--callback-format full` for full inline callbacks.
+The existing system/user reminder cadence still applies. This reduces repeated
+prose without truncating saved results or user instructions.
+
+Native macOS/Windows and PI/DSH integrations are future adapters, **not supported
+platforms/agents in this preview**. See [architecture and handoff](docs/architecture.md)
+for module responsibilities, recovery guarantees, extension points and validation.
+Docker and AutoDL use the non-systemd screen/standalone profile; see
+[container setup and lifecycle boundaries](docs/containers.md).
+See the [preview validation record](docs/validation-0.7.0a1.md) for tested
+environments, commands and remaining platform work.
+
+### Configuration recovery owned by the Agent
+
+`run`, `agent` and `done` check environment support, configuration and LTC's runtime
+chain automatically: storage, coordinator, recorded task owners, results and
+callback handoff. When anything needs attention, stderr contains an `[ltc-status]` JSON block with the issues, repair
+and recheck commands, and whether work has already been persisted. Healthy calls
+remain quiet. The installed skill tells the calling Agent to configure LTC,
+verify the repair and continue the task; routine configuration is not assigned
+back to the user. A persisted task is not resubmitted after repair.
+
+For an explicit check, use `ltc doctor --agent codex --session <original-session>`
+with the same `--queue-dir` and `--backend` as your task. It prints JSON and exits
+0 when local prerequisites pass, 1 when configuration is needed. This check does
+not establish Agent authentication or successful original-session delivery.
+Repair commands use the current installation and preserve installed skill files
+with `setup --keep-skill`; they do not automatically execute themselves.
+The report separates configuration gaps from runtime failures. A missing task
+owner or unresolved callback requires inspecting its records, so the generic
+setup command is omitted. An empty queue needs no screen session, and a completed
+task is not a dead-service alert. Native unsupported systems receive no Linux
+repair command. Owner queries that fail are reported as unknown, never proof that
+work can safely be rerun.
+For externally owned work reported with `done`, the repair uses
+`setup --callback-only` and does not require a local task execution backend.
 
 ## How it works
 
 <p align="center">
-  <img src="./assets/readme/workflow.svg" width="100%" alt="The agent submits a task, the daemon starts a GNU screen session, the task runs independently, completion is queued, and the same agent conversation resumes and acknowledges it">
+  <img src="./assets/readme/workflow.svg" width="100%" alt="The agent submits a task, the daemon requests an independent task service, the task runs independently, completion is queued, and the same agent conversation resumes and acknowledges it">
 </p>
 
 ```text
 systemd user service
   └─ ltc daemon                 control, recovery and callback delivery
 
-GNU screen session
+Independent per-task service (screen for legacy tasks)
   └─ LTC worker
       └─ training / benchmark / build / child agent
 ```
 
 1. Codex or Claude Code submits `ltc run` or `ltc agent`. LTC persists the work, environment,
-   original agent/session binding, goal binding, screen name, and log path.
-2. The systemd-managed daemon notices the submission and starts a detached GNU screen session.
-3. The screen-owned task runs independently of the agent turn and of daemon restarts.
+   original agent/session binding, goal binding, execution backend, and log path.
+2. The daemon notices the submission and requests a separate task service.
+3. The native task service runs independently of the agent turn and coordinator service.
 4. On completion, LTC stores the exit result and queues a callback to the original conversation.
 5. The resumed agent inspects the result and runs `ltc ack`. If the callback belongs to a
    multi-stage goal, callback ACK and goal ACK remain separate decisions.
 
-No polling is required. Live inspection is available through screen and the task log.
+No model polling is required. Inspect task logs or the backend owner when needed.
 
 As an execution rule, a command reliably expected to finish within 60 seconds may use one
 foreground wait. Use `ltc run` when it may take about a minute or longer, its duration is
 uncertain, or another status check might be needed. A few-minute task should use callback delivery
-instead of model polling; screen and the daemon wait without spending model turns.
+instead of model polling; the worker and daemon wait without spending model turns.
 
 ## Install
 
-GNU screen is required. LTC deliberately has no silent fallback because a fallback would restore
-the unstable agent-owned process path.
+Linux requires a reachable systemd user manager (v240+) or GNU screen.
+The selected backend is recorded at submission and never silently changed during recovery.
 
 ```bash
+# Optional compatibility backend:
 sudo apt install screen              # Debian/Ubuntu
 # sudo dnf install screen            # Fedora/RHEL
 
@@ -68,8 +127,10 @@ python3 -m pip install "git+https://github.com/lz59970062/long-task-wakeup.git"
 ltc setup --force --enable --now
 ```
 
-`setup` installs the bundled skill for Codex and Claude Code and installs the callback daemon as a
-user service. It also creates an empty, user-editable callback prompt hook at
+`setup` installs the bundled skill for Codex and Claude Code. `--service auto`
+uses a systemd user service when available, otherwise standalone; Supervisor is
+an explicit `--service supervisor` choice. `--service standalone --now` starts
+the coordinator without creating systemd configuration, suitable for AutoDL. It also creates an empty, user-editable callback prompt hook at
 `${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-hook.md`. Existing hook content is never
 overwritten, including by `setup --force`. The file is read again before each due user-reminder
 attempt, so edits apply to the next due callback without restarting the daemon. Non-empty
@@ -85,7 +146,7 @@ Verify:
 
 ```bash
 ltc --version
-screen --version
+# screen --version  # only for the screen backend
 systemctl --user status codex-long-task-wakeup.service
 ```
 
@@ -101,15 +162,15 @@ ltc run \
 Submission returns after the task record is durable. It prints:
 
 - the task id;
-- the screen session, `ltc-<task-id>`;
+- the execution backend (and screen session only when using screen);
 - the log file, normally
   `~/.codex/long-task-wakeup/tasks/<task-id>/attempt-1.log`.
 
-Inspect it when useful:
+Inspect the task log when useful. Screen commands apply only to screen-owned tasks:
 
 ```bash
-screen -ls
-screen -r ltc-<task-id>
+# screen -ls
+# screen -r ltc-<task-id>
 tail -f ~/.codex/long-task-wakeup/tasks/<task-id>/attempt-1.log
 ```
 
@@ -162,19 +223,19 @@ user_every: 3
 
 Each queue counts separately for each agent and bound session. The first callback
 shows both reminders. With the defaults, standard reminders appear at #1, #5, #9,
-… and user reminders at #1, #4, #7, … . A compact cadence line shows the callback
-number and intervals. Goal reminder callbacks use the same conversation counter.
+… and user reminders at #1, #4, #7, … . New compact envelopes omit counter prose;
+legacy callbacks retain their cadence line. Goal reminders use the same counter.
 The number counts distinct callbacks reaching their first
 delivery attempt, not successful ACKs; a failed delivery can consume one number.
 Retries and daemon restarts reuse the same stored number and decisions. Queuing,
 canceling before delivery, and dry-run do not consume numbers. Changing settings
 applies to new allocations; retrying an old callback retains its original schedule.
 
-Only repeated generic prose is reduced: the introductory sentence, generic
-inspect/decide/continue reminder and verbose ACK explanation. Task results, messages,
-logs, recovery instructions, template handoffs, routing restrictions and the exact
-ACK command remain on every callback. These responsibilities also appear in the
-skill's core rules and still apply when their reminder prose is omitted.
+New compact callbacks retain task/result identity, artifact references, bound session
+and the exact ACK command. Full command lines, messages and handoff instructions
+are saved privately at the Details path; custom instructions and recovery guidance
+require reading it before acting. Standard reminders are short and periodic. The
+skill's core rules apply even when reminder prose is omitted.
 
 User text in `callback-hook.md` is appended only on due attempts, and is reread on
 each such attempt, including retries. Editing it needs no restart. An empty hook
@@ -326,13 +387,17 @@ By default callback failure does not change the task exit code.
 
 ### Daemon restart
 
-GNU screen keeps running. After the daemon returns, it discovers the live named session and does
-not launch a duplicate. If the task completed while the daemon was unavailable, its durable result
-is turned into the normal callback.
+Native task services are independent of the coordinator service. Recovery reads durable results
+and probes the recorded owner; an unavailable manager never authorizes another launch. Legacy
+screen tasks keep their named sessions, but stopping their containing service may stop those
+processes as well. A completed result can reconstruct a missing callback with the same ID.
 
 ### Worker startup handshake
 
-Each screen launch must complete a durable handshake by changing the task from `launching` to
+Native launches persist an attempt identity before submission. Ambiguous outcomes are inspected
+without automatic resubmission, even if the unit has already disappeared.
+
+Each legacy screen launch must complete a durable handshake by changing the task from `launching` to
 `running`. LTC allows a one-second startup window. If screen disappears before that transition,
 the daemon records the failed attempt and retries at most three times with exponential backoff.
 After the final attempt, the task becomes `launch_failed`, its one-time recovery callback is
@@ -343,11 +408,11 @@ launch failure and is never automatically retried during upgrade.
 
 ### Same-host reboot
 
-GNU screen cannot survive a host reboot. LTC therefore does **not** guess or automatically rerun
+Running processes cannot survive a host reboot. LTC therefore does **not** guess or automatically rerun
 the command. After the daemon starts in the new boot, it restores the originally bound Codex or
 Claude Code conversation with:
 
-- the task and screen identifiers;
+- the task and execution-owner identifiers;
 - the local log path;
 - the interruption reason;
 - instructions to inspect outputs and checkpoints.
@@ -468,8 +533,7 @@ agents must inspect existing processes and artifacts before launching follow-up 
 
 The daemon is normally installed as
 `~/.config/systemd/user/codex-long-task-wakeup.service`. The daemon may also be run by supervisor
-or as a standalone background process in environments without user systemd; GNU screen remains
-mandatory for `Run` task ownership in every case.
+or as a standalone background process in environments without user systemd; the screen backend requires GNU screen. The native Linux backend requires a reachable systemd user manager.
 
 ```bash
 systemctl --user status codex-long-task-wakeup.service
@@ -484,8 +548,8 @@ mode and no fallback to one.
 
 **Long Task Callback (ltc)** 有三个入口：
 
-- **Run**：`ltc run -- <命令>`。提交一个新任务；daemon 收到记录后，用 GNU
-  screen 启动 LTC worker 和训练任务。
+- **Run**：`ltc run -- <命令>`。提交新任务，默认优先使用独立的 systemd 用户服务；
+  无可用用户管理器时使用 screen 兼容后端。
 - **Agent（预览）**：`ltc agent codex|claude -- <任务>`。用同一套持久化和 callback
   生命周期启动一个全新的 Codex 或 Claude Code 子代理。
 - **Done**：`ltc done ...`。任务已经由 screen、tmux、Slurm 或其他调度器托管时，
@@ -497,16 +561,23 @@ mode and no fallback to one.
 systemd 用户服务
   └─ ltc daemon                 负责控制、恢复和 callback 投递
 
-GNU screen 会话
+独立任务服务（旧任务保留 screen）
   └─ LTC worker
       └─ 训练任务
 ```
 
-daemon 不是训练任务的父进程。它重启时，screen 中的任务继续运行；daemon 回来后识别已有
-screen，不会重复启动。screen 是必需依赖，缺失时 `setup` 和 `run` 都会拒绝，
-不会退回到不稳定的 agent 回合进程。
+0.7.0a1 是 Linux 新架构测试版：任务执行、Agent 适配、状态存储和回调格式分别维护。
+原生任务服务独立于回调协调器；协调器重启后核对已有结果与进程归属，不重复启动。
+旧 screen 任务继续使用原后端，但不承诺停止其所在系统服务后仍然存活。
 
-screen worker 启动时必须把任务从 `launching` 持久化为 `running`，这一步就是启动握手。
+回调默认只发送任务、状态、产物位置、绑定会话和 ACK 命令。完整命令及交接文字保存在
+`details/<id>.md`；自定义指令和恢复说明会提示先读详情。`--callback-format full` 可恢复
+完整内联格式。系统和用户提示仍按 4/3 间隔出现，原文不会被自动改写。
+
+macOS、Windows 原生以及 PI、DSH 适配尚未实现；后续转接参见
+[架构文档](docs/architecture.md)。测试版请使用独立队列和同版本 daemon，避免与已安装版本混用。
+
+旧版 screen worker 启动时必须把任务从 `launching` 持久化为 `running`，这一步就是启动握手。
 LTC 等待一秒；若 screen 在握手前消失，则记录失败并按指数退避重试，最多三次。最终失败后任务
 进入 `launch_failed`，只生成一次恢复 callback，且不再自动启动。worker token 固定添加
 `ltc_` 前缀，并以单个 `--token=value` 参数传递，避免以 `-` 开头的值被误解析为新选项。
@@ -525,14 +596,14 @@ LTC 等待一秒；若 screen 在握手前消失，则记录失败并按指数�
 
 使用原则：只有可靠地在 60 秒内结束的命令才允许前台等待一次。预计约一分钟以上、耗时不确定，
 或可能需要第二次状态检查时，从一开始就使用 `ltc run`。几分钟任务也默认走 callback，
-不要为了维持模型缓存而轮询；screen 和 daemon 的等待不产生模型回合。
+不要为了维持模型缓存而轮询；执行器和 daemon 的等待不产生模型回合。
 
 ```bash
 ltc run --cwd "$PWD" --task "train model" \
   -- python train.py --config configs/exp.yaml
 ```
 
-命令会打印 task id、`ltc-<task-id>` screen 名和日志路径。用户可以随时检查：
+命令会打印 task id、执行后端和日志路径。以下 screen 命令仅用于兼容后端：
 
 ```bash
 screen -ls

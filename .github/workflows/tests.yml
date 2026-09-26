@@ -1,0 +1,49 @@
+name: Linux tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.9', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install package and legacy task owner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y screen
+          python -m pip install .
+      - name: Unit and local process tests
+        env:
+          CODEX_HOME: ${{ runner.temp }}/ltc-test-profile
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/ltc-claude-profile
+          CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR: ${{ runner.temp }}/ltc-test-locks
+        run: python -m unittest discover -s tests -q
+      - name: Installed CLI and skill resources
+        run: |
+          ltc --version
+          ltc run --agent codex --session ci-preview --backend systemd --dry-run -- echo preview
+          python -c "from importlib.resources import files; assert files('long_task_callback').joinpath('skill/SKILL.md').is_file()"
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build non-root container
+        run: docker build -f examples/docker/Dockerfile -t ltc:ci .
+      - name: Container task lifetime and configuration repair
+        run: |
+          docker run --rm --init --network none \
+            -v "${PWD}/tests:/tests:ro" -e LTC_TEST_SCREEN=1 -e LTC_TEST_DIAGNOSTICS=1 \
+            ltc:ci python -m unittest discover -s /tests -p 'test_*integration.py' -v

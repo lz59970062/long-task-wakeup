@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+from .agents import AGENT_NAMES, get_agent
 
 TEMPLATES = {"test": {"version": 1, "codex_model": "gpt-5.6-luna", "codex_effort": "max"}}
 REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
@@ -23,9 +25,22 @@ class AgentTemplate:
     codex_effort: str | None = None
     claude_model: str | None = None
     handoff: str | None = None
+    agent_defaults: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def render(self, requirements: str) -> str:
         return self.prompt.rstrip() + "\n\n## Task requirements supplied by the parent\n\n" + requirements + "\n"
+
+    def model_for(self, agent: str) -> str | None:
+        get_agent(agent)
+        # Keep the original fields for existing callers and built-in profiles.
+        legacy = {"codex": self.codex_model, "claude": self.claude_model}
+        return self.agent_defaults.get(agent, {}).get("model", legacy.get(agent))
+
+    def reasoning_effort_for(self, agent: str) -> str | None:
+        if not get_agent(agent).supports_reasoning_effort:
+            return None
+        legacy = self.codex_effort if agent == "codex" else None
+        return self.agent_defaults.get(agent, {}).get("reasoning_effort", legacy)
 
 
 class _UniqueSafeLoader(yaml.SafeLoader):
@@ -79,20 +94,30 @@ def _load_user_template(path: Path, name: str) -> AgentTemplate:
         raise ValueError("custom template files must use .yaml or .yml")
     try:
         data = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueSafeLoader)
-        data = _mapping(data, {"version", "prompt", "codex", "claude", "handoff"}, "template")
+        data = _mapping(data, {"version", "prompt", "handoff", *AGENT_NAMES}, "template")
         version = data.get("version")
         if type(version) is not int or version < 1:
             raise ValueError("template version must be a positive integer")
         prompt = _text(data.get("prompt"), "template prompt")
-        codex = _mapping(data.get("codex", {}), {"model", "reasoning_effort"}, "codex")
-        claude = _mapping(data.get("claude", {}), {"model"}, "claude")
-        codex_model = _text(codex["model"], "codex model") if "model" in codex else None
-        claude_model = _text(claude["model"], "claude model") if "model" in claude else None
-        effort = _text(codex["reasoning_effort"], "codex reasoning_effort") if "reasoning_effort" in codex else None
-        if effort is not None and effort not in REASONING_EFFORTS:
-            raise ValueError(f"unsupported codex reasoning_effort {effort!r}")
+        agent_defaults = {}
+        for agent in AGENT_NAMES:
+            allowed = {"model"}
+            if get_agent(agent).supports_reasoning_effort:
+                allowed.add("reasoning_effort")
+            settings = _mapping(data.get(agent, {}), allowed, agent)
+            defaults = {key: _text(value, f"{agent} {key}") for key, value in settings.items()}
+            effort = defaults.get("reasoning_effort")
+            if effort is not None and effort not in REASONING_EFFORTS:
+                raise ValueError(f"unsupported {agent} reasoning_effort {effort!r}")
+            agent_defaults[agent] = defaults
+        codex = agent_defaults.get("codex", {})
+        claude = agent_defaults.get("claude", {})
         handoff = _text(data["handoff"], "template handoff") if "handoff" in data else None
-        return AgentTemplate(name, version, prompt, str(path), codex_model, effort, claude_model, handoff)
+        return AgentTemplate(
+            name, version, prompt, str(path),
+            codex.get("model"), codex.get("reasoning_effort"), claude.get("model"), handoff,
+            agent_defaults=agent_defaults,
+        )
     except (OSError, ValueError, yaml.YAMLError) as exc:
         raise ValueError(f"cannot load template {path}: {exc}") from exc
 

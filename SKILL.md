@@ -1,6 +1,6 @@
 ---
 name: long-task-callback
-description: Explicit callback workflow for long-running agent tasks. Use the daemon handoff whenever Codex or Claude Code launches or edits a long-running command, training run, benchmark, test suite, build, deployment, Slurm job, data job, or script and should arrange for that task to resume the same agent session when it finishes. On callback, inspect results, ACK receipt in the bound session, and continue the original goal; periodic reminder text may be omitted but these duties still apply.
+description: Explicit callback workflow for long-running agent tasks. Use the daemon handoff whenever Codex or Claude Code launches or edits a long-running command, training run, benchmark, test suite, build, deployment, Slurm job, data job, or script and should arrange for that task to resume the same agent session when it finishes. On an LTC configuration status block, the agent repairs configuration and rechecks before continuing. On callback, inspect results, ACK receipt in the bound session, and continue the original goal; periodic reminder text may be omitted but these duties still apply.
 ---
 
 # Long Task Callback
@@ -12,8 +12,7 @@ Code turn.
 
 There are three public workflows:
 
-- `ltc run -- <command>` submits a new long-running task. The daemon launches it in
-  GNU screen.
+- `ltc run -- <command>` submits a new long-running task. The daemon launches it through an independent Linux task owner (systemd user service preferred; screen fallback).
 - `ltc agent codex|claude -- <prompt>` submits a fresh child agent through the same durable
   lifecycle. Available since `0.6.5`.
 - `ltc done ...` queues a completion callback for work already owned by screen, tmux,
@@ -37,7 +36,7 @@ Read the user callback hook at initial LTC use when present. Its instructions st
 apply when not repeated. Since LTC 0.6.6, standard reminders appear on the first callback and every
 4 distinct callbacks thereafter; user-hook reminders on the first and every 3.
 A short callback omits repeated prose, not these responsibilities. Task results,
-messages, recovery/template guidance, routing and the ACK command remain present.
+routing and the ACK command remain present. In 0.7.0a1, full commands, timestamps and handoff text are saved at the supplied Details path. Read that file before acting when the envelope says so; otherwise inspect relevant result artifacts directly. An exit code is process status, not proof of test success.
 
 Configure with `ltc prompt-policy --system-every 4 --user-every 3`; no options shows
 the effective policy. `1` means every callback. The file is
@@ -48,26 +47,24 @@ count. An unsafe `--last` target keeps full reminders because its identity is un
 
 ## Ownership invariant
 
-The durable topology for an LTC-launched task is:
+The 0.7.0a1 Linux topology separates the coordinator and task owners:
 
 ```text
-systemd user service
-  └─ ltc daemon                 control, recovery, callback delivery
-
-GNU screen session
-  └─ LTC worker
-      └─ wrapped command or fresh child agent
+systemd user service -> ltc daemon (submission recovery and callback delivery)
+independent per-task systemd user service -> LTC worker -> command / child agent
 ```
 
-The daemon must not own the training process as its child. It persists the submission and creates
-the detached screen session; screen owns the worker and the worker owns the task.
+`--backend auto` prefers an available systemd user manager (v240+), otherwise
+screen. `--backend systemd` requires that manager; `--backend screen` explicitly
+selects the compatibility backend. Existing screen tasks retain their owner. The
+native backend needs no screen. A screen process can remain inside its launching
+service's control group: do not assume it survives stopping that service.
 
-GNU screen is mandatory. If it is missing, stop and ask the user to install it. Never fall back to
-an agent-owned wrapper.
-
-After a successful submission, report the task id, screen session, log path, and agent result path
-when present, then end the agent turn. Do not poll processes, logs, or artifacts on a timer. Live
-monitoring is allowed only when the user asks or callback infrastructure itself is being diagnosed.
+After submission, record the task ID, execution backend and artifact paths, then
+return control. For long work, avoid polling processes or logs on a timer. Live
+monitoring is appropriate when requested or diagnosing callback infrastructure.
+Do not change a running task's owner or automatically retry an unknown native
+launch. Native macOS/Windows and PI/DSH support are not implemented in this preview.
 
 ## Duration policy
 
@@ -79,7 +76,7 @@ Choose the execution path before launching the command:
   might be needed, use `ltc run` from the start.
 - Do not keep a prompt cache warm by polling. A few-minute task should normally use callback
   delivery: the daemon and screen wait without model turns, then resume the same conversation
-  exactly once on completion.
+  when work completes; ACK and existing-artifact checks handle possible duplicate delivery.
 - If intermediate results genuinely require agent decisions, use sparse milestone callbacks
   rather than timer-based status polling.
 
@@ -90,14 +87,66 @@ The command name is `ltc`; `codex-long-task-wakeup` remains a compatibility alia
 
 ## Install
 
+### Automatic configuration checks
+
+`ltc run`, `ltc agent` and `ltc done` automatically check LTC's supported environment,
+configuration and observed runtime chain: storage, coordinator, recorded task
+owners, saved results and callback handoff. These checks follow the selected
+platform adapter and each task's recorded backend, not a fixed list of software
+to install on every host.
+Healthy calls add no diagnostic text. A failed check appends a JSON block between
+`[ltc-status]` and `[/ltc-status]` on stderr. This is an action request to the
+**calling Agent**: diagnose the listed issues, configure LTC in the current
+environment, run its `recheck_command`, then continue the user's task. Do not hand
+ordinary installation, service startup or configuration commands back to the user.
+
+The block supplies `repair_command` and `recheck_command` as argument arrays pinned
+to the current LTC installation and queue. Address missing prerequisites first;
+preserve the original Agent session, profile paths and existing custom settings.
+Read `environment`, `checks.configuration`, `checks.runtime` and each issue's
+`kind`/`code` to distinguish missing setup from a runtime fault or unsupported OS.
+`repair_command` can be null: an absent task owner or unresolved delivery needs
+artifact/session inspection and lifecycle recovery, not a generic reinstall.
+Native macOS/Windows currently report unsupported without Linux setup commands.
+The setup repair uses `--keep-skill` to retain an installed skill while installing
+one when missing. It can update the LTC coordinator configuration; inspect existing
+service customizations before doing so. Never replace a missing binding with an
+invented session or `--last`.
+For `done`, repair adds `setup --callback-only`: externally owned work needs the
+callback coordinator, not a local screen/systemd task execution backend.
+
+Check `work.state` before retrying: `task_persisted` or `callback_queued` means
+repair the infrastructure around that existing ID, **do not submit it again**.
+For `unknown`, inspect that ID's task/queue records before deciding whether a retry
+is needed. For `not_submitted`, retry the original LTC invocation only after the
+prerequisites pass. A `done` invocation reports work already performed; repair or
+retry its callback without rerunning that work.
+
+Use `ltc doctor` for an explicit JSON check (exit 0 for local readiness, 1 for
+configuration needed). Pass the same queue, backend and session options; for a
+child task include `--operation agent --agent-worker <agent>`. Readiness checks
+local state and observed liveness, not task progress, authentication, the
+coordinator's environment or end-to-end session delivery. An idle queue needs no
+screen session; a durable task result takes precedence over a vanished owner.
+An unavailable owner query is unknown, not proof of a dead task. Saved results
+without callback handoff after a short grace period and unacknowledged failed
+deliveries need attention; acknowledged/canceled history does not. After each
+repair, recheck and use the new evidence. If a repair
+does not resolve its issue, investigate rather than repeat it unchanged. Ask the
+user only for an indispensable login/authorization or unavailable information,
+with the specific blocker; do not ask them to perform routine configuration.
+
+Checks do not change command exit semantics, install software or start services
+themselves. Help, dry-runs, private workers and ACK/cancel paths remain available
+without this automatic check.
+
 ```bash
-sudo apt install screen
+# Install screen only if using the compatibility backend.
 python3 -m pip install "git+https://github.com/lz59970062/long-task-wakeup.git"
 ltc setup --force --enable --now
 ```
 
-`setup` installs this skill for Codex and Claude Code and installs the callback daemon. It refuses
-to proceed when screen cannot be found. It creates the user-editable fixed prompt hook at
+`setup` installs this skill for Codex and Claude Code and configures the selected coordinator service. It requires either a reachable systemd user manager or screen for the compatibility backend. It creates the user-editable fixed prompt hook at
 `${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-hook.md` without overwriting existing content.
 The delivery worker reads that UTF-8 file on attempts whose saved user-reminder decision is
 due, so edits apply on the next due attempt without a restart. Non-empty content is appended
@@ -106,6 +155,25 @@ under `[long-task-callback-user-hook]`; hook read failures warn and continue wit
 `setup` also checks for the Claude Code CLI and runs `claude auth status` with output suppressed.
 This check is advisory and must not block Codex-only installation or print credentials/account
 details. Claude configuration must be present in the shell that later submits `ltc agent claude`.
+
+## Containers (Docker / AutoDL)
+
+Use `--backend screen` where no systemd user manager is available. Install screen
+in the container. Run LTC, the Agent CLI and workload as the same user inside the
+same container with durable local state/workspace mounts. Agent CLI and credentials
+must be available inside that container; the host's desktop socket is not assumed.
+
+`ltc setup --backend screen --service standalone --now` starts a coordinator in an
+existing AutoDL/container session without systemd. `--service auto` selects systemd
+when reachable, otherwise standalone. Use `--service supervisor` only when explicitly
+managing that configuration. Standalone `--enable` cannot register container startup.
+For Docker images, run `ltc daemon` in foreground under `docker --init`, or use an
+external supervisor. A container CMD must not merely spawn a background daemon and exit.
+
+Terminal disconnection or standalone coordinator exit can leave screen tasks alive
+while the container remains running. If the coordinator is the container's main
+process, its exit ends the container as well. Container stop/recreation interrupts
+work; inspect persisted results/checkpoints and session identity before resubmitting.
 
 ## Run: submit new work
 
@@ -118,7 +186,7 @@ ltc run \
   -- python train.py --config configs/exp.yaml
 ```
 
-The submission is durable before the command returns. Record the printed values. The usual
+The submission is durable before the command returns. Record the printed values. Use the reported log/result paths for either backend. For screen-owned tasks, the
 inspection commands are:
 
 ```bash
@@ -132,7 +200,7 @@ Detaching with `Ctrl-a d` leaves the task running.
 ## Agent: submit a durable fresh child agent
 
 Use `ltc agent` when a fresh Codex or Claude Code process should perform an independent task and
-the work needs screen ownership, durable artifacts, or a completion callback. For short work that
+the work needs independent ownership, durable artifacts, or a completion callback. For short work that
 fits an in-turn native subagent, LTC is unnecessary.
 
 ```bash
@@ -217,13 +285,15 @@ guessing.
 
 ### Daemon restart
 
-If the recorded screen session is alive, do nothing. The screen-owned task continues and must not
-be relaunched. If a durable result exists but its callback is missing, reconstruct the callback
-with the same task/callback id.
+For native tasks, the independent systemd unit owns the worker. Restarting the
+coordinator should not restart that task. If querying the owner fails, its state
+is unknown; never treat a manager connection failure as permission to relaunch.
+A saved result takes precedence over owner visibility. Reconstruct a missing
+callback with the same ID. Old screen records use their original recovery path.
 
 ### Worker startup handshake
 
-A launched screen worker must durably move its task from `launching` to `running`. Allow a
+For the legacy screen backend, a launched worker must durably move its task from `launching` to `running`. Allow a
 one-second handshake window. If screen disappears first, record the failed launch and retry no
 more than three total attempts with exponential backoff. After the final failure, set
 `launch_failed`, remove the launch credentials, queue exactly one recovery callback, and never
@@ -231,9 +301,12 @@ automatically relaunch that task. Generate worker tokens with an `ltc_` prefix a
 as a single `--token=value` argument. Treat a legacy `launching` record without an attempt counter
 as an unknown prior launch failure and never automatically retry it during upgrade.
 
+Native systemd launches with ambiguous outcomes are not retried automatically,
+even if no unit is visible. Inspect the task record and outputs.
+
 ### Same-host reboot
 
-Screen does not survive a host reboot. Never automatically rerun the command and do not add a
+Neither backend preserves the running process across a host reboot. Never automatically rerun the command and do not add a
 `--resume-command` mechanism. Restore the originally bound Codex or Claude Code conversation with
 the task id, screen name, log path, interruption reason, and available checkpoint/artifact context.
 
@@ -266,6 +339,11 @@ not wait for a separate Desktop App Server `turn/completed` notification.
 The resumed agent needs write access only to the callback queue. A normal ACK must not create or
 modify global target-lock files; if a rare retained lease needs cleanup, the daemon reconciles it
 after the durable ACK marker appears.
+
+Use `--callback-format full` at submission only when full inline detail is needed.
+The default compact format archives the complete original callback privately and
+omits recurring counter explanations. System/user reminder cadence remains 4/3;
+user-hook text is preserved on its scheduled callbacks.
 
 Callback ACK confirms one delivery only. It must never implicitly complete a persistent goal.
 
@@ -418,7 +496,7 @@ ltc cancel --id <callback-id>
 ltc cancel --queue-dir <queue-dir> --all --message "no longer needed"
 ```
 
-`cancel` does not kill a screen-owned task.
+`cancel` cancels callbacks only; it does not terminate a running workload.
 
 ## Independent test authoring preset
 

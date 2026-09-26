@@ -1,0 +1,12 @@
+# The example image needs only package sources. Exclude local state, credentials,
+# Git metadata and committee discussions from the build context by default.
+**
+!pyproject.toml
+!src/
+!src/**
+!examples/
+!examples/docker/
+!examples/docker/Dockerfile
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/

@@ -125,7 +125,7 @@ class CliTests(unittest.TestCase):
 
             wrapped.assert_not_called()
             self.assertFalse(cli.managed_tasks_root(root).exists())
-            self.assertIn("daemon submission -> GNU screen", output.getvalue())
+            self.assertIn("daemon -> auto backend -> independent worker -> task", output.getvalue())
 
     def test_agent_parser_matches_run_style_and_preserves_prompt(self) -> None:
         with (
@@ -237,7 +237,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(result_path.stat().st_mode), 0o600)
             callback = cli.load_request(root / "pending" / f"{task['id']}.json")
             self.assertEqual(callback["agent_worker"], "codex")
-            self.assertIn("Child agent: Codex", callback["prompt"])
+            self.assertIn("Child agent: Codex", Path(callback["prompt_details_path"]).read_text())
+            self.assertIn(result_path.name, callback["prompt"])
+            self.assertIn(str(result_path.parent), callback["prompt"])
 
     def test_claude_agent_injects_submitter_environment_without_parent_session_markers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -308,8 +310,12 @@ class CliTests(unittest.TestCase):
             callback = cli.load_request(root / "pending" / f"{task['id']}.json")
             self.assertEqual(callback["agent"], "codex")
             self.assertEqual(callback["agent_worker"], "claude")
-            self.assertIn(f"Agent result: {result_path}", callback["prompt"])
-            self.assertIn("Child agent: Claude Code", callback["prompt"])
+            details = Path(callback["prompt_details_path"]).read_text()
+            self.assertIn(f"Agent result: {result_path}", details)
+            self.assertIn("Child agent: Claude Code", details)
+            self.assertIn(result_path.name, callback["prompt"])
+            self.assertIn(str(result_path.parent), callback["prompt"])
+            self.assertNotIn("secret-sentinel-value", details)
             self.assertNotIn("secret-sentinel-value", json.dumps(callback))
 
     def test_via_daemon_is_hidden_compatibility_flag(self) -> None:
@@ -374,7 +380,8 @@ class CliTests(unittest.TestCase):
             completed = subprocess.CompletedProcess(["screen"], 0)
             with (
                 mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"),
-                mock.patch.object(cli, "screen_session_exists", return_value=False),
+                mock.patch.object(cli, "screen_owner_state", return_value=cli.OwnerState.ABSENT),
+                mock.patch("long_task_callback.platforms.screen.screen_binary", return_value="/usr/bin/screen"),
                 mock.patch.object(cli, "console_script_path", return_value="/usr/bin/ltc"),
                 mock.patch.object(cli.subprocess, "run", return_value=completed) as launch,
             ):
@@ -401,7 +408,8 @@ class CliTests(unittest.TestCase):
             completed = subprocess.CompletedProcess(["screen"], 0)
             with (
                 mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"),
-                mock.patch.object(cli, "screen_session_exists", return_value=False),
+                mock.patch.object(cli, "screen_owner_state", return_value=cli.OwnerState.ABSENT),
+                mock.patch("long_task_callback.platforms.screen.screen_binary", return_value="/usr/bin/screen"),
                 mock.patch.object(cli.subprocess, "run", return_value=completed) as launch,
                 mock.patch.object(cli, "MANAGED_WORKER_HANDSHAKE_SECONDS", 60.0),
             ):
@@ -424,7 +432,8 @@ class CliTests(unittest.TestCase):
             completed = subprocess.CompletedProcess(["screen"], 0)
             with (
                 mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"),
-                mock.patch.object(cli, "screen_session_exists", return_value=False),
+                mock.patch.object(cli, "screen_owner_state", return_value=cli.OwnerState.ABSENT),
+                mock.patch("long_task_callback.platforms.screen.screen_binary", return_value="/usr/bin/screen"),
                 mock.patch.object(cli.subprocess, "run", return_value=completed) as launch,
                 mock.patch.object(cli, "MANAGED_WORKER_HANDSHAKE_SECONDS", 0.0),
                 mock.patch.object(cli, "MANAGED_LAUNCH_MAX_ATTEMPTS", 2),
@@ -474,7 +483,7 @@ class CliTests(unittest.TestCase):
 
             with (
                 mock.patch.object(cli, "current_machine_id", return_value=str(task["machine_id"])),
-                mock.patch.object(cli, "screen_session_exists", return_value=False),
+                mock.patch.object(cli, "screen_owner_state", return_value=cli.OwnerState.ABSENT),
                 mock.patch.object(cli.subprocess, "run") as relaunch,
             ):
                 self.assertEqual(cli.recover_managed_tasks(root), 1)
@@ -519,7 +528,9 @@ class CliTests(unittest.TestCase):
             callback = cli.load_request(root / "pending" / f"{task['id']}.json")
             self.assertEqual(callback["id"], task["id"])
             self.assertEqual(callback["exit_code"], 7)
-            self.assertIn("Screen log:", callback["prompt"])
+            self.assertIn(f"Task log: {task['log_path']}", Path(callback["prompt_details_path"]).read_text())
+            self.assertIn(Path(task["log_path"]).name, callback["prompt"])
+            self.assertIn(str(Path(task["log_path"]).parent), callback["prompt"])
 
     def test_host_reboot_recovers_original_agent_without_restarting_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -536,7 +547,7 @@ class CliTests(unittest.TestCase):
             with (
                 mock.patch.object(cli, "current_boot_id", return_value="new-boot"),
                 mock.patch.object(cli, "current_machine_id", return_value=str(task["machine_id"])),
-                mock.patch.object(cli, "screen_session_exists", return_value=False),
+                mock.patch.object(cli, "screen_owner_state", return_value=cli.OwnerState.ABSENT),
                 mock.patch.object(cli.subprocess, "run") as restart,
             ):
                 self.assertEqual(cli.recover_managed_tasks(root), 1)
@@ -548,7 +559,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(callback["agent"], "claude")
             self.assertEqual(callback["target"], {"kind": "session", "value": "test-thread"})
             self.assertIn("not automatically restarted", callback["prompt"])
-            self.assertIn("checkpoints", callback["prompt"])
+            self.assertIn("checkpoints", Path(callback["prompt_details_path"]).read_text())
+            self.assertIn("read before acting", callback["prompt"])
 
     def test_daemon_restart_reconnects_live_screen_without_duplicate_launch_or_callback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -563,7 +575,7 @@ class CliTests(unittest.TestCase):
 
             with (
                 mock.patch.object(cli, "current_machine_id", return_value=str(task["machine_id"])),
-                mock.patch.object(cli, "screen_session_exists", return_value=True),
+                mock.patch.object(cli, "screen_owner_state", return_value=cli.OwnerState.ALIVE),
                 mock.patch.object(cli.subprocess, "run") as relaunch,
             ):
                 self.assertEqual(cli.recover_managed_tasks(root), 0)
@@ -618,7 +630,7 @@ class CliTests(unittest.TestCase):
             with (
                 mock.patch.object(cli, "current_boot_id", return_value="new-boot"),
                 mock.patch.object(cli, "current_machine_id", return_value=str(task["machine_id"])),
-                mock.patch.object(cli, "screen_session_exists", return_value=False),
+                mock.patch.object(cli, "screen_owner_state", return_value=cli.OwnerState.ABSENT),
             ):
                 self.assertEqual(cli.recover_managed_tasks(root), 1)
 
@@ -659,8 +671,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual(cli.recover_active(root), 1)
             recovered = json.loads(cli.request_path(root, "pending", request_id).read_text(encoding="utf-8"))
             self.assertEqual(recovered["outcome"], "unknown")
-            self.assertIn("may still be running", recovered["prompt"])
-            self.assertIn("exit status are unknown", recovered["prompt"])
+            details = Path(recovered["prompt_details_path"]).read_text()
+            self.assertIn("may still be running", details)
+            self.assertIn("exit status are unknown", details)
+            self.assertIn("unknown", recovered["prompt"])
+            self.assertIn("read before acting", recovered["prompt"])
 
     def test_daemon_singleton_uses_stable_non_removed_lock_inode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -738,7 +753,8 @@ class CliTests(unittest.TestCase):
             recovered = json.loads(cli.request_path(root, "pending", request_id).read_text(encoding="utf-8"))
             self.assertEqual(recovered["outcome"], "completed")
             self.assertEqual(recovered["exit_code"], 9)
-            self.assertIn("Exit code: 9", recovered["prompt"])
+            self.assertIn("Exit code: 9", Path(recovered["prompt_details_path"]).read_text())
+            self.assertIn("exit=9", recovered["prompt"])
 
     def test_recover_active_discards_definitely_unlaunched_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -854,11 +870,13 @@ class CliTests(unittest.TestCase):
 
             self.assertRegex(request["prompt"], r"(ltc|codex-long-task-wakeup)")
             self.assertIn(" ack ", request["prompt"])
-            self.assertRegex(request["prompt"], r"Callback time: .+[+-]\d{2}:\d{2}")
+            details = Path(request["prompt_details_path"]).read_text()
+            self.assertRegex(details, r"Callback time: .+[+-]\d{2}:\d{2}")
             self.assertIn(str(request["id"]), request["prompt"])
-            self.assertIn("Bound session: session-1", request["prompt"])
-            self.assertIn("Binding source: --session", request["prompt"])
-            self.assertIn("never redirect this callback to --last", request["prompt"])
+            self.assertIn("Bound session: session-1", details)
+            self.assertIn("Binding source: --session", details)
+            self.assertIn("never redirect this callback to --last", details)
+            self.assertIn("Session: session-1 (only)", request["prompt"])
             self.assertEqual(request["queue_dir"], tmp)
 
     def test_resume_command_makes_queue_dir_writable(self) -> None:
@@ -1906,7 +1924,9 @@ class CliTests(unittest.TestCase):
             runtime = home / "long-task-wakeup" / "daemon-runtime.json"
             runtime.parent.mkdir(parents=True)
             runtime.write_text(
-                json.dumps({"pid": os.getpid(), "reload_protocol": cli.RELOAD_PROTOCOL_VERSION}) + "\n",
+                json.dumps({"pid": os.getpid(), "reload_protocol": cli.RELOAD_PROTOCOL_VERSION,
+                            "process_identity": cli.daemon_process_identity(os.getpid()),
+                            "queue_dir": str(root.resolve())}) + "\n",
                 encoding="utf-8",
             )
             args = argparse.Namespace(

@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.0a1 — Linux architecture preview
+
+- Add automatic local configuration checks to task commands and `ltc doctor`.
+  Failed checks emit an Agent-owned repair/recheck plan with persisted-work state;
+  `setup --keep-skill` preserves existing skill customizations during repair.
+- Check the observed task/result/callback chain through saved backend identities;
+  distinguish missing owners, unknown observations and unresolved handoffs, with
+  unsupported-platform short circuits and separate configuration/runtime results.
+- Add an independent systemd user-service execution backend, selected per new task;
+  retain legacy screen records and an explicit screen fallback.
+- Support non-systemd Linux containers with a screen backend and explicit
+  standalone/Supervisor hosting; add Docker and AutoDL deployment examples.
+- Verify standalone coordinator identity before reloading, including PID namespace
+  and process start time; stale PID files cannot authorize signals or prevent startup.
+- Separate Agent adapters, Linux/POSIX primitives, atomic storage, runtime worker
+  launching and callback rendering for future platform/Agent handoff.
+- Default new task-completion callbacks to short envelopes with private full-detail artifacts;
+  retain 4/3 reminder cadence, custom handoff instructions and a full-format option.
+- Preserve unknown launch outcomes without automatic duplicate execution, and
+  validate persisted result identity before completion recovery.
+- Document Linux guarantees and future macOS/Windows/PI/DSH extension requirements.
+  These future targets are not implemented or advertised as supported.
+
 ## 0.6.6 — 2026-09-21
 
 - Add independent standard/user callback reminder intervals, defaulting to 4/3,
