@@ -13,10 +13,16 @@ import unittest
 from unittest import mock
 
 from long_task_callback import cli
+from test_cli import executable_python_fixture, patch_fixture_commands
 
 
 class TemplateContractTests(unittest.TestCase):
     def setUp(self):
+        if os.name == "nt":
+            platform = mock.patch.object(sys, "platform", "linux")
+            platform.start()
+            self.addCleanup(platform.stop)
+        patch_fixture_commands(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.cwd = Path(self.tmp.name)
@@ -149,7 +155,7 @@ class TemplateContractTests(unittest.TestCase):
                 Path(sys.argv[sys.argv.index("-o") + 1]).write_text("Tests have NOT been run. Authored.")
             sys.exit(code)
             """), encoding="utf-8")
-        fake_child.chmod(0o700)
+        fake_child = executable_python_fixture(fake_child)
         for exit_code in (0, 7):
             with self.subTest(exit_code=exit_code):
                 self.queue = self.cwd / f"worker-queue-{exit_code}"

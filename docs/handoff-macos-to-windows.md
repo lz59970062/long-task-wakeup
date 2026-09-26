@@ -2,6 +2,10 @@
 
 交接日期：2026-09-26。面向在 Windows 机器上继续开发的 Agent / 维护者。
 
+后续状态：Windows 原生实现及本机测试已完成，见 [Windows 指南](windows.md) 和
+[Windows 验证记录](validation-windows.md)。当前 Desktop 原会话回调被 active-writer
+检查阻止，尚未通过完整验收。下文保留为 Mac 交接时的历史基线。
+
 ## 1. 当前结论与接手基线
 
 **macOS 适配已完成，并已在真实 Codex 会话中跑通 120 秒任务、回调和 ACK。下一阶段是原生 Windows 适配。**

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="Long Task Callback (ltc): run a task under an independent Linux or macOS owner and wake the same Codex or Claude Code session when it finishes">
+  <img src="./assets/readme/hero.svg" width="100%" alt="Long Task Callback (ltc): run a task under an independent Linux, macOS or Windows owner and wake the same Codex or Claude Code session when it finishes">
 </p>
 
 <p align="center">
@@ -14,25 +14,30 @@ way back to the same conversation.
 There are three normal entry points:
 
 - **Run** — `ltc run -- <command>` submits a new task. The daemon requests an independent
-  Linux or macOS task owner, so the task is not owned by the agent turn.
+  Linux, macOS or Windows task owner, so the task is not owned by the agent turn.
 - **Agent** — `ltc agent codex|claude -- <prompt>` starts a fresh child agent with the
   same durable ownership and callback lifecycle.
 - **Done** — `ltc done ...` reports completion of a task that is already owned by
   screen, tmux, Slurm, another scheduler, or an existing script.
 
 The daemon is the control and callback-delivery process. It does not become the parent of the
-training process. A separate systemd user service on Linux or one-shot launchd job on macOS
+training process. A separate systemd user service on Linux, one-shot launchd job on macOS,
+or on-demand Task Scheduler runner on Windows
 (or the screen compatibility backend) owns the LTC worker, which owns the task.
 
 [中文说明](#中文说明) · Formerly `codex-long-task-wakeup` (the old command remains an alias)
 
 ## 0.7.0 preview
 
-**The 0.7.0 preview supports Linux and macOS.** It separates native execution
+**The 0.7.0 preview includes native execution on Linux, macOS and Windows.** It separates native execution
 backends, Agent adapters, private persistence and compact callback rendering.
 New Linux tasks prefer an independent systemd user service; screen remains the
 compatibility fallback and continues to own existing tasks.
 New macOS tasks prefer separate one-shot launchd jobs in the logged-in GUI session.
+Windows 10+ uses per-user Task Scheduler owners and Job Objects in a logged-in user
+session. See [Windows setup and limits](docs/windows.md) for PowerShell instructions.
+Windows original-session delivery to an open Codex Desktop conversation remains
+blocked by its active-writer check; that end-to-end acceptance test has not passed.
 
 ```bash
 python3 -m pip install .
@@ -52,8 +57,8 @@ for reading before acting. Use `--callback-format full` for full inline callback
 The existing system/user reminder cadence still applies. This reduces repeated
 prose without truncating saved results or user instructions.
 
-Native Windows and PI/DSH integrations remain future adapters. See
-[macOS setup](docs/macos.md) and [architecture and handoff](docs/architecture.md)
+PI/DSH integrations remain future adapters. See
+[macOS setup](docs/macos.md), [Windows setup](docs/windows.md) and [architecture and handoff](docs/architecture.md)
 for module responsibilities, recovery guarantees, extension points and validation.
 Docker and AutoDL use the non-systemd screen/standalone profile; see
 [container setup and lifecycle boundaries](docs/containers.md).
@@ -61,7 +66,8 @@ See the [preview validation record](docs/validation-0.7.0a1.md) for tested
 environments, commands and remaining platform work.
 The macOS adapter has a separate [local validation record](docs/validation-macos.md).
 Mac development is complete, including a real two-minute original-session callback.
-For the next platform, use the [Windows development handoff](docs/handoff-macos-to-windows.md).
+The Windows adapter has its own [validation record](docs/validation-windows.md).
+The [Windows development handoff](docs/handoff-macos-to-windows.md) records the earlier implementation plan.
 
 ### Configuration recovery owned by the Agent
 
@@ -95,7 +101,7 @@ For externally owned work reported with `done`, the repair uses
 </p>
 
 ```text
-systemd user service (Linux) / LaunchAgent (macOS)
+systemd user service (Linux) / LaunchAgent (macOS) / login scheduled task (Windows)
   └─ ltc daemon                 control, recovery and callback delivery
 
 Independent per-task service (screen for legacy tasks)
@@ -122,6 +128,10 @@ instead of model polling; the worker and daemon wait without spending model turn
 
 Linux requires a reachable systemd user manager (v240+) or GNU screen.
 macOS uses the built-in launchd manager; the native backend needs no screen.
+Windows uses Task Scheduler as the logged-in user, Python 3.9+, and a local
+ACL-capable filesystem such as NTFS. Its Desktop transport is disabled; callbacks
+resume the bound session through the Agent CLI. [Windows installation](docs/windows.md)
+includes the filesystem durability and logout boundaries.
 The selected backend is recorded at submission and never silently changed during recovery.
 
 ```bash
@@ -135,7 +145,7 @@ ltc setup --force --enable --now
 
 `setup` installs the bundled skill for Codex and Claude Code. `--service auto`
 uses a systemd user service on Linux or a launchd LaunchAgent on macOS when available,
-otherwise standalone; Supervisor is
+otherwise standalone on those platforms. On Windows it selects `windows-task`; Supervisor is
 an explicit `--service supervisor` choice. `--service standalone --now` starts
 the coordinator without creating systemd configuration, suitable for AutoDL. It also creates an empty, user-editable callback prompt hook at
 `${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-hook.md`. Existing hook content is never
@@ -543,7 +553,9 @@ agents must inspect existing processes and artifacts before launching follow-up 
 
 The daemon is normally installed as
 `~/.config/systemd/user/codex-long-task-wakeup.service` on Linux or
-`~/Library/LaunchAgents/codex-long-task-wakeup.plist` on macOS. The daemon may also be run by supervisor
+`~/Library/LaunchAgents/codex-long-task-wakeup.plist` on macOS, or a per-user login
+scheduled task on Windows. Windows uses one coordinator queue per Agent profile;
+drain and uninstall the coordinator before changing that queue. The daemon may also be run by supervisor
 or as a standalone background process in environments without user systemd; the screen backend requires GNU screen. The native Linux backend requires a reachable systemd user manager.
 
 ```bash
@@ -559,8 +571,8 @@ mode and no fallback to one.
 
 **Long Task Callback (ltc)** 有三个入口：
 
-- **Run**：`ltc run -- <命令>`。提交新任务，Linux 默认使用独立的 systemd 用户服务，macOS 使用独立的一次性 launchd 作业；
-  无可用用户管理器时使用 screen 兼容后端。
+- **Run**：`ltc run -- <命令>`。提交新任务，Linux 默认使用独立的 systemd 用户服务，macOS 使用独立的一次性 launchd 作业，Windows 使用独立的按需计划任务与 Job Object。
+  Linux/macOS 无可用用户管理器时使用 screen 兼容后端。
 - **Agent（预览）**：`ltc agent codex|claude -- <任务>`。用同一套持久化和 callback
   生命周期启动一个全新的 Codex 或 Claude Code 子代理。
 - **Done**：`ltc done ...`。任务已经由 screen、tmux、Slurm 或其他调度器托管时，
@@ -569,7 +581,7 @@ mode and no fallback to one.
 正确的职责关系是：
 
 ```text
-systemd 用户服务 / macOS LaunchAgent
+systemd 用户服务 / macOS LaunchAgent / Windows 用户登录计划任务
   └─ ltc daemon                 负责控制、恢复和 callback 投递
 
 独立任务服务（旧任务保留 screen）
@@ -577,7 +589,7 @@ systemd 用户服务 / macOS LaunchAgent
       └─ 训练任务
 ```
 
-当前 0.7.0 预览版支持 Linux 和 macOS：任务执行、Agent 适配、状态存储和回调格式分别维护。
+当前 0.7.0 预览版支持 Linux、macOS 和 Windows：任务执行、Agent 适配、状态存储和回调格式分别维护。
 原生任务服务独立于回调协调器；协调器重启后核对已有结果与进程归属，不重复启动。
 旧 screen 任务继续使用原后端，但不承诺停止其所在系统服务后仍然存活。
 
@@ -587,7 +599,14 @@ systemd 用户服务 / macOS LaunchAgent
 
 Mac 安装方式见 [macOS 指南](docs/macos.md)：`ltc setup --force --enable --now` 自动选择
 LaunchAgent 协调器和独立 launchd 任务。任务作业不注册为登录启动项，不会在重启后自动重跑。
-Windows 原生以及 PI、DSH 适配尚未实现。测试版请使用独立队列和同版本 daemon，避免与已安装版本混用。
+Windows 10+ 安装方式见 [Windows 指南](docs/windows.md)：用户登录状态下使用
+`ltc setup --service windows-task --force --enable --now`，通过 Agent CLI 回到原会话。
+PowerShell ACK 命令支持空格、中文与单引号路径；状态文件在创建时设置当前用户和 SYSTEM 私有 ACL。
+Windows 目录创建、重命名和删除不承诺断电持久性；注销或重启可能中断任务，未知结果不会自动重跑。
+Windows Desktop transport 尚未验证。每个 Agent profile 使用一个协调器队列，换队列前先排空并卸载。
+本机真实原会话回调被 Codex Desktop 的 active-writer 检查阻止，尚未通过端到端验收；
+原生任务执行及本地回调生命周期已通过，详见 [Windows 验证记录](docs/validation-windows.md)。
+PI、DSH 适配尚未实现。测试版请使用独立队列和同版本 daemon，避免与已安装版本混用。
 
 旧版 screen worker 启动时必须把任务从 `launching` 持久化为 `running`，这一步就是启动握手。
 LTC 等待一秒；若 screen 在握手前消失，则记录失败并按指数退避重试，最多三次。最终失败后任务

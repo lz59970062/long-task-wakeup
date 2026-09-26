@@ -5,10 +5,12 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import signal
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -25,6 +27,20 @@ class StandaloneDaemonIdentityTests(unittest.TestCase):
         platform = mock.patch.object(sys, "platform", "linux")
         platform.start()
         self.addCleanup(platform.stop)
+        if os.name == "nt":
+            # This models Linux startup/reload with fake processes, while the
+            # ownership lease is still a real native Windows exclusive handle.
+            linux_os = types.SimpleNamespace(**vars(os))
+            linux_os.name = "posix"
+            for patcher in (
+                mock.patch.object(cli, "os", linux_os),
+                mock.patch.object(signal, "SIGHUP", 1, create=True),
+                mock.patch.object(cli, "fsync_directory", side_effect=cli.windows_io.fsync_directory),
+                mock.patch.object(cli, "acquire_owner_lock", side_effect=lambda root, ident, blocking:
+                    cli.windows_io.acquire_path_lock(cli.owner_lock_path(root, ident), blocking=blocking)),
+            ):
+                patcher.start()
+                self.addCleanup(patcher.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)

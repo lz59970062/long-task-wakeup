@@ -19,7 +19,7 @@ import time
 
 from . import __version__
 from .agents import get_agent
-from .platforms import posix
+from .platforms import posix, windows_io
 from .platforms import OwnerState
 from .platforms.screen import ScreenBackend
 from .runtime import worker_command
@@ -68,7 +68,7 @@ def queue_writable(root: Path) -> bool:
             finally:
                 os.close(descriptor)
                 Path(temporary).unlink()
-            posix.fsync_directory(target)
+            (windows_io if os.name == "nt" else posix).fsync_directory(target)
         return True
     except OSError:
         return False
@@ -80,16 +80,20 @@ def coordinator_issue(root: Path) -> dict[str, str] | None:
 
     path = cli.owner_lock_path(root, "daemon-singleton")
     try:
-        if cli.fcntl is None:
-            raise OSError("platform lock support unavailable")
-        with path.open("r", encoding="utf-8") as handle:
-            try:
-                cli.fcntl.flock(handle.fileno(), cli.fcntl.LOCK_EX | cli.fcntl.LOCK_NB)
-            except BlockingIOError:
-                pass  # A coordinator may own the queue; verify its identity.
-            else:
-                cli.fcntl.flock(handle.fileno(), cli.fcntl.LOCK_UN)
+        if os.name == "nt":
+            if not windows_io.probe_existing_lock(path):
                 return {"code": "daemon_not_running", "action": "Start one coordinator for this exact queue, then recheck."}
+        else:
+            if cli.fcntl is None:
+                raise OSError("platform lock support unavailable")
+            with path.open("r", encoding="utf-8") as handle:
+                try:
+                    cli.fcntl.flock(handle.fileno(), cli.fcntl.LOCK_EX | cli.fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass  # A coordinator may own the queue; verify its identity.
+                else:
+                    cli.fcntl.flock(handle.fileno(), cli.fcntl.LOCK_UN)
+                    return {"code": "daemon_not_running", "action": "Start one coordinator for this exact queue, then recheck."}
     except FileNotFoundError:
         return {"code": "daemon_not_running", "action": "Start one coordinator for this exact queue, then recheck."}
     except OSError:
@@ -110,7 +114,7 @@ def environment_profile() -> dict[str, object]:
 
     operating_system = {"linux": "linux", "darwin": "macos", "win32": "windows"}.get(sys.platform, "other")
     return {"os": operating_system, "container": cli.running_in_container() if sys.platform == "linux" else False,
-            "supported": sys.platform in ("linux", "darwin")}
+            "supported": sys.platform in ("linux", "darwin", "win32")}
 
 
 def runtime_issues(root: Path) -> list[dict[str, object]]:
@@ -297,7 +301,7 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
         except (OSError, ValueError, RuntimeError):
             issues.append({"code": "backend_unavailable", "action": (
                 "Provide the requested task backend: launchd in a logged-in macOS GUI session, "
-                "systemd on Linux, or explicitly select screen when the native manager is unavailable.")})
+                "systemd on Linux, or Task Scheduler for the logged-in Windows user.")})
     if not queue_writable(root):
         issues.append({"code": "queue_unwritable", "action": "Repair access/storage for this queue and its existing directories without deleting task records."})
     if operation in {"run", "agent"} and not queue_writable(cli.managed_tasks_root(root)):

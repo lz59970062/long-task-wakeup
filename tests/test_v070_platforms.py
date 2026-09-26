@@ -6,6 +6,7 @@ not evidence that a previously submitted workload has stopped.
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -64,7 +65,7 @@ class SystemdOwnershipTests(unittest.TestCase):
         owner = self.backend.owner_name("0a1b2c3d", 1, self.directory)
         cwd = self.directory / "work with spaces"
         log = self.directory / "attempt log.txt"
-        worker = ["/opt/ltc program/bin/ltc", "_task-worker", "--task-file", "a path/task.json", "--attempt", "1"]
+        worker = [str(self.directory / "ltc program/bin/ltc"), "_task-worker", "--task-file", "a path/task.json", "--attempt", "1"]
         with mock.patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
             self.backend.launch(owner, worker, str(cwd), str(log))
         command = run.call_args.args[0]
@@ -84,20 +85,20 @@ class SystemdOwnershipTests(unittest.TestCase):
     def test_launch_timeout_is_uncertain_because_manager_may_have_accepted_unit(self) -> None:
         with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("systemd-run", 5)):
             with self.assertRaises(LaunchError) as caught:
-                self.backend.launch("ltc-example.service", ["/bin/true"], str(self.directory), str(self.directory / "log"))
+                self.backend.launch("ltc-example.service", [sys.executable], str(self.directory), str(self.directory / "log"))
         self.assertTrue(caught.exception.uncertain)
 
     def test_nonzero_launch_response_is_not_proof_no_workload_exists(self) -> None:
         result = subprocess.CompletedProcess([], 1, "", "Unit already exists or reply lost")
         with mock.patch("subprocess.run", return_value=result):
             with self.assertRaises(LaunchError) as caught:
-                self.backend.launch("ltc-example.service", ["/bin/true"], str(self.directory), str(self.directory / "log"))
+                self.backend.launch("ltc-example.service", [sys.executable], str(self.directory), str(self.directory / "log"))
         self.assertTrue(caught.exception.uncertain)
 
     def test_missing_launcher_is_definitive_prelaunch_failure(self) -> None:
         with mock.patch("subprocess.run", side_effect=FileNotFoundError("systemd-run")):
             with self.assertRaises(LaunchError) as caught:
-                self.backend.launch("ltc-example.service", ["/bin/true"], str(self.directory), str(self.directory / "log"))
+                self.backend.launch("ltc-example.service", [sys.executable], str(self.directory), str(self.directory / "log"))
         self.assertFalse(caught.exception.uncertain)
 
     def test_query_errors_and_malformed_status_are_unknown_not_absent(self) -> None:

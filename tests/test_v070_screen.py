@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -74,7 +75,7 @@ class ScreenOwnershipTests(unittest.TestCase):
                 self.assertEqual(self.backend.probe("ltc-abcd1234"), OwnerState.UNKNOWN)
 
     def test_launch_uses_literal_argv_and_does_not_attach_coordinator_pipes(self) -> None:
-        arguments = ["/opt/LTC runtime/python", "/tmp/entry.py", "_screen-worker", "--task-file",
+        arguments = [str(self.directory / "LTC runtime/python"), "/tmp/entry.py", "_screen-worker", "--task-file",
                      "/tmp/space $name;literal/task.json", "--token=fixture"]
         log = self.directory / "log with spaces"
         with mock.patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
@@ -91,10 +92,10 @@ class ScreenOwnershipTests(unittest.TestCase):
         cases = ((subprocess.TimeoutExpired("screen", 1), True), (FileNotFoundError("screen"), False))
         for failure, uncertain in cases:
             with self.subTest(failure=failure), mock.patch("subprocess.run", side_effect=failure), self.assertRaises(LaunchError) as caught:
-                self.backend.launch("ltc-abcd1234", ["/bin/true"], self.directory, self.directory / "log")
+                self.backend.launch("ltc-abcd1234", [sys.executable], self.directory, self.directory / "log")
             self.assertEqual(caught.exception.uncertain, uncertain)
         with mock.patch("subprocess.run", return_value=subprocess.CompletedProcess([], 1)), self.assertRaises(LaunchError) as caught:
-            self.backend.launch("ltc-abcd1234", ["/bin/true"], self.directory, self.directory / "log")
+            self.backend.launch("ltc-abcd1234", [sys.executable], self.directory, self.directory / "log")
         self.assertTrue(caught.exception.uncertain)
 
 

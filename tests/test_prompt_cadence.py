@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 from long_task_callback import cli
+from test_cli import patch_inprocess_delivery_worker
 
 
 def _allocate_in_process(root, policy, callback_id, results):
@@ -25,6 +26,7 @@ def _allocate_in_process(root, policy, callback_id, results):
 
 class PromptCadenceTests(unittest.TestCase):
     def setUp(self):
+        patch_inprocess_delivery_worker(self)
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name) / "queue"
@@ -73,7 +75,7 @@ class PromptCadenceTests(unittest.TestCase):
         self.assertEqual(counters[0].read_text(), "{broken json")
 
     def test_concurrent_processes_allocate_unique_sequences_and_stable_retry(self):
-        context = multiprocessing.get_context("fork")
+        context = multiprocessing.get_context("spawn" if os.name == "nt" else "fork")
         results = context.Queue()
         processes = [context.Process(target=_allocate_in_process,
                                      args=(str(self.root), str(self.policy), f"parallel-{i}", results))
@@ -105,7 +107,7 @@ class PromptCadenceTests(unittest.TestCase):
                 "queue_dir": str(self.root), "callback_hook_path": str(hook)}
 
     def test_concurrent_same_callback_consumes_only_one_sequence(self):
-        context = multiprocessing.get_context("fork")
+        context = multiprocessing.get_context("spawn" if os.name == "nt" else "fork")
         results = context.Queue()
         processes = [context.Process(target=_allocate_in_process,
                                      args=(str(self.root), str(self.policy), "same-id", results))
@@ -133,7 +135,7 @@ class PromptCadenceTests(unittest.TestCase):
         for transport in ("desktop", "cli"):
             with self.subTest(transport=transport):
                 payload = self.payload("non-due-worker")
-                payload.update(command=["unused-codex"], timeout=1, cwd=str(self.root.parent),
+                payload.update(command=[sys.executable], timeout=1, cwd=str(self.root.parent),
                                ack_path=str(self.root.parent / "absent-ack"),
                                canceled_path=str(self.root.parent / "absent-cancel"))
                 Path(payload["callback_hook_path"]).write_text("SUPPRESSED HOOK")

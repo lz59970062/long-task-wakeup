@@ -15,6 +15,12 @@ from long_task_callback import cli
 
 
 class CodexCompatibilityTests(unittest.TestCase):
+    def setUp(self):
+        if os.name == "nt":
+            platform = mock.patch.object(sys, "platform", "linux")
+            platform.start()
+            self.addCleanup(platform.stop)
+
     def assert_permissions(self, command, sandbox):
         self.assertEqual(command[command.index("-s") + 1], sandbox)
         configs = [command[i + 1] for i, value in enumerate(command[:-1]) if value == "-c"]
@@ -67,8 +73,13 @@ class CodexCompatibilityTests(unittest.TestCase):
             # Empty stdin stops before inference. A missing schema provides a second
             # startup guard if a future CLI changes its handling of empty stdin.
             command[-1:-1] = ["--output-schema", str(Path(tmp) / "missing-schema.json")]
+            environment = dict(os.environ)
+            profile = Path(tmp) / "codex-profile"
+            profile.mkdir()
+            environment["CODEX_HOME"] = str(profile)
+            command = cli.process_command(command, environment)
             result = subprocess.run(command, input="", text=True, capture_output=True, timeout=20,
-                                    cwd=tmp)
+                                    cwd=tmp, env=environment)
             output = (result.stdout + result.stderr).lower()
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn("cannot be used with", output)

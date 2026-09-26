@@ -90,6 +90,10 @@ class DiagnosticBoundaryTests(unittest.TestCase):
 
 class HealthReportTests(unittest.TestCase):
     def setUp(self):
+        if os.name == "nt":
+            platform = mock.patch.object(sys, "platform", "linux")
+            platform.start()
+            self.addCleanup(platform.stop)
         temporary = tempfile.TemporaryDirectory(prefix="ltc health ")
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)

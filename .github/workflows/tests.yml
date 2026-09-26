@@ -1,4 +1,4 @@
-name: Linux and macOS tests
+name: Linux, macOS and Windows tests
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python: ['3.9', '3.12']
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +50,34 @@ jobs:
         run: |
           python -m unittest discover -s tests -p test_launchd_integration.py -v
           python -m unittest discover -s tests -p test_screen_integration.py -v
+
+      - name: Native Windows Task Scheduler ownership
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LTC_TEST_WINDOWS_SCHEDULER: '1'
+          CODEX_HOME: ${{ runner.temp }}/ltc-windows-profile
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/ltc-windows-claude-profile
+          CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR: ${{ runner.temp }}/ltc-windows-locks
+          PYTHONIOENCODING: utf-8
+        run: |
+          # Use the runner's own user session, without alternate credentials.
+          whoami
+          Get-Service Schedule
+          python -m unittest discover -s tests -p test_windows_backend.py -v
+          exit $LASTEXITCODE
+      - name: Native Windows task and coordinator lifecycle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LTC_TEST_WINDOWS_TASK: '1'
+          CODEX_HOME: ${{ runner.temp }}/ltc-windows-profile
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/ltc-windows-claude-profile
+          CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR: ${{ runner.temp }}/ltc-windows-locks
+          PYTHONIOENCODING: utf-8
+        run: |
+          python -m unittest discover -s tests -p test_windows_integration.py -v
+          exit $LASTEXITCODE
 
   container:
     runs-on: ubuntu-latest

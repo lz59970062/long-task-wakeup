@@ -17,6 +17,7 @@ from unittest import mock
 from long_task_callback import cli, diagnostics, launchd_service
 from long_task_callback.platforms import LaunchdBackend, LaunchError, OwnerState
 from long_task_callback.platforms import macos, screen
+from test_cli import assert_private_file
 
 
 class MacOSContracts(unittest.TestCase):
@@ -28,6 +29,7 @@ class MacOSContracts(unittest.TestCase):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(mock.patch.object(sys, "platform", "darwin"))
+        self.stack.enter_context(mock.patch.object(macos, "gui_domain", return_value="gui/501"))
         self.stack.enter_context(mock.patch.object(cli, "current_machine_id", return_value="host"))
         self.stack.enter_context(mock.patch.object(cli, "current_boot_id", return_value="boot"))
         self.backend = LaunchdBackend()
@@ -76,7 +78,7 @@ class MacOSContracts(unittest.TestCase):
         self.assertFalse(data["AbandonProcessGroup"])
         self.assertEqual(data["EnvironmentVariables"], {macos.OWNER_ENV: owner, "PYTHONUNBUFFERED": "1"})
         self.assertEqual(data["StandardOutPath"], str(log))
-        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        assert_private_file(self, path)
         control.assert_called_once_with(["bootstrap", macos.gui_domain(), str(path)])
 
     def test_failed_submission_is_ambiguous_except_before_exec(self):
@@ -219,7 +221,7 @@ class MacOSContracts(unittest.TestCase):
         control.assert_called_once_with(["enable", f"{macos.gui_domain()}/ltc-test"])
 
     def test_mac_screen_uses_system_compatible_logging_with_literal_arguments(self):
-        argv = ["/literal python", "entry.py", "--task-file", "/tmp/$value;literal"]
+        argv = [str(self.directory / "literal python"), "entry.py", "--task-file", "/tmp/$value;literal"]
         with mock.patch.object(screen, "screen_binary", return_value="/usr/bin/screen"), mock.patch.object(
             subprocess, "run", return_value=subprocess.CompletedProcess([], 0)
         ) as run:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 from email.message import EmailMessage
 import hashlib
 import importlib.resources as resources
@@ -53,6 +54,9 @@ from .platforms import LaunchError, OwnerState, ScreenBackend, SystemdUserBacken
 from .platforms import linux as linux_platform
 from .platforms import macos as macos_platform
 from .platforms import posix as posix_platform
+from .platforms import windows as windows_platform
+from .platforms import windows_io, windows_process
+from .platforms.windows import WindowsBackend
 from .templates import TEMPLATES, REASONING_EFFORTS, load_template
 
 DEFAULT_RETRIES = 3
@@ -251,6 +255,31 @@ def console_script_path() -> str:
     return sys.argv[0]
 
 
+def format_command(arguments: list[str]) -> str:
+    """Render commands for the platform's documented interactive shell."""
+    if os.name == "nt":
+        return windows_process.format_command(arguments)
+    return shlex.join(arguments)
+
+
+def control_command(*arguments: str) -> str:
+    command = (worker_command(*arguments) if os.name == "nt"
+               else [console_script_path(), *arguments])
+    return format_command(command)
+
+
+def private_directory(path: Path) -> None:
+    if os.name == "nt":
+        windows_io.ensure_private_directory(path)
+    else:
+        path.mkdir(parents=True, exist_ok=True)
+        os.chmod(path, 0o700)
+
+
+def process_command(arguments: list[str], environment: dict[str, str] | None = None) -> list[str]:
+    return windows_process.prepare_command(arguments, env=environment) if os.name == "nt" else arguments
+
+
 def codex_bin_path(args: argparse.Namespace) -> str:
     if args.codex_bin:
         return str(Path(args.codex_bin).expanduser())
@@ -277,15 +306,17 @@ def report_claude_agent_readiness(args: argparse.Namespace) -> None:
         )
         return
     try:
+        environment = child_agent_environment(dict(os.environ))
         result = subprocess.run(
-            [command, "auth", "status", "--json"],
+            process_command([command, "auth", "status", "--json"], environment),
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=10.0,
-            env=child_agent_environment(dict(os.environ)),
+            env=environment,
+            **(windows_process.background_popen_kwargs() if os.name == "nt" else {}),
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         result = None
     if result is not None and result.returncode == 0:
         print(
@@ -506,17 +537,7 @@ def prepare_request_for_queue(root: Path, request: dict[str, object], prompt: st
     request_id = str(request["id"])
     request["queue_dir"] = str(root)
     request["lifecycle_state"] = "pending"
-    acknowledgement = " ".join(
-        shlex.quote(part)
-        for part in [
-            console_script_path(),
-            "ack",
-            "--queue-dir",
-            str(root),
-            "--id",
-            request_id,
-        ]
-    )
+    acknowledgement = control_command("ack", "--queue-dir", str(root), "--id", request_id)
     routed_prompt = attach_routing_text(prompt, request)
     request["prompt"] = f"{routed_prompt}\n\n{build_acknowledgement_text(acknowledgement, agent=request_agent(request))}"
     if request.get("prompt_format") == callbacks.FORMAT:
@@ -620,7 +641,10 @@ def queue_callback(args: argparse.Namespace, prompt: str) -> int:
 
 def ensure_daemon_dirs(root: Path) -> None:
     root_existed = root.exists()
-    root.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        private_directory(root)
+    else:
+        root.mkdir(parents=True, exist_ok=True)
     if not root_existed:
         fsync_directory(root.parent)
     created = False
@@ -1040,6 +1064,8 @@ def reconcile_acknowledged_retained_leases(root: Path) -> None:
 
 
 def acquire_path_lock(path: Path, *, blocking: bool) -> tuple[object, Path] | None:
+    if os.name == "nt":
+        return windows_io.acquire_path_lock(path, blocking=blocking)
     if fcntl is None:  # pragma: no cover - supported deployments are POSIX
         raise RuntimeError("durable callback ownership requires POSIX flock support")
     return posix_platform.acquire_path_lock(path, blocking=blocking)
@@ -1136,6 +1162,16 @@ def retry_delay(args: argparse.Namespace, attempt: int) -> float:
 
 
 def terminate_process_group(process: subprocess.Popen[str], grace: float = 5.0) -> None:
+    if os.name == "nt":
+        # Delivery workers own kill-on-close Jobs before launching an Agent.
+        # Terminating that worker closes its final handle and its entire tree.
+        process.terminate()
+        try:
+            process.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        return
     if process.poll() is not None:
         process.wait()
         return
@@ -1167,6 +1203,10 @@ class AppServerRpcError(AppServerProtocolError):
 
 
 def desktop_app_server_socket(request: dict[str, object]) -> Path | None:
+    if os.name == "nt":
+        # Windows Desktop transport is not yet validated; retain explicit CLI
+        # resume of the bound session instead of guessing a socket endpoint.
+        return None
     target = request.get("target")
     if (
         not truthy_env(DESKTOP_APP_SERVER_ENV)
@@ -1535,7 +1575,10 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
 def delivery_worker_main() -> int:
     """Own one Codex resume and its locks without leaking them into Codex."""
     encoded_fds = os.environ.get("CODEX_LONG_TASK_DELIVERY_LOCK_FDS")
-    if encoded_fds:
+    if os.name == "nt":
+        lock_fds = windows_process.inherited_lock_fds()
+        windows_process.enter_worker_job()
+    elif encoded_fds:
         lock_fds = [int(value) for value in json.loads(encoded_fds)]
     else:  # Backward compatibility with delivery workers launched by 0.4.1.
         lock_fds = [int(os.environ["CODEX_LONG_TASK_DELIVERY_LOCK_FD"])]
@@ -1611,14 +1654,15 @@ def delivery_worker_main() -> int:
                     break
         else:
             process = subprocess.Popen(
-                [str(part) for part in command],
+                process_command([str(part) for part in command]),
                 stdin=subprocess.PIPE,
                 stdout=sys.stderr,
                 stderr=sys.stderr,
                 text=True,
+                encoding="utf-8",
                 cwd=str(payload["cwd"]),
                 close_fds=True,
-                start_new_session=True,
+                **(windows_process.background_popen_kwargs() if os.name == "nt" else {"start_new_session": True}),
             )
             try:
                 process.communicate(input=prompt, timeout=timeout)
@@ -1637,7 +1681,9 @@ def delivery_worker_main() -> int:
     finally:
         if desktop_delivery is not None:
             desktop_delivery.close()
-        for lock_fd in lock_fds:
+        # A Windows worker's Job may still be collecting Agent descendants.
+        # Keep its raw lease handles until OS process teardown, not before it.
+        for lock_fd in ([] if os.name == "nt" else lock_fds):
             try:
                 os.close(lock_fd)
             except OSError:
@@ -1737,19 +1783,22 @@ def run_resume_until_exit_or_ack(
         "canceled_path": str(request_path(root, "canceled", request_id)),
     }
     env = os.environ.copy()
+    if os.name == "nt":
+        env["PYTHONIOENCODING"] = "utf-8"
     lock_fds = (delivery_handle.fileno(), target_handle.fileno())
     env["CODEX_LONG_TASK_DELIVERY_LOCK_FDS"] = json.dumps(lock_fds)
     env["CODEX_LONG_TASK_DELIVERY_LOCK_FD"] = str(delivery_handle.fileno())
     try:
-        process = subprocess.Popen(
-            delivery_worker_command(),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            text=True,
-            close_fds=True,
-            pass_fds=lock_fds,
-            env=env,
-        )
+        if os.name == "nt":
+            process = windows_process.spawn_delivery_worker(
+                delivery_worker_command(), lock_fds, env,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8",
+            )
+        else:
+            process = subprocess.Popen(
+                delivery_worker_command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                text=True, encoding="utf-8", close_fds=True, pass_fds=lock_fds, env=env,
+            )
     except BaseException:
         release_owner_lock(delivery_lock, remove=False)
         release_owner_lock(target_lock, remove=False)
@@ -1798,7 +1847,7 @@ def run_resume_until_exit_or_ack(
 
 
 def fsync_directory(path: Path) -> None:
-    posix_platform.fsync_directory(path)
+    (windows_io if os.name == "nt" else posix_platform).fsync_directory(path)
 
 
 def write_request(path: Path, request: dict[str, object]) -> None:
@@ -1840,7 +1889,10 @@ def move_request(source: Path, destination_dir: Path) -> Path:
         else:
             fsync_directory(source.parent)
         return destination
-    os.replace(source, destination)
+    if os.name == "nt":
+        windows_io.replace_file(source, destination)
+    else:
+        os.replace(source, destination)
     if destination_dir != source.parent:
         fsync_directory(destination_dir)
     fsync_directory(source.parent)
@@ -1852,6 +1904,9 @@ def owner_lock_path(root: Path, request_id: str) -> Path:
 
 
 def acquire_owner_lock(root: Path, request_id: str, *, blocking: bool) -> tuple[object, Path] | None:
+    if os.name == "nt":
+        ensure_daemon_dirs(root)
+        return acquire_path_lock(owner_lock_path(root, request_id), blocking=blocking)
     if fcntl is None:  # pragma: no cover - supported deployments are POSIX
         raise RuntimeError("durable callback ownership requires POSIX flock support")
     ensure_daemon_dirs(root)
@@ -1872,11 +1927,11 @@ def release_owner_lock(lock: tuple[object, Path] | None, *, remove: bool) -> Non
         return
     handle, path = lock
     try:
-        if fcntl is not None:
+        if os.name != "nt" and fcntl is not None:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     finally:
         handle.close()
-    if remove:
+    if remove and os.name != "nt":
         try:
             path.unlink()
             fsync_directory(path.parent)
@@ -1907,6 +1962,8 @@ def current_boot_id() -> str | None:
 
 
 def host_platform():
+    if sys.platform == "win32":
+        return windows_platform
     return macos_platform if sys.platform == "darwin" else linux_platform
 
 
@@ -2356,14 +2413,8 @@ def process_goal_reminders(root: Path) -> bool:
                 "target": goal["target"], "target_source": goal.get("target_source", "goal"),
                 "goal_id": goal_id, "goal_reminder": True, "prompt": "",
             }
-            goal_ack_command = " ".join(
-                shlex.quote(part)
-                for part in [console_script_path(), "goal", "ack", "--queue-dir", str(root), "--id", goal_id]
-            )
-            goal_check_command = " ".join(
-                shlex.quote(part)
-                for part in [console_script_path(), "goal", "check", "--queue-dir", str(root), "--id", goal_id]
-            )
+            goal_ack_command = control_command("goal", "ack", "--queue-dir", str(root), "--id", goal_id)
+            goal_check_command = control_command("goal", "check", "--queue-dir", str(root), "--id", goal_id)
             try:
                 plan_path, plan, _, _ = goal_plan_snapshot(goal)
                 completed, total, current, remaining = goal_plan_progress(plan)
@@ -2421,6 +2472,14 @@ def daemon_has_live_delivery_workers(root: Path) -> bool:
     for path in (root / "running").glob("*.json"):
         if delivery_lock_is_held(root, path.stem):
             return True
+    # ACK can move a callback to done before its Agent exits. A replacement
+    # daemon has no in-memory child table; the inherited OS lease is still the
+    # source of truth, regardless of the callback's current queue state.
+    for path in (root / LOCKS_STATE).glob("delivery-*.lock"):
+        lock = acquire_path_lock(path, blocking=False)
+        if lock is None:
+            return True
+        release_owner_lock(lock, remove=False)
     return False
 
 
@@ -2433,6 +2492,7 @@ def daemon(args: argparse.Namespace) -> int:
         return 1
 
     reload_requested = False
+    stop_requested = False
     reload_deferred_reported = False
 
     def request_reload(_signum: int, _frame: object) -> None:
@@ -2450,6 +2510,9 @@ def daemon(args: argparse.Namespace) -> int:
 
         processed = 0
         while True:
+            if os.name == "nt" and consume_daemon_reload_request(root, filename="daemon-stop.json"):
+                stop_requested = True
+                reload_requested = True
             if consume_daemon_reload_request(root):
                 reload_requested = True
             if reload_requested:
@@ -2462,12 +2525,24 @@ def daemon(args: argparse.Namespace) -> int:
                             file=sys.stderr,
                         )
                         reload_deferred_reported = True
+                    if args.once:
+                        return 0
+                    # A drain must not admit another delivery or new workload
+                    # on each iteration, otherwise a busy queue never reloads.
+                    time.sleep(args.interval)
+                    continue
                 else:
+                    if stop_requested:
+                        return 0
                     load_service_proxy_environment()
                     print(
                         "ltc: reloading daemon in place after delivery workers drained.",
                         file=sys.stderr,
                     )
+                    if os.name == "nt":
+                        # The scheduled coordinator supervisor restarts only
+                        # this control process, after leases have drained.
+                        return 75
                     os.execv(sys.executable, daemon_reexec_command(args))
                     raise RuntimeError("daemon reload exec unexpectedly returned")
             reap_background_resumes()
@@ -2550,8 +2625,7 @@ def write_managed_task(root: Path, task: dict[str, object]) -> None:
     if not isinstance(task_id, str):
         raise ValueError("managed task requires an id")
     directory = managed_task_dir(root, task_id)
-    directory.mkdir(parents=True, exist_ok=True)
-    os.chmod(directory, 0o700)
+    private_directory(directory)
     write_request(managed_task_path(root, task_id), task)
 
 
@@ -2567,7 +2641,7 @@ def load_managed_task(path: Path) -> dict[str, object]:
     backend = task.get("execution_backend", "screen")
     if task.get("version") == 2 and "execution_backend" not in task:
         raise ValueError("version 2 task requires an execution backend")
-    if backend not in ("screen", "systemd-user", "launchd"):
+    if backend not in ("screen", "systemd-user", "launchd", "windows-task"):
         raise ValueError(f"unsupported execution backend: {backend!r}")
     if not isinstance(task.get("queue_dir"), str):
         raise ValueError("managed task is missing queue metadata")
@@ -2876,10 +2950,18 @@ def select_execution_backend(args: argparse.Namespace) -> str:
     """Resolve once at submission; recovery never silently changes ownership."""
     # Direct API callers from 0.6 keep their historical screen behavior.
     choice = getattr(args, "backend", "screen")
-    if choice not in ("auto", "screen", "systemd", "launchd"):
+    if choice not in ("auto", "screen", "systemd", "launchd", "windows-task"):
         raise ValueError(f"unsupported execution backend: {choice!r}")
+    if sys.platform == "win32":
+        if choice not in ("auto", "windows-task"):
+            raise ValueError("native Windows requires --backend windows-task (or auto)")
+        if WindowsBackend().available():
+            return "windows-task"
+        raise ValueError("Windows Task Scheduler is unavailable for this user; inspect scheduler access")
+    if choice == "windows-task":
+        raise ValueError("Windows Task Scheduler requires native Windows")
     if sys.platform not in ("linux", "darwin"):
-        raise ValueError("LTC supports Linux and macOS; native Windows is not implemented")
+        raise ValueError("LTC supports Linux, macOS and native Windows")
     if choice == "launchd" or (choice == "auto" and sys.platform == "darwin"):
         if LaunchdBackend().available():
             return "launchd"
@@ -2904,6 +2986,8 @@ def managed_owner_state(task: dict[str, object]) -> OwnerState:
 
 
 def native_backend(name: str):
+    if name == "windows-task":
+        return WindowsBackend()
     if name == "launchd":
         return LaunchdBackend()
     if name == "systemd-user":
@@ -2912,11 +2996,11 @@ def native_backend(name: str):
 
 
 def collect_managed_owner(root: Path, task: dict[str, object]) -> None:
-    if task.get("execution_backend") != "launchd" or task.get("owner_collected_at"):
+    if task.get("execution_backend") not in ("launchd", "windows-task") or task.get("owner_collected_at"):
         return
     owner = task.get("execution_owner")
     if (task.get("machine_id") == current_machine_id() and isinstance(owner, str)
-            and LaunchdBackend().collect(owner)):
+            and native_backend(str(task["execution_backend"])).collect(owner)):
         task["owner_collected_at"] = time.time()
         write_managed_task(root, task)
 
@@ -3156,7 +3240,7 @@ def submit_managed_run(args: argparse.Namespace) -> int:
         "outcome": "pending",
         "task": args.task,
         "cwd": os.path.abspath(args.cwd),
-        "command": args.command or shlex.join(wrapped_command),
+        "command": args.command or format_command(wrapped_command),
         "wrapped_command": wrapped_command,
         "message": args.message,
         "queue_dir": str(root),
@@ -3190,7 +3274,7 @@ def submit_managed_run(args: argparse.Namespace) -> int:
             }
         )
     try:
-        os.chmod(task_directory, 0o700)
+        private_directory(task_directory)
         if agent_prompt_path is not None:
             write_private_text(agent_prompt_path, str(args.agent_prompt_text))
         write_request(environment_path, {"version": 1, "environment": environment})
@@ -3223,27 +3307,40 @@ def run_task_worker(args: argparse.Namespace) -> int:
             raise ValueError("task already owned")
         try:
             task = load_managed_task(task_path)
-            if (task.get("execution_backend") not in ("systemd-user", "launchd") or task.get("state") != "launching"
+            if (task.get("execution_backend") not in ("systemd-user", "launchd", "windows-task") or task.get("state") != "launching"
                     or task.get("launch_attempt_count") != args.attempt):
                 raise ValueError("stale or unauthorized native worker")
-            if task["execution_backend"] == "launchd":
-                backend = LaunchdBackend()
+            if task["execution_backend"] in ("launchd", "windows-task"):
+                backend = native_backend(str(task["execution_backend"]))
                 owner = backend.owner_name(str(task["id"]), args.attempt, root)
                 boot = current_boot_id()
                 if (task.get("execution_owner") != owner or not backend.admits_worker(owner)
                         or task.get("machine_id") != current_machine_id()
                         or not boot or task.get("launch_boot_id") != boot):
-                    raise ValueError("worker does not match its launchd owner, host or boot")
+                    raise ValueError("worker does not match its native owner, host or boot")
                 task["owner_invocation_id"] = owner
             else:
                 if not os.environ.get("INVOCATION_ID"):
                     raise ValueError("native worker requires a systemd service invocation")
                 task["owner_invocation_id"] = os.environ["INVOCATION_ID"]
+            if task["execution_backend"] == "windows-task":
+                windows_process.enter_worker_job()
+                with Path(str(task["log_path"])).open("a", encoding="utf-8") as log:
+                    with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
+                        return run_managed_worker_locked(root, task)
             return run_managed_worker_locked(root, task)
         finally:
             release_owner_lock(lock, remove=False)
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"ltc: native worker refused: {exc}", file=sys.stderr)
+        if os.name == "nt" and isinstance(locals().get("task"), dict):
+            # Scheduled tasks have no interactive stderr; retain admission
+            # failures next to their private record for diagnosis.
+            try:
+                with (task_path.parent / "worker-admission.log").open("a", encoding="utf-8") as log:
+                    log.write(f"native worker refused: {exc}\n")
+            except OSError:
+                pass
         return 125
 
 
@@ -3304,6 +3401,8 @@ def run_managed_worker_locked(root: Path, task: dict[str, object]) -> int:
         queue_managed_task_callback(root, task)
         return 125
     os.environ.update(environment)
+    if os.name == "nt":
+        environment["PYTHONIOENCODING"] = "utf-8"
     try:
         environment_path.unlink()
         fsync_directory(environment_path.parent)
@@ -3326,6 +3425,10 @@ def run_managed_worker_locked(root: Path, task: dict[str, object]) -> int:
             "check": False,
             "close_fds": True,
         }
+        if os.name == "nt":
+            run_kwargs.update(stdout=sys.stdout, stderr=sys.stderr, env=environment,
+                              **windows_process.background_popen_kwargs())
+            command = process_command(command, environment)
         if task.get("task_kind") == "agent":
             prompt_path = Path(str(task["agent_prompt_path"]))
             result_path = Path(str(task["agent_result_path"]))
@@ -3334,6 +3437,7 @@ def run_managed_worker_locked(root: Path, task: dict[str, object]) -> int:
                 {
                     "input": prompt,
                     "text": True,
+                    "encoding": "utf-8",
                     "env": child_agent_environment(environment),
                 }
             )
@@ -3350,7 +3454,10 @@ def run_managed_worker_locked(root: Path, task: dict[str, object]) -> int:
                         sys.stdout.write("\n")
                     sys.stdout.flush()
             elif result_path.exists():
-                os.chmod(result_path, 0o600)
+                if os.name == "nt":
+                    windows_io.secure_file(result_path)
+                else:
+                    os.chmod(result_path, 0o600)
             else:
                 write_private_text(result_path, "")
         else:
@@ -3365,7 +3472,7 @@ def run_managed_worker_locked(root: Path, task: dict[str, object]) -> int:
             "outcome": "completed",
         }
         write_request(managed_result_path(root, str(task["id"])), result)
-    except (OSError, UnicodeError) as exc:
+    except (OSError, UnicodeError, ValueError) as exc:
         task["state"] = "interrupted"
         task["outcome"] = "unknown"
         task["recovery_reason"] = f"wrapped_command_launch_failed: {exc}"
@@ -3390,7 +3497,7 @@ def run(args: argparse.Namespace) -> int:
     if not args.wrapped_command:
         raise SystemExit("run mode requires a command after --")
 
-    args.command = args.command or shlex.join(args.wrapped_command)
+    args.command = args.command or format_command(args.wrapped_command)
     bind_target(args)
     if args.dry_run:
         print(
@@ -3464,9 +3571,9 @@ def agent(args: argparse.Namespace) -> int:
 
 
 def add_common_flags(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--backend", choices=("auto", "systemd", "launchd", "screen"),
+    parser.add_argument("--backend", choices=("auto", "systemd", "launchd", "windows-task", "screen"),
                         default=os.environ.get("LTC_EXECUTION_BACKEND", "auto"),
-                        help="Task owner: systemd on Linux, launchd on macOS; screen is the compatibility fallback")
+                        help="Task owner: systemd on Linux, launchd on macOS, windows-task on Windows; screen is the POSIX fallback")
     parser.add_argument("--callback-format", choices=("compact", "full"), default="compact",
                         help="Callback envelope (default: compact, verbose evidence saved locally)")
     parser.add_argument(
@@ -3759,6 +3866,14 @@ def select_delivery_prompt(payload: dict[str, object]) -> str:
 
 def ensure_callback_hook_file() -> Path:
     path = callback_hook_path()
+    if os.name == "nt":
+        private_directory(path.parent)
+        try:
+            windows_io.open_private_text(path).close()
+        except FileExistsError:
+            pass
+        print(f"Callback prompt hook: {path}")
+        return path
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         path.open("x", encoding="utf-8").close()
@@ -3834,6 +3949,9 @@ def write_proxy_environment_file(path: Path, values: dict[str, str]) -> None:
         raise ValueError("proxy environment source did not define any supported proxy variables")
     path.parent.mkdir(parents=True, exist_ok=True)
     contents = "".join(f"{name}={values[name]}\n" for name in PROXY_ENV_NAMES if name in values)
+    if os.name == "nt":
+        write_private_text(path, contents)
+        return
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with temporary.open("w", encoding="utf-8") as handle:
@@ -3987,7 +4105,7 @@ def send_standalone_reload(pid: int, *, expected_queue: Path | None = None) -> b
     identity = payload.get("process_identity")
     if not isinstance(identity, dict):
         return False
-    if sys.platform == "darwin":
+    if sys.platform in ("darwin", "win32"):
         # macOS has no pidfd signal. The lock-owning daemon verifies this
         # request against itself, avoiding a check-then-kill PID reuse race.
         root = Path(str(payload.get("queue_dir", "")))
@@ -3998,8 +4116,8 @@ def send_standalone_reload(pid: int, *, expected_queue: Path | None = None) -> b
     return linux_platform.signal_if_identity_matches(pid, identity, signal.SIGHUP)
 
 
-def consume_daemon_reload_request(root: Path) -> bool:
-    path = root / "daemon-reload.json"
+def consume_daemon_reload_request(root: Path, *, filename: str = "daemon-reload.json") -> bool:
+    path = root / filename
     try:
         request = json.loads(path.read_text(encoding="utf-8"))
         identity = daemon_process_identity(os.getpid())
@@ -4039,6 +4157,8 @@ def read_pid(path: Path) -> int | None:
 
 
 def pid_is_running(pid: int) -> bool:
+    if os.name == "nt":
+        return windows_platform.pid_is_running(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -4049,6 +4169,8 @@ def pid_is_running(pid: int) -> bool:
 
 
 def start_standalone_daemon(args: argparse.Namespace) -> int:
+    if os.name == "nt":
+        raise ValueError("Use --service windows-task on Windows for an independent coordinator")
     root = daemon_state_dir()
     root.mkdir(parents=True, exist_ok=True)
     pid_path = root / "daemon.pid"
@@ -4267,6 +4389,11 @@ def install_launchd(args: argparse.Namespace) -> int:
     return launchd_service.install(args)
 
 
+def install_windows_task(args: argparse.Namespace) -> int:
+    from . import windows_service
+    return windows_service.install(args)
+
+
 def select_daemon_service(args: argparse.Namespace) -> str:
     """Choose coordinator hosting separately from task execution ownership.
 
@@ -4274,14 +4401,20 @@ def select_daemon_service(args: argparse.Namespace) -> str:
     Supervisor configuration automatically; it remains an explicit option.
     """
     service = getattr(args, "service", "systemd")
-    if service not in ("auto", "systemd", "launchd", "supervisor", "standalone"):
+    if service not in ("auto", "systemd", "launchd", "windows-task", "supervisor", "standalone"):
         raise ValueError(f"unsupported daemon service: {service!r}")
     if service == "auto":
+        if sys.platform == "win32":
+            return "windows-task"
         if sys.platform == "darwin":
             return "launchd" if LaunchdBackend().available() else "standalone"
         return "systemd" if SystemdUserBackend().available() else "standalone"
     if service == "launchd" and sys.platform != "darwin":
         raise ValueError("launchd coordinator requires macOS")
+    if service == "windows-task" and sys.platform != "win32":
+        raise ValueError("Windows Task Scheduler requires native Windows")
+    if sys.platform == "win32" and service != "windows-task":
+        raise ValueError("Use --service windows-task on native Windows")
     if service == "systemd" and sys.platform != "linux":
         raise ValueError("systemd coordinator requires Linux; use --service launchd on macOS")
     return service
@@ -4333,6 +4466,8 @@ def setup(args: argparse.Namespace) -> int:
         return install_systemd(systemd_args)
     if service == "launchd":
         return install_launchd(systemd_args)
+    if service == "windows-task":
+        return install_windows_task(systemd_args)
     try:
         configure_proxy_environment(systemd_args)
         if service == "supervisor":
@@ -4829,7 +4964,7 @@ def main() -> int:
 
     doctor_parser = sub.add_parser("doctor", help="Check local readiness and print an Agent-owned repair plan as JSON")
     doctor_parser.add_argument("--queue-dir", help="Queue to inspect and configure")
-    doctor_parser.add_argument("--backend", choices=("auto", "systemd", "launchd", "screen"),
+    doctor_parser.add_argument("--backend", choices=("auto", "systemd", "launchd", "windows-task", "screen"),
                                default=os.environ.get("LTC_EXECUTION_BACKEND", "auto"))
     doctor_parser.add_argument("--operation", choices=("run", "agent", "done"), default="run",
                                help="Workflow whose prerequisites are checked (default: run)")
@@ -4846,7 +4981,7 @@ def main() -> int:
     done_parser = sub.add_parser("done", help="Queue a callback after an externally managed task finishes")
     add_common_flags(done_parser)
 
-    run_parser = sub.add_parser("run", help="Submit a command to an independent Linux or macOS task owner")
+    run_parser = sub.add_parser("run", help="Submit a command to an independent Linux, macOS or Windows task owner")
     add_common_flags(run_parser)
     run_parser.add_argument("wrapped_command", nargs=argparse.REMAINDER)
 
@@ -4870,6 +5005,10 @@ def main() -> int:
     task_worker_parser.add_argument("--task-file", required=True)
     task_worker_parser.add_argument("--attempt", type=int, required=True)
     sub.add_parser("_delivery-worker", help=argparse.SUPPRESS)
+    windows_coordinator_parser = sub.add_parser("_windows-coordinator", help=argparse.SUPPRESS)
+    windows_coordinator_parser.add_argument("--config-file", required=True)
+    uninstall_windows_parser = sub.add_parser("uninstall-windows-task", help="Remove Windows coordinator login registration and drain deliveries")
+    uninstall_windows_parser.add_argument("--name", default="codex-long-task-wakeup")
 
     daemon_parser = sub.add_parser("daemon", help="Process queued wakeup requests outside Codex tool sandboxes")
     daemon_parser.add_argument("--queue-dir", help="Wakeup queue directory")
@@ -4881,7 +5020,7 @@ def main() -> int:
     daemon_parser.add_argument("--retry-backoff", type=float, default=DEFAULT_RETRY_BACKOFF, help="Retry delay multiplier")
     daemon_parser.add_argument("--resume-timeout", type=float, default=DEFAULT_RESUME_TIMEOUT, help="Maximum seconds for one Codex resume before retrying")
 
-    for service in ("systemd", "launchd"):
+    for service in ("systemd", "launchd", "windows-task"):
         service_parser = sub.add_parser(f"install-{service}", help=f"Install a user-level {service} coordinator")
         service_parser.add_argument("--name", default="codex-long-task-wakeup", help="Service name / LaunchAgent label")
         service_parser.add_argument("--queue-dir", help="Wakeup queue directory")
@@ -4912,11 +5051,11 @@ def main() -> int:
     install_parser.add_argument("--force", action="store_true", help="Overwrite an existing long-task-callback skill")
 
     setup_parser = sub.add_parser("setup", help="Install the bundled skill and user-level wakeup daemon")
-    setup_parser.add_argument("--backend", choices=("auto", "systemd", "launchd", "screen"), default=os.environ.get("LTC_EXECUTION_BACKEND", "auto"))
+    setup_parser.add_argument("--backend", choices=("auto", "systemd", "launchd", "windows-task", "screen"), default=os.environ.get("LTC_EXECUTION_BACKEND", "auto"))
     setup_parser.add_argument("--callback-only", action="store_true",
                               help="Configure callbacks for externally owned work without requiring a local task backend")
-    setup_parser.add_argument("--service", choices=("auto", "systemd", "launchd", "supervisor", "standalone"), default="auto",
-                              help="Coordinator hosting: systemd on Linux, launchd on macOS, otherwise standalone")
+    setup_parser.add_argument("--service", choices=("auto", "systemd", "launchd", "windows-task", "supervisor", "standalone"), default="auto",
+                              help="Coordinator hosting: systemd on Linux, launchd on macOS, Task Scheduler on Windows")
     setup_parser.add_argument("--skill-path", help="Skills directory to install into (overrides --skill-target)")
     setup_parser.add_argument(
         "--skill-target",
@@ -5032,12 +5171,20 @@ def main() -> int:
         return run_task_worker(args)
     if args.mode == "_delivery-worker":
         return delivery_worker_main()
+    if args.mode == "_windows-coordinator":
+        from . import windows_service
+        return windows_service.run_coordinator(Path(args.config_file))
     if args.mode == "daemon":
         return daemon(args)
     if args.mode == "install-systemd":
         return install_systemd(args)
     if args.mode == "install-launchd":
         return install_launchd(args)
+    if args.mode == "install-windows-task":
+        return install_windows_task(args)
+    if args.mode == "uninstall-windows-task":
+        from . import windows_service
+        return windows_service.uninstall(args)
     if args.mode == "install-skill":
         return install_skill(args)
     if args.mode == "setup":

@@ -7,14 +7,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
+import shutil
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from long_task_callback import cli
+from test_cli import assert_private_file
 
 
 class CompactCallbackTests(unittest.TestCase):
@@ -58,7 +62,7 @@ class CompactCallbackTests(unittest.TestCase):
         details = Path(prepared["prompt_details_path"])
         self.assertTrue(details.is_file())
         self.assertIn(full, details.read_text(encoding="utf-8"))
-        self.assertEqual(stat.S_IMODE(details.stat().st_mode), 0o600)
+        assert_private_file(self, details)
         self.assertIn(str(details), compact)
         self.assertIn("read", compact.lower())
         self.assertIn("details", compact.lower())
@@ -70,10 +74,19 @@ class CompactCallbackTests(unittest.TestCase):
         lines = prepared["prompt_compact"].splitlines()
         candidates = [line for line in lines if "--queue-dir" in line and "--id" in line]
         self.assertEqual(len(candidates), 1)
-        self.assertEqual(
-            shlex.split(candidates[0]),
-            [launcher, "ack", "--queue-dir", str(self.root), "--id", "ack-correct-queue"],
-        )
+        if os.name == "nt":
+            shell = shutil.which("pwsh") or shutil.which("powershell")
+            self.assertIsNotNone(shell, "Windows ACK contract requires PowerShell")
+            result = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command", candidates[0]],
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            ack = cli.request_path(self.root, "acks", "ack-correct-queue")
+            self.assertEqual(json.loads(ack.read_text(encoding="utf-8"))["id"], "ack-correct-queue")
+        else:
+            self.assertEqual(
+                shlex.split(candidates[0]),
+                [launcher, "ack", "--queue-dir", str(self.root), "--id", "ack-correct-queue"],
+            )
 
     def test_unknown_outcome_is_visible_and_full_recovery_guidance_is_retained(self) -> None:
         request, full = self.make_callback(

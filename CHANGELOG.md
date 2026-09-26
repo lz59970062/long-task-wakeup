@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — Windows support
+
+- Add independent per-attempt Windows Task Scheduler runners and a per-user
+  coordinator supervisor, with no automatic business replay or execution limit.
+- Add private Windows ACLs, atomic file publication, transferable process-held
+  leases, native process/boot identities and runner-owned Job Object containment.
+- Support Windows Python virtual environments, recognized npm/batch CLI shims,
+  literal PowerShell ACK commands, safe coordinator drain/replacement and removal.
+- Cover Windows lifecycle and shared queue contracts with native process tests;
+  add Windows installation guidance and Python 3.9/3.12 CI configuration.
+- Record the successful native 120-second workload and the remaining live Codex
+  Desktop callback blocker separately; a completed workload is not callback ACK.
+
 ## Unreleased — macOS support
 
 - Add independent one-shot launchd task jobs and a persistent user LaunchAgent

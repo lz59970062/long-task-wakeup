@@ -3,11 +3,11 @@
 For the completed Mac work, live callback evidence and the next implementation
 steps, start with [Mac-to-Windows handoff](handoff-macos-to-windows.md).
 
-The 0.7 preview supports Linux and macOS. Native Windows, PI and DSH integrations
+The 0.7 preview supports Linux, macOS and native Windows. PI and DSH integrations
 are not implemented. The public commands and legacy screen records remain compatible
 with 0.6 tasks. Native tasks use record version 2, so older daemons reject them
 rather than accidentally running them through screen. Do not run an older daemon against newly submitted
-`systemd-user` or `launchd` records: use a separate preview queue, or drain and upgrade its
+`systemd-user`, `launchd` or `windows-task` records: use a separate preview queue, or drain and upgrade its
 coordinator before submitting new tasks.
 
 ## Responsibilities
@@ -20,6 +20,10 @@ coordinator before submitting new tasks.
 | `platforms/linux.py` | Independent systemd user units, native identity | Restart arbitrary user commands |
 | `platforms/macos.py` | Independent one-shot launchd jobs, native host/boot/process identity | Register business commands for login or automatically restart them |
 | `launchd_service.py` | macOS coordinator LaunchAgent installation and safe activation | Stop a live coordinator to apply configuration |
+| `platforms/windows.py`, `windows_scheduler.ps1` | Per-attempt Task Scheduler owners, host/boot/process identity and admission | Replay ambiguous submissions or infer absence from RPC failure |
+| `platforms/windows_io.py` | Protected ACLs, atomic replacement, transferable exclusive file handles | Claim POSIX directory-fsync or power-loss guarantees |
+| `platforms/windows_process.py` | Runner-owned Jobs, shell-free executable resolution, explicit handle inheritance | Launch an uncontained workload or pass prompts through cmd.exe |
+| `windows_service.py` | Per-user scheduled coordinator supervisor and drain/replacement | Stop active business jobs during coordinator updates |
 | `platforms/posix.py` | OS-held file locks and directory syncing | Pretend these primitives work on Windows |
 | `storage.py` | Atomic private JSON/text persistence | Store state in installation directories |
 | `agents/` | Agent metadata, session discovery, child/resume commands and capabilities | Launch tasks or change queue lifecycle |
@@ -134,23 +138,50 @@ Terminal closure and coordinator replacement do not stop native tasks while the
 user GUI session remains alive. Logout/reboot can interrupt execution and sleep
 pauses compute. No automatic task replay or unattended logout survival is promised.
 
-## Windows handoff
+## Windows ownership and recovery
 
-The [detailed Windows handoff](handoff-macos-to-windows.md) maps the current POSIX
-dependencies, lock/handle transfer, storage, process ownership and CLI integration
-points, with a staged plan and native acceptance criteria. Native Windows remains
-unimplemented; the following is its design target.
+The [original handoff](handoff-macos-to-windows.md) records the acceptance contract;
+[Windows setup](windows.md) describes the implementation. `windows-task` is both
+the native backend and a coordinator service choice. Each attempt registers a
+separate, on-demand Task Scheduler action for the logged-in user. Business jobs
+have no triggers, restart policy, battery/idle constraints or execution time limit.
+IgnoreNew and the durable attempt check jointly prevent concurrent/replayed work.
+COM control uses a fixed PowerShell script and JSON input/output, not localized
+schtasks text or interpolated shell commands. Lost replies remain UNKNOWN.
 
-Implement `ExecutionBackend` for owner identity, availability, launch and tri-state
-probe. Then extend backend selection, persisted-record validation, and worker
-admission. `run_task_worker` checks each native owner's launch context and the saved
-attempt. Host/boot/process identity and POSIX locking are explicit
-seams; review all direct POSIX operations before claiming native Windows support.
+Worker admission verifies the saved queue, task, attempt, owner, machine and boot,
+then the Scheduler instance PID against a live process identity. Windows Python
+venv redirectors need a verified direct parent chain: registered executable,
+actual parent/child executable images, SID, creation times, host and boot must
+match. Identity queries use native handles; `os.kill(pid, 0)` is never a Windows
+liveness test. Boot identity uses Windows' documented successful-boot counter;
+an unavailable counter is unknown and cannot authorize a replay or native start.
 
-Windows target: user logon coordinator and per-attempt scheduled runner, native Job Object
-containment established before the workload runs. Manager restart must not close
-the sole task handle. Runner death is interrupted/unknown, not permission to rerun.
-These are design targets, not tested implementations.
+Before creating any workload, the runner assigns itself to an unnamed,
+non-inherited KILL_ON_JOB_CLOSE Job. Future child processes inherit containment
+atomically from their parent, avoiding a create-suspended/assign crash window.
+The runner retains the sole Job handle until process exit. The coordinator never
+owns it; runner death collects its process tree and recovery reports interruption.
+
+Private state requires an ACL-capable filesystem. Files are created with a
+protected current-user/SYSTEM DACL, flushed, then replaced with write-through
+MoveFileEx. Windows has no supported POSIX directory-fsync equivalent; namespace
+durability under sudden power failure is explicitly unverified. Locks use exclusive
+CreateFile sharing, whose lifetime follows the open file object. Explicit inherited
+handle copies let delivery workers retain both per-callback and cross-queue session
+leases after their coordinator dies. Handles never pass into the Agent workload.
+
+A scheduled coordinator supervisor reads private pinned configuration and replaces
+the daemon after identity-verified reload requests drain active deliveries. During
+drain, new work is not admitted. Windows does not use POSIX execv replacement.
+Service removal deletes the login registration and drains the coordinator without
+stopping independent business owners. Changing a live coordinator's queue requires
+draining it first; each profile owns one coordinator/runtime record.
+
+Windows callbacks use the bound Agent CLI session. Native executables and recognized
+npm/forwarding batch shims are resolved without a shell; unknown batch scripts fail
+explicitly. Generated ACK/goal commands are literal PowerShell argument arrays.
+The optional Windows Desktop transport is not implemented or advertised.
 
 The initial desktop contract covers terminal closure and independent coordinator
 restart while the user session exists. Logout, reboot and WSL shutdown can
@@ -204,9 +235,9 @@ unresolved delivery failures are distinct observations. ACKed/canceled failures
 are historical evidence, not current delivery faults. Observations never relaunch
 business commands or modify task, callback or lease records.
 
-The report separates support, configuration and runtime readiness. Windows
-returns an unsupported-platform issue without Linux setup commands; macOS gets
-platform-appropriate launchd/screen selection and repair. A null repair command means the Agent must inspect lifecycle evidence or
+The report separates support, configuration and runtime readiness. Windows gets
+Task Scheduler selection and repair; macOS gets launchd/screen selection and repair.
+A null repair command means the Agent must inspect lifecycle evidence or
 platform support before choosing an action. A live owner does not prove workload
 progress; local readiness does not prove authentication or end-to-end delivery.
 

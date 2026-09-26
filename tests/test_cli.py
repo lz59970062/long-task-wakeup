@@ -23,7 +23,66 @@ from unittest import mock
 from long_task_callback import cli
 
 
+def assert_private_file(test: unittest.TestCase, path: Path) -> None:
+    if os.name == "nt":
+        # Use actual DACL inspection, not chmod's unrelated Windows mode bits.
+        from test_windows_io import WindowsIOTests
+        WindowsIOTests().assert_private_acl(path)
+    else:
+        test.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+
+_PYTHON_FIXTURES: set[str] = set()
+
+
+def executable_python_fixture(script: Path) -> Path:
+    """Make the same local, model-free Python fixture executable on both OSes."""
+    if os.name == "nt":
+        _PYTHON_FIXTURES.add(str(script))
+        return script
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    return script
+
+
+def patch_fixture_commands(test: unittest.TestCase) -> None:
+    if os.name != "nt":
+        return
+    for name in ("agent_wrapped_command", "resume_command"):
+        original = getattr(cli, name)
+
+        def fixture_command(*args, _original=original, **kwargs):
+            command = _original(*args, **kwargs)
+            return [sys.executable, *command] if command[0] in _PYTHON_FIXTURES else command
+
+        patcher = mock.patch.object(cli, name, side_effect=fixture_command)
+        patcher.start()
+        test.addCleanup(patcher.stop)
+
+
+def patch_inprocess_delivery_worker(test: unittest.TestCase) -> None:
+    if os.name == "nt":
+        # These tests invoke the worker in the test runner, using local pipe fds.
+        # Real inherited native handles and Jobs are covered by process tests.
+        for patcher in (
+            mock.patch.object(cli.windows_process, "inherited_lock_fds", side_effect=lambda:
+                              json.loads(os.environ.get("CODEX_LONG_TASK_DELIVERY_LOCK_FDS", "[]"))),
+            mock.patch.object(cli.windows_process, "enter_worker_job"),
+        ):
+            patcher.start()
+            test.addCleanup(patcher.stop)
+
+
 class CliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # This legacy fixture models screen selection; Windows IO and process
+        # adapters still run natively because os.name remains unchanged.
+        if os.name == "nt":
+            platform = mock.patch.object(sys, "platform", "linux")
+            platform.start()
+            self.addCleanup(platform.stop)
+        patch_fixture_commands(self)
+        patch_inprocess_delivery_worker(self)
+
     def tearDown(self) -> None:
         for delivery in list(cli._BACKGROUND_RESUMES.values()):
             cli.stop_resume_process(delivery.process)
@@ -174,7 +233,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(task["task_kind"], "agent")
             self.assertEqual(task["agent_worker"], "codex")
             self.assertEqual(prompt_path.read_text(encoding="utf-8"), "Fix the confirmed parser defect.")
-            self.assertEqual(stat.S_IMODE(prompt_path.stat().st_mode), 0o600)
+            assert_private_file(self, prompt_path)
             self.assertEqual(result_path.parent, task_path.parent)
             self.assertEqual(
                 task["wrapped_command"],
@@ -234,7 +293,7 @@ class CliTests(unittest.TestCase):
             self.assertIsNone(result["codex_thread_id"])
             self.assertIsNone(result["claude_session_id"])
             self.assertIsNone(result["claudecode"])
-            self.assertEqual(stat.S_IMODE(result_path.stat().st_mode), 0o600)
+            assert_private_file(self, result_path)
             callback = cli.load_request(root / "pending" / f"{task['id']}.json")
             self.assertEqual(callback["agent_worker"], "codex")
             self.assertIn("Child agent: Codex", Path(callback["prompt_details_path"]).read_text())
@@ -265,12 +324,12 @@ class CliTests(unittest.TestCase):
             task_path = next(cli.managed_tasks_root(root).glob("*/task.json"))
             task = cli.load_managed_task(task_path)
             environment_path = Path(str(task["environment_path"]))
-            self.assertEqual(stat.S_IMODE(environment_path.stat().st_mode), 0o600)
+            assert_private_file(self, environment_path)
             self.assertNotIn("--bare", task["wrapped_command"])
             self.assertEqual(
                 task["wrapped_command"],
                 [
-                    str(fake_claude),
+                    *([sys.executable] if os.name == "nt" else []), str(fake_claude),
                     "-p",
                     "--no-session-persistence",
                     "--permission-mode",
@@ -304,7 +363,7 @@ class CliTests(unittest.TestCase):
             self.assertIsNone(result["codex_thread_id"])
             self.assertIsNone(result["claude_session_id"])
             self.assertIsNone(result["claudecode"])
-            self.assertEqual(stat.S_IMODE(result_path.stat().st_mode), 0o600)
+            assert_private_file(self, result_path)
             self.assertFalse(environment_path.exists())
             self.assertNotIn("secret-sentinel-value", output.getvalue())
             callback = cli.load_request(root / "pending" / f"{task['id']}.json")
@@ -869,8 +928,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(len(queued), 1)
             request = json.loads(queued[0].read_text(encoding="utf-8"))
 
-            self.assertRegex(request["prompt"], r"(ltc|codex-long-task-wakeup)")
-            self.assertIn(" ack ", request["prompt"])
+            self.assertRegex(request["prompt"], r"(ltc|codex-long-task-wakeup|_entry\.py)")
+            self.assertIn(" 'ack' " if os.name == "nt" else " ack ", request["prompt"])
             details = Path(request["prompt_details_path"]).read_text()
             self.assertRegex(details, r"Callback time: .+[+-]\d{2}:\d{2}")
             self.assertIn(str(request["id"]), request["prompt"])
@@ -1610,6 +1669,7 @@ class CliTests(unittest.TestCase):
 
             self.assertTrue(cli.request_path(root, "canceled", "cancel-race").exists())
 
+    @unittest.skipUnless(os.name == "posix", "POSIX SIGKILL/session inheritance; Windows has native handle tests")
     def test_real_daemon_sigkill_does_not_redeliver_live_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "queue"
@@ -1685,6 +1745,7 @@ class CliTests(unittest.TestCase):
                     except ProcessLookupError:
                         pass
 
+    @unittest.skipUnless(os.name == "posix", "POSIX descendant PID/signals; Windows has Job/handle tests")
     def test_delivery_lock_is_not_inherited_by_codex_descendants(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "queue"
@@ -1759,6 +1820,7 @@ class CliTests(unittest.TestCase):
         output = io.StringIO()
         with (
             mock.patch.object(cli.shutil, "which", return_value="/opt/claude/bin/claude"),
+            mock.patch.object(cli, "process_command", side_effect=lambda command, environment=None: command),
             mock.patch.object(cli.subprocess, "run", return_value=completed) as auth_status,
             mock.patch.dict(
                 os.environ,
@@ -1876,7 +1938,7 @@ class CliTests(unittest.TestCase):
                 "HTTP_PROXY": "http://proxy.example:8080",
                 "no_proxy": "localhost,127.0.0.1",
             })
-            self.assertEqual(proxy_file.stat().st_mode & 0o777, 0o600)
+            assert_private_file(self, proxy_file)
             service = (Path(tmp) / "systemd" / "codex-long-task-wakeup.service").read_text(encoding="utf-8")
             self.assertIn(f"EnvironmentFile=-{proxy_file}", service)
             self.assertIn("ExecReload=/bin/kill -HUP $MAINPID", service)
@@ -1918,7 +1980,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(run_systemctl.call_args_list, [mock.call(["daemon-reload"]), mock.call(["enable", "codex-long-task-wakeup.service"])])
 
     def test_install_systemd_reloads_supported_daemon_while_delivery_is_running(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            cli, "daemon_process_identity", return_value={"start_ticks": 123, "boot_id": "fixture-boot"}
+        ):
             root = Path(tmp) / "queue"
             self._write_request(root, "inflight", tmp)
             cli.move_request(root / "pending" / "inflight.json", root / "running")
@@ -2012,6 +2076,7 @@ class CliTests(unittest.TestCase):
 
             self.assertFalse(proxy.exists())
 
+    @unittest.skipUnless(os.name == "posix", "POSIX SIGHUP and execv reload protocol")
     def test_daemon_hup_waits_for_live_delivery_workers_before_reexec(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = argparse.Namespace(
@@ -2043,6 +2108,7 @@ class CliTests(unittest.TestCase):
 
             execv.assert_not_called()
 
+    @unittest.skipUnless(os.name == "posix", "POSIX SIGHUP and execv reload protocol")
     def test_daemon_hup_reexecs_in_place(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = argparse.Namespace(
@@ -2179,7 +2245,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("[program:codex-long-task-wakeup]", text)
         self.assertIn("autostart=true", text)
         self.assertIn("autorestart=true", text)
-        self.assertIn("--queue-dir /tmp/queue", text)
+        self.assertIn("--queue-dir " + shlex.quote(str(Path("/tmp/queue"))), text)
 
     def test_cancel_moves_pending_to_canceled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2476,9 +2542,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(len(pending), 1)
             reminder = cli.load_request(pending[0])
             self.assertTrue(reminder["goal_reminder"])
-            self.assertIn("goal ack --queue-dir", reminder["prompt"])
-            self.assertIn("goal check --queue-dir", reminder["prompt"])
-            self.assertIn("--id reminder-goal", reminder["prompt"])
+            self.assertIn(cli.control_command("goal", "ack", "--queue-dir", str(root), "--id", "reminder-goal"), reminder["prompt"])
+            self.assertIn(cli.control_command("goal", "check", "--queue-dir", str(root), "--id", "reminder-goal"), reminder["prompt"])
             self.assertIn("--condition", reminder["prompt"])
             self.assertIn("Current item: finish [pending]", reminder["prompt"])
             self.assertIn("Remaining path:", reminder["prompt"])
@@ -2595,6 +2660,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(sendmail.call_count, 3)
             self.assertIn("blocked_email_exhausted_at", goal)
 
+    @unittest.skipUnless(os.name == "posix", "Desktop transport uses POSIX peer credentials")
     def test_desktop_app_server_delivery_preserves_turn_completion_and_unknown_submit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             def start_server(*, reply_to_turn_start: bool) -> tuple[Path, threading.Thread, list[dict[str, object]], list[BaseException]]:
@@ -2821,6 +2887,7 @@ class CliTests(unittest.TestCase):
             }
             with (
                 mock.patch.dict(os.environ, {cli.DESKTOP_APP_SERVER_ENV: "1"}, clear=False),
+                mock.patch.object(cli, "desktop_app_server_socket", return_value=Path(tmp) / "fake.sock"),
                 mock.patch.object(cli, "AppServerConnection", return_value=connection),
             ):
                 self.assertIsNone(cli.start_desktop_app_server_turn(payload))
@@ -2876,14 +2943,15 @@ class CliTests(unittest.TestCase):
             ),
             mock.patch.object(cli, "codex_home", return_value=Path("/tmp/codex-home")),
         ):
-            self.assertEqual(cli.desktop_app_server_socket(request), Path("/tmp/codex-home/app-server-control/app-server-control.sock"))
+            expected = None if os.name == "nt" else Path("/tmp/codex-home/app-server-control/app-server-control.sock")
+            self.assertEqual(cli.desktop_app_server_socket(request), expected)
 
     def test_desktop_delivery_worker_uses_cli_after_explicit_rejection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             hook = Path(tmp) / "callback-hook.md"
             hook.write_text("Use the custom callback policy.\n", encoding="utf-8")
             payload = {
-                "command": ["codex", "exec", "resume"],
+                "command": [sys.executable, "-c", "pass"],
                 "prompt": "wake up",
                 "callback_hook_path": str(hook),
                 "cwd": tmp,
@@ -3183,8 +3251,7 @@ class CliTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        script.chmod(script.stat().st_mode | stat.S_IXUSR)
-        return script
+        return executable_python_fixture(script)
 
     def _fake_codex(
         self,
@@ -3236,8 +3303,7 @@ class CliTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        script.chmod(script.stat().st_mode | stat.S_IXUSR)
-        return script
+        return executable_python_fixture(script)
 
 
 if __name__ == "__main__":

@@ -11,10 +11,16 @@ import unittest
 from unittest import mock
 
 from long_task_callback import cli
+from test_cli import executable_python_fixture, patch_fixture_commands
 
 
 class CustomTemplateTests(unittest.TestCase):
     def setUp(self):
+        if os.name == "nt":
+            platform = mock.patch.object(sys, "platform", "linux")
+            platform.start()
+            self.addCleanup(platform.stop)
+        patch_fixture_commands(self)
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.cwd = Path(temp.name)
@@ -188,7 +194,7 @@ class CustomTemplateTests(unittest.TestCase):
         child.write_text(f"#!{sys.executable}\nimport sys,json\nfrom pathlib import Path\n"
                          f"Path({str(capture)!r}).write_text(json.dumps({{'argv':sys.argv[1:],'prompt':sys.stdin.read()}}))\n"
                          "Path(sys.argv[sys.argv.index('-o')+1]).write_text('Authored report')\n")
-        child.chmod(0o700)
+        child = executable_python_fixture(child)
         with mock.patch.dict(os.environ, {"CODEX_LONG_TASK_WAKEUP_CODEX_BIN": str(child)}):
             self.assertEqual(self.invoke(["--template", "review"])[0], 0)
         task = self.task()

@@ -5,6 +5,7 @@ build/
 dist/
 .venv/
 .pytest_cache/
+.windows-dev/
 
 # Local review discussions and reports
 .committee-reviews/

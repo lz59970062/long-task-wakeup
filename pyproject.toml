@@ -13,6 +13,7 @@ authors = [
 ]
 keywords = ["codex", "claude-code", "callback", "long-running-tasks"]
 classifiers = [
+  "Operating System :: Microsoft :: Windows",
   "Operating System :: MacOS :: MacOS X",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
@@ -27,4 +28,4 @@ codex-long-task-wakeup = "long_task_callback.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-long_task_callback = ["skill/SKILL.md", "skill/agents/openai.yaml", "templates/*.md"]
+long_task_callback = ["skill/SKILL.md", "skill/agents/openai.yaml", "templates/*.md", "platforms/*.ps1"]
