@@ -181,8 +181,9 @@ for the new queue. Do not copy another machine's session binding.
 
 Use native argument lists. Recognized npm/forwarding `.cmd` launchers are resolved
 without a shell; unsupported wrappers require their underlying executable.
-Windows callbacks use CLI resume of the actual original session; Desktop
-transport is disabled pending validation. Execute the callback's emitted
+Windows callbacks default to CLI resume of the actual original session. An
+experimental shared-server bridge is available only through explicit setup;
+its real Desktop original-session acceptance is still pending. Execute the callback's emitted
 PowerShell ACK verbatim, including its leading `&` and quoted paths. ACK confirms
 receipt only, not goal completion. Never replace the target with `--last`.
 
@@ -192,6 +193,13 @@ guarantee that Desktop releases this owner. Preserve the failed callback and
 report this transport limitation; do not delete Codex's writer lock, forge an
 ACK, change the bound session or rerun the business work. Native workload and
 fake-Agent delivery tests do not establish live original-session receipt.
+
+For the experimental bridge, follow the repository's `docs/windows-desktop-bridge.md`.
+It requires Desktop and LTC to use one App Server and the explicit
+`CODEX_LONG_TASK_WAKEUP_DESKTOP_BRIDGE_FILE` metadata path. Never guess a port or
+expose an unauthenticated App Server. The supplied launcher refuses a running
+Desktop; switching its connection requires closing active Desktop work first.
+After explicit bridge selection, connection failure must not fall back to CLI.
 
 New private files/directories grant only the current user and SYSTEM access.
 Do not weaken those ACLs to work around an Agent sandbox's restricted token;

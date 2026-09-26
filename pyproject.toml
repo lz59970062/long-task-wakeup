@@ -23,6 +23,7 @@ dependencies = ["PyYAML>=6.0"]
 [project.scripts]
 ltc = "long_task_callback.cli:main"
 codex-long-task-wakeup = "long_task_callback.cli:main"
+ltc-desktop-core = "long_task_callback.desktop_core:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

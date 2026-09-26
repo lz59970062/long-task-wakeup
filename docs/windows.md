@@ -73,9 +73,11 @@ with `--codex-bin` / `--claude-bin` or the corresponding Agent binary environmen
 variable. For deliberate shell syntax, invoke the shell explicitly, for example
 `powershell.exe -NoProfile -Command <script>`.
 
-Windows callbacks use the Agent CLI to resume the exact bound session. Windows
-Desktop transport has not been validated and is disabled; LTC does not guess a
-Desktop socket or silently switch sessions. Each callback includes a PowerShell
+Windows callbacks use the Agent CLI to resume the exact bound session by default.
+An [experimental explicit Desktop bridge](windows-desktop-bridge.md) can connect
+Desktop and LTC to one shared App Server; it requires deliberate setup and has
+not yet passed the original Desktop conversation's end-to-end acceptance test.
+LTC does not guess a Desktop socket or silently switch sessions. Each callback includes a PowerShell
 ACK command pinned to this installation. Copy that command exactly, including
 the leading `&` and single-quoted paths; doubled single quotes inside paths are
 intentional. For example:
@@ -95,6 +97,9 @@ completion and fake-Agent delivery/ACK passed, but that original-session deliver
 did not. Ending a turn does not establish that Desktop releases its session owner.
 Do not delete Codex's writer lock or change the callback target to work around it;
 retain the failed callback for a supported Desktop transport or valid CLI ownership.
+The bridge's real App Server protocol test now demonstrates two clients resuming
+one owned test thread, without any model call; this is narrower than real Desktop
+receipt and ACK.
 
 ## Inspect, update and remove
 

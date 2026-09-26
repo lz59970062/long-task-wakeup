@@ -45,7 +45,7 @@ def configuration(args: argparse.Namespace) -> dict[str, object]:
     environment.update(CODEX_HOME=str(cli.codex_home().resolve()),
                        CLAUDE_CONFIG_DIR=str(cli.claude_home().resolve()),
                        PYTHONIOENCODING="utf-8")
-    for name in (cli.TARGET_LOCK_DIR_ENV,):
+    for name in (cli.TARGET_LOCK_DIR_ENV, cli.APP_SERVER_BRIDGE_FILE_ENV):
         if name in os.environ:
             environment[name] = os.environ[name]
     return {

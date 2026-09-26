@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from typing import Mapping, MutableMapping, Sequence
 
 
@@ -38,6 +39,11 @@ def _kernel32():
         "SetHandleInformation": ([wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD], wintypes.BOOL),
         "DuplicateHandle": ([wintypes.HANDLE, wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.BOOL),
         "CloseHandle": ([wintypes.HANDLE], wintypes.BOOL),
+        "QueryInformationJobObject": ([wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)], wintypes.BOOL),
+        "OpenProcess": ([wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE),
+        "IsProcessInJob": ([wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)], wintypes.BOOL),
+        "TerminateProcess": ([wintypes.HANDLE, wintypes.UINT], wintypes.BOOL),
+        "WaitForSingleObject": ([wintypes.HANDLE, wintypes.DWORD], wintypes.DWORD),
     }
     for name, (arguments, result) in signatures.items():
         function = getattr(api, name)
@@ -107,6 +113,109 @@ def enter_worker_job() -> int:
             raise
         _WORKER_JOB_HANDLE = int(handle)
         return _WORKER_JOB_HANDLE
+
+
+def _job_process_ids(api, job_handle: int) -> set[int]:
+    capacity = 32
+    while capacity <= 65536:
+        data = ctypes.create_string_buffer(8 + ctypes.sizeof(ctypes.c_size_t) * capacity)
+        length = wintypes.DWORD()
+        okay = api.QueryInformationJobObject(job_handle, 3, data, len(data), ctypes.byref(length))
+        if not okay:
+            error = ctypes.get_last_error()
+            if error == 234:  # ERROR_MORE_DATA: membership grew while querying.
+                capacity *= 2
+                continue
+            raise ctypes.WinError(error)
+        assigned = wintypes.DWORD.from_buffer(data, 0).value
+        count = wintypes.DWORD.from_buffer(data, 4).value
+        if count > capacity or count > assigned or length.value < 8 + count * ctypes.sizeof(ctypes.c_size_t):
+            raise RuntimeError("Invalid worker Job process list")
+        if assigned > count:
+            capacity = max(capacity * 2, assigned)
+            continue
+        members = {int(ctypes.c_size_t.from_buffer(data, 8 + index * ctypes.sizeof(ctypes.c_size_t)).value)
+                   for index in range(count)}
+        if len(members) != count or any(pid <= 0 or pid > 0xFFFFFFFF for pid in members):
+            raise RuntimeError("Invalid worker Job process identity list")
+        return members
+    raise RuntimeError("Worker Job process list exceeds its cleanup limit")
+
+
+def terminate_worker_children(job_handle: int, *, timeout: float = 5.0) -> None:
+    """Drain this process's own worker Job before reporting graceful shutdown.
+
+    KILL_ON_JOB_CLOSE is still needed for crashes, but its termination of child
+    processes is asynchronous after the parent exits. Graceful bridge teardown
+    instead pins each child with an OS process handle, verifies membership in
+    the exact Job, terminates that handle, and waits for all members except
+    ourselves to exit. Never close the Job (it also contains this process).
+    This is deliberately not an arbitrary PID/tree termination primitive.
+    """
+    import math
+
+    if type(job_handle) is not int or job_handle != _WORKER_JOB_HANDLE:
+        raise ValueError("Cleanup requires this process's own worker Job handle")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("Worker Job cleanup timeout must be finite and positive")
+    api = _kernel32()
+    own_membership = wintypes.BOOL()
+    if not api.IsProcessInJob(api.GetCurrentProcess(), job_handle, ctypes.byref(own_membership)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not own_membership.value:
+        raise RuntimeError("Worker does not belong to the supplied Job")
+    deadline = time.monotonic() + timeout
+    while True:
+        members = _job_process_ids(api, job_handle)
+        if os.getpid() not in members:
+            raise RuntimeError("Worker Job no longer reports its owner")
+        members.discard(os.getpid())
+        if not members:
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Worker Job children did not finish cleanup")
+        handles = []
+        try:
+            for pid in members:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Worker Job children did not finish cleanup")
+                handle = api.OpenProcess(0x0001 | 0x00100000 | 0x1000, False, pid)
+                if not handle:
+                    error = ctypes.get_last_error()
+                    if error == 87:  # The process exited after the snapshot.
+                        continue
+                    raise OSError(f"OpenProcess failed during worker Job cleanup (Windows error {error})")
+                handles.append(handle)
+                belongs = wintypes.BOOL()
+                if not api.IsProcessInJob(handle, job_handle, ctypes.byref(belongs)):
+                    raise OSError(f"IsProcessInJob failed during worker Job cleanup (Windows error {ctypes.get_last_error()})")
+                if not belongs.value:
+                    # A recycled PID can now name an unrelated process. Its
+                    # handle is only closed, never terminated or waited on.
+                    handles.pop()
+                    api.CloseHandle(handle)
+                    continue
+                if not api.TerminateProcess(handle, 1):
+                    error = ctypes.get_last_error()
+                    # Windows reports ACCESS_DENIED when termination has
+                    # already begun, before the process handle is signaled.
+                    # Still wait on this exact verified member handle below;
+                    # refusal is never treated as evidence of disappearance.
+                    if error != 5 and api.WaitForSingleObject(handle, 0) != 0:
+                        raise OSError(f"TerminateProcess failed during worker Job cleanup (Windows error {error})")
+            for handle in handles:
+                remaining = max(0, int((deadline - time.monotonic()) * 1000))
+                status = api.WaitForSingleObject(handle, remaining)
+                if status == 258:
+                    raise TimeoutError("Worker Job child did not finish cleanup")
+                if status != 0:
+                    raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            for handle in handles:
+                api.CloseHandle(handle)
+        # A child can have forked between the first snapshot and termination.
+        # Membership is authoritative and includes nested Jobs; repeat until
+        # only this bridge remains before releasing logs or singleton state.
 
 
 def background_popen_kwargs() -> dict[str, object]:

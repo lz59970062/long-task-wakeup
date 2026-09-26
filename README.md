@@ -38,6 +38,8 @@ Windows 10+ uses per-user Task Scheduler owners and Job Objects in a logged-in u
 session. See [Windows setup and limits](docs/windows.md) for PowerShell instructions.
 Windows original-session delivery to an open Codex Desktop conversation remains
 blocked by its active-writer check; that end-to-end acceptance test has not passed.
+An opt-in [Windows Desktop bridge](docs/windows-desktop-bridge.md) now provides a
+shared-server path with native peer verification; real Desktop acceptance remains pending.
 
 ```bash
 python3 -m pip install .
@@ -129,8 +131,8 @@ instead of model polling; the worker and daemon wait without spending model turn
 Linux requires a reachable systemd user manager (v240+) or GNU screen.
 macOS uses the built-in launchd manager; the native backend needs no screen.
 Windows uses Task Scheduler as the logged-in user, Python 3.9+, and a local
-ACL-capable filesystem such as NTFS. Its Desktop transport is disabled; callbacks
-resume the bound session through the Agent CLI. [Windows installation](docs/windows.md)
+ACL-capable filesystem such as NTFS. Callbacks default to Agent CLI resume;
+the experimental Desktop bridge requires explicit setup. [Windows installation](docs/windows.md)
 includes the filesystem durability and logout boundaries.
 The selected backend is recorded at submission and never silently changed during recovery.
 

@@ -35,6 +35,7 @@ from . import __version__
 from . import callbacks
 from . import diagnostics
 from . import storage
+from .desktop_connection import BridgeEndpoint, load_bridge_endpoint
 from .agents import AGENTS, AGENT_NAMES, ChildOptions, get_agent
 from .agents.base import (
     DEFAULT_APPROVALS_REVIEWER,
@@ -100,6 +101,7 @@ STANDARD_CALLBACK_GUIDANCE = "\n".join([
 DESKTOP_APP_SERVER_ENV = "CODEX_LONG_TASK_WAKEUP_DESKTOP_APP_SERVER"
 APP_SERVER_SOCKET_ENV = "CODEX_LONG_TASK_WAKEUP_APP_SERVER_SOCKET"
 ALLOW_APP_SERVER_SOCKET_OVERRIDE_ENV = "CODEX_LONG_TASK_WAKEUP_ALLOW_APP_SERVER_SOCKET_OVERRIDE"
+APP_SERVER_BRIDGE_FILE_ENV = "CODEX_LONG_TASK_WAKEUP_DESKTOP_BRIDGE_FILE"
 PROXY_ENV_NAMES = (
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -1202,11 +1204,7 @@ class AppServerRpcError(AppServerProtocolError):
     """The local Codex App Server explicitly rejected a JSON-RPC request."""
 
 
-def desktop_app_server_socket(request: dict[str, object]) -> Path | None:
-    if os.name == "nt":
-        # Windows Desktop transport is not yet validated; retain explicit CLI
-        # resume of the bound session instead of guessing a socket endpoint.
-        return None
+def desktop_app_server_socket(request: dict[str, object]) -> Path | BridgeEndpoint | None:
     target = request.get("target")
     if (
         not truthy_env(DESKTOP_APP_SERVER_ENV)
@@ -1216,6 +1214,11 @@ def desktop_app_server_socket(request: dict[str, object]) -> Path | None:
         or not target["value"]
     ):
         return None
+    if os.name == "nt":
+        configured_bridge = os.environ.get(APP_SERVER_BRIDGE_FILE_ENV)
+        if not configured_bridge:
+            return None
+        return load_bridge_endpoint(Path(configured_bridge).expanduser(), codex_home())
     configured = os.environ.get(APP_SERVER_SOCKET_ENV)
     if configured and truthy_env(ALLOW_APP_SERVER_SOCKET_OVERRIDE_ENV):
         return Path(configured).expanduser()
@@ -1235,7 +1238,7 @@ def desktop_sandbox_policy(request: dict[str, object]) -> dict[str, object] | No
 
 
 class AppServerConnection:
-    def __init__(self, path: Path, timeout: float) -> None:
+    def __init__(self, path: Path | BridgeEndpoint, timeout: float) -> None:
         self.path = path
         self.timeout = timeout
         self.socket: socket.socket | None = None
@@ -1244,18 +1247,29 @@ class AppServerConnection:
         self.notifications: list[dict[str, object]] = []
 
     def connect(self) -> None:
-        if not self.path.is_socket():
-            raise AppServerProtocolError(f"control socket unavailable at {self.path}")
-        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         deadline = time.monotonic() + self.timeout
+        if isinstance(self.path, BridgeEndpoint):
+            connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        else:
+            if not self.path.is_socket():
+                raise AppServerProtocolError(f"control socket unavailable at {self.path}")
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             connection.settimeout(max(0.1, deadline - time.monotonic()))
-            connection.connect(str(self.path))
-            self._verify_peer_uid(connection)
+            if isinstance(self.path, BridgeEndpoint):
+                from .platforms.windows_tcp import verify_loopback_peer
+                connection.connect(("127.0.0.1", self.path.port))
+                verify_loopback_peer(connection, expected_pid=self.path.pid,
+                                     expected_identity=self.path.identity)
+                host = f"127.0.0.1:{self.path.port}"
+            else:
+                connection.connect(str(self.path))
+                self._verify_peer_uid(connection)
+                host = "localhost"
             key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
             request = (
                 "GET / HTTP/1.1\r\n"
-                "Host: localhost\r\n"
+                f"Host: {host}\r\n"
                 "Upgrade: websocket\r\n"
                 "Connection: Upgrade\r\n"
                 f"Sec-WebSocket-Key: {key}\r\n"
@@ -1380,8 +1394,9 @@ class AppServerConnection:
 
     def _receive_message(self, deadline: float) -> tuple[int, bytes]:
         final, opcode, payload = self._receive_frame(deadline)
-        while opcode == 0x9:
-            self._send_frame(0xA, payload)
+        while opcode in (0x9, 0xA):
+            if opcode == 0x9:
+                self._send_frame(0xA, payload)
             final, opcode, payload = self._receive_frame(deadline)
         if final or opcode in (0x8, 0xA):
             return opcode, payload
@@ -1390,8 +1405,9 @@ class AppServerConnection:
         chunks = [payload]
         while True:
             final, continuation_opcode, continuation = self._receive_frame(deadline)
-            if continuation_opcode == 0x9:
-                self._send_frame(0xA, continuation)
+            if continuation_opcode in (0x9, 0xA):
+                if continuation_opcode == 0x9:
+                    self._send_frame(0xA, continuation)
                 continue
             if continuation_opcode != 0x0:
                 raise AppServerProtocolError("control socket interrupted a fragmented message")
@@ -1495,6 +1511,38 @@ class DesktopAppServerDelivery:
             self.connection = None
 
 
+def desktop_delivery_context(payload: dict[str, object]) -> tuple[Path, dict[str, object]] | None:
+    """Return the durable queue identity supplied by a real delivery worker."""
+    request = payload.get("request")
+    root = payload.get("queue_dir")
+    if (isinstance(request, dict) and isinstance(request.get("id"), str)
+            and isinstance(root, str) and root):
+        return Path(root), request
+    return None
+
+
+def desktop_submission_pending(root: Path, request: dict[str, object]) -> bool:
+    """Recognize this callback's durable submission intent after worker loss.
+
+    A parent timeout or process crash can preempt the worker before it writes
+    its final JSON result. The pre-submission lease is then authoritative, not
+    the worker's OS exit code. Unreadable intent remains uncertain.
+    """
+    path = retained_target_lease_path(request)
+    if path is None:
+        return False
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+    if not isinstance(record, dict):
+        return True
+    return (record.get("request_id") == request.get("id")
+            and record.get("queue_dir") == str(root.resolve()))
+
+
 def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServerDelivery | None:
     request = payload.get("request")
     if not isinstance(request, dict):
@@ -1507,6 +1555,7 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
     if socket_path is None or sandbox_policy is None or not isinstance(target, dict) or not isinstance(target.get("value"), str):
         return None
     connection = AppServerConnection(socket_path, min(15.0, max(1.0, float(payload["timeout"]))))
+    delivery_context = desktop_delivery_context(payload)
     turn_start_submitted = False
     try:
         connection.connect()
@@ -1531,6 +1580,20 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
         approvals_reviewer = request.get("approvals_reviewer")
         if isinstance(approvals_reviewer, str) and approvals_reviewer:
             turn_params["approvalsReviewer"] = approvals_reviewer
+        if delivery_context is not None:
+            root, callback = delivery_context
+            # The parent deadline begins before this worker's startup and RPC
+            # handshake. Persist before sending any turn/start bytes so an
+            # earlier parent timeout or worker crash cannot authorize replay.
+            retain_target_lease(root, callback)
+            if ack_path(root, str(callback["id"])).exists() or is_canceled(root, str(callback["id"])):
+                try:
+                    release_retained_target_lease(root, callback)
+                except (OSError, RuntimeError) as cleanup_error:
+                    # ACK/cancel is authoritative even when global cleanup is
+                    # unavailable. Do not fall through to another transport.
+                    print(f"ltc: acknowledged/canceled Desktop intent cleanup deferred: {cleanup_error}", file=sys.stderr)
+                return DesktopAppServerDelivery(None, target["value"], None)
         turn_start_submitted = True
         started = connection.request("turn/start", turn_params)
         turn_id = None
@@ -1550,11 +1613,25 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
         return delivery
     except AppServerRpcError as exc:
         if turn_start_submitted:
+            if delivery_context is not None:
+                try:
+                    release_retained_target_lease(*delivery_context)
+                except (OSError, RuntimeError) as cleanup_error:
+                    print(
+                        f"ltc: explicit Desktop rejection could not clear submission intent: {cleanup_error}; "
+                        "waiting for ACK or manual recovery without CLI fallback",
+                        file=sys.stderr,
+                    )
+                    return DesktopAppServerDelivery(None, target["value"], None)
+            if isinstance(socket_path, BridgeEndpoint):
+                raise AppServerProtocolError("explicit Desktop bridge rejected the callback; CLI fallback disabled") from exc
             print(
                 f"ltc: desktop App Server rejected turn/start: {exc}; falling back to CLI",
                 file=sys.stderr,
             )
         else:
+            if isinstance(socket_path, BridgeEndpoint):
+                raise AppServerProtocolError("explicit Desktop bridge could not resume the bound session; CLI fallback disabled") from exc
             print(f"ltc: desktop App Server delivery unavailable: {exc}; falling back to CLI", file=sys.stderr)
         return None
     except (OSError, ValueError, TypeError, AppServerProtocolError) as exc:
@@ -1565,6 +1642,8 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
                 file=sys.stderr,
             )
             return DesktopAppServerDelivery(None, target["value"], None)
+        if isinstance(socket_path, BridgeEndpoint):
+            raise AppServerProtocolError("explicit Desktop bridge is unavailable; CLI fallback disabled") from exc
         print(f"ltc: desktop App Server delivery unavailable: {exc}; falling back to CLI", file=sys.stderr)
         return None
     finally:
@@ -1583,6 +1662,7 @@ def delivery_worker_main() -> int:
     else:  # Backward compatibility with delivery workers launched by 0.4.1.
         lock_fds = [int(os.environ["CODEX_LONG_TASK_DELIVERY_LOCK_FD"])]
     payload = json.load(sys.stdin)
+    delivery_context = desktop_delivery_context(payload)
     command = payload["command"]
     prompt = str(payload["prompt"])
     # Recheck here as well as in the parent: an ACK/cancel may arrive while the
@@ -1614,6 +1694,8 @@ def delivery_worker_main() -> int:
                 acknowledged = Path(str(payload["ack_path"])).exists()
                 canceled = Path(str(payload["canceled_path"])).exists()
                 if acknowledged:
+                    if delivery_context is not None:
+                        release_retained_target_lease(*delivery_context)
                     result = {
                         "returncode": 0,
                         "delivery": "desktop_app_server",
@@ -1621,6 +1703,8 @@ def delivery_worker_main() -> int:
                     }
                     break
                 if canceled:
+                    if delivery_context is not None:
+                        release_retained_target_lease(*delivery_context)
                     result = {"returncode": 0, "delivery": "desktop_app_server", "skipped": "canceled"}
                     break
                 remaining = deadline - time.monotonic()
@@ -1646,6 +1730,10 @@ def delivery_worker_main() -> int:
                     break
                 if desktop_delivery.wait_for_completion(min(0.1, remaining)):
                     acknowledged = Path(str(payload["ack_path"])).exists()
+                    if delivery_context is not None:
+                        # A matching turn/completed is a known outcome. Missing
+                        # ACK may use the normal at-least-once callback policy.
+                        release_retained_target_lease(*delivery_context)
                     result = {
                         "returncode": 0 if acknowledged else 1,
                         "delivery": "desktop_app_server",
@@ -1836,10 +1924,16 @@ def run_resume_until_exit_or_ack(
                 return result, acked, returncode is None
             if returncode is not None:
                 child_returncode = finish_delivery_worker(process)
-                return subprocess.CompletedProcess(command, child_returncode), ack_path(root, request_id).exists(), False
+                acked = ack_path(root, request_id).exists()
+                if not acked and not is_canceled(root, request_id) and desktop_submission_pending(root, request):
+                    child_returncode = 125
+                return subprocess.CompletedProcess(command, child_returncode), acked, False
             if time.monotonic() >= deadline:
                 stop_resume_process(process)
-                return subprocess.CompletedProcess(command, 124), ack_path(root, request_id).exists(), False
+                acked = ack_path(root, request_id).exists()
+                code = (125 if not acked and not is_canceled(root, request_id)
+                        and desktop_submission_pending(root, request) else 124)
+                return subprocess.CompletedProcess(command, code), acked, False
             time.sleep(0.1)
     except BaseException:
         stop_resume_process(process)

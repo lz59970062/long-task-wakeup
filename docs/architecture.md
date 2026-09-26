@@ -181,7 +181,19 @@ draining it first; each profile owns one coordinator/runtime record.
 Windows callbacks use the bound Agent CLI session. Native executables and recognized
 npm/forwarding batch shims are resolved without a shell; unknown batch scripts fail
 explicitly. Generated ACK/goal commands are literal PowerShell argument arrays.
-The optional Windows Desktop transport is not implemented or advertised.
+The optional Windows Desktop bridge is an experimental explicit transport.
+Desktop launches `desktop_core.py` through an explicit CLI override. It relays
+Desktop's stdio protocol and preserves the environment and configuration that
+Desktop supplies for its tools and approvals. `desktop_bridge.py` owns one App
+Server and a gateway that verifies connected Windows peers before adding a
+private upstream Bearer token. Desktop and LTC must use that same server.
+`desktop_connection.py` validates metadata/profile,
+and `platforms/windows_tcp.py` authenticates the connected reverse TCP tuple,
+PID, SID and creation identity. No unauthenticated upstream is exposed; browser
+Origin headers are rejected. See [bridge setup and limits](windows-desktop-bridge.md).
+Real Desktop original-session delivery remains pending. A durable submission
+intent precedes `turn/start`, so response loss or a parent timeout preserves the
+cross-queue lease instead of authorizing another delivery.
 
 The initial desktop contract covers terminal closure and independent coordinator
 restart while the user session exists. Logout, reboot and WSL shutdown can

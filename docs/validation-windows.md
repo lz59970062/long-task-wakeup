@@ -99,11 +99,66 @@ records, task environment or local service configuration belong in Git.
 The temporary coordinator registration was removed after validation; its daemon
 and supervisor locks are released. The failed callback is preserved without ACK.
 
-The current Windows implementation uses explicit CLI resume and disables the
-unvalidated Desktop socket transport. A supported transport into the running
+The default Windows implementation uses explicit CLI resume and disables Unix
+socket discovery. An experimental [shared-server bridge](windows-desktop-bridge.md)
+has since passed the real two-client protocol test; actual Desktop reconnection
+and original-session receipt/ACK remain pending. A verified transport into the running
 Desktop owner, or a session that the CLI can validly acquire, must be verified
 before this live acceptance item can pass. Do not remove the Desktop writer lock,
 change to `--last`, forge an ACK, or rerun the business task to hide this failure.
+
+## Follow-up: experimental Desktop bridge
+
+The active-writer investigation and opt-in connection procedure are in
+[Windows Desktop bridge](windows-desktop-bridge.md). Local Desktop implementation
+inspection found explicit transport overrides but no shared listener in the
+currently running stdio configuration. The final opt-in uses a Desktop-owned
+CLI wrapper, retaining Desktop's original flags and fresh App Tools environment.
+Existing Desktop processes were left alone.
+
+- A real isolated server rejected anonymous clients with HTTP 401 and accepted
+  its private capability token with HTTP 101.
+- Two independent clients through the same-user gateway initialized and resumed
+  the same owned test thread. A documented history injection persisted the fixture
+  without invoking a model or touching the real user conversation.
+- The real-server test passed with global CLI **0.153.4** and separately with
+  Desktop's exact **0.155.0-alpha.9.2** Core cache executable (SHA-256 matched to
+  its installed package). WindowsApps package resources cannot be executed
+  directly in this environment; the launcher must use a verified executable copy.
+- Native gateway tests cover process peer identity, Origin/header rejection,
+  refusal to send tokens to unrelated upstreams, active-client stop refusal,
+  metadata conflicts, startup rollback and Job cleanup after bridge failure.
+- The stdio wrapper relays server-initiated tool/approval requests, notifications,
+  string/numeric IDs and messages larger than 1 MiB. Tests cover Desktop EOF
+  with an LTC client connected, Core failure while stdin remains open, and
+  shutdown during ping/notification traffic.
+- A full run exposed a real-Core cleanup race: a child still held the private
+  log briefly after its bridge exited. Graceful teardown now drains only the
+  owned Job's children using verified native process handles before releasing
+  state; abnormal exits retain the kill-on-close fallback.
+- Both PowerShell 7 and Windows PowerShell 5.1 passed the launcher's read-only
+  preflight. The installed wrapper's version passthrough matches Desktop Core
+  `0.155.0-alpha.9.2`. No GUI launch or current Desktop restart was performed.
+- Desktop submission intent now precedes sending `turn/start`. Regression tests
+  reproduce a parent timeout and worker crash after submission and verify that
+  the cross-queue lease blocks duplicate dispatch. Confirmed rejection/ACK/completion
+  retain their distinct cleanup semantics.
+- Full discovery with all three opt-ins (`LTC_TEST_WINDOWS_SCHEDULER`,
+  `LTC_TEST_WINDOWS_TASK`, `LTC_TEST_CODEX_BRIDGE`) passed: **404 tests, 392 passed,
+  12 skipped**, 55.042 seconds. Log:
+  `.windows-dev/final-validation/wrapper-final-tests.log`. This final run selected
+  Desktop's exact Core via `LTC_TEST_CODEX_BRIDGE_BIN` and the installed console
+  launcher via `LTC_TEST_DESKTOP_CORE_WRAPPER`. Both real-server tests use empty
+  disposable profiles with no model calls.
+- The final wheel built, installed into a separate target, and imported its
+  adapter, bridge and Job-cleanup modules successfully. The packaged
+  `ltc-desktop-core` entry point, source compilation and synchronized skill texts
+  were verified. Wheel SHA-256:
+  `d76aabb2ca049e879eaca20bb6ee665fce275e0774b44fde97e82d318499eff7`.
+
+**Pending:** restart Desktop onto the shared server, reopen the original session,
+then validate actual completion delivery and ACK. The old failed callback remains
+unacknowledged. These protocol tests do not declare that acceptance item complete.
 
 ## Remaining limits
 

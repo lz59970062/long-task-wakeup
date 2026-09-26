@@ -235,6 +235,126 @@ class WindowsProcessTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     processes.inherited_lock_fds()
 
+    def test_graceful_job_drain_waits_nested_children_and_does_not_kill_foreign_pid(self):
+        from long_task_callback.platforms import windows
+
+        outsider = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                    **processes.background_popen_kwargs())
+        try:
+            with tempfile.TemporaryDirectory(prefix="ltc-job-drain-") as temporary:
+                folder = Path(temporary)
+                program = folder / "runner.py"
+                program.write_text('''
+from long_task_callback.platforms import windows_process as p, windows
+from long_task_callback.platforms.windows_io import open_private_text
+import json, os, pathlib, subprocess, sys, time
+directory=pathlib.Path(sys.argv[1]); outsider=int(sys.argv[2])
+job=p.enter_worker_job()
+marker=directory/'children.json'
+child_code="""
+from long_task_callback.platforms.windows_process import enter_worker_job
+import json,os,pathlib,subprocess,sys,time
+enter_worker_job()
+leaf=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])
+pathlib.Path(sys.argv[1]).write_text(json.dumps([os.getpid(),leaf.pid]))
+time.sleep(30)
+"""
+log_path=directory/'inherited.log'
+log=open_private_text(log_path)
+child=subprocess.Popen([sys.executable,'-c',child_code,str(marker)],stdout=log,stderr=log)
+deadline=time.monotonic()+5
+while not marker.exists():
+    if time.monotonic()>deadline: raise RuntimeError('child readiness timeout')
+    time.sleep(.01)
+pids=json.loads(marker.read_text())
+log.close()
+query=p._job_process_ids
+first=True
+def include_recycled_foreign_pid(api,handle):
+    global first
+    members=query(api,handle)
+    if first:
+        first=False
+        members.add(outsider)
+    return members
+p._job_process_ids=include_recycled_foreign_pid
+p.terminate_worker_children(job,timeout=4)
+with log_path.open('rb'): pass
+log_path.unlink()
+print(json.dumps({'children_stopped':all(not windows.pid_is_running(pid) for pid in pids),
+                  'foreign_alive':windows.pid_is_running(outsider),
+                  'only_self':query(p._kernel32(),job)=={os.getpid()},
+                  'log_unlocked':not log_path.exists()}),flush=True)
+''', encoding="utf-8")
+                result = subprocess.run([sys.executable, str(program), str(folder), str(outsider.pid)],
+                                        env=self._environment(), capture_output=True, text=True, timeout=8,
+                                        **processes.background_popen_kwargs())
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual({"children_stopped": True, "foreign_alive": True,
+                                  "only_self": True, "log_unlocked": True}, json.loads(result.stdout))
+                self.assertIsNone(outsider.poll())
+        finally:
+            outsider.terminate()
+            outsider.wait(timeout=5)
+
+    def test_job_drain_rejects_unowned_handles(self):
+        with mock.patch.object(processes, "_WORKER_JOB_HANDLE", 42):
+            for value in (None, 0, 41, True):
+                with self.assertRaises(ValueError):
+                    processes.terminate_worker_children(value)
+
+    def test_job_query_retries_successful_partial_lists_and_validates_length(self):
+        api = mock.Mock()
+        rounds = []
+        def query(_job, _kind, data, size, returned):
+            rounds.append(size)
+            pids = [os.getpid()] if len(rounds) == 1 else [os.getpid(), 4242]
+            wintypes.DWORD.from_buffer(data, 0).value = 2
+            wintypes.DWORD.from_buffer(data, 4).value = len(pids)
+            for index, pid in enumerate(pids):
+                ctypes.c_size_t.from_buffer(data, 8 + index * ctypes.sizeof(ctypes.c_size_t)).value = pid
+            ctypes.cast(returned, ctypes.POINTER(wintypes.DWORD)).contents.value = 8 + len(pids) * ctypes.sizeof(ctypes.c_size_t)
+            return True
+        api.QueryInformationJobObject.side_effect = query
+        self.assertEqual({os.getpid(), 4242}, processes._job_process_ids(api, 42))
+        self.assertEqual(2, len(rounds))
+        self.assertGreater(rounds[1], rounds[0])
+        api.QueryInformationJobObject.side_effect = lambda *_args: True
+        with self.assertRaisesRegex(RuntimeError, "Invalid worker Job process list"):
+            processes._job_process_ids(api, 42)
+
+    def test_job_drain_does_not_accept_a_list_missing_its_owner(self):
+        api = mock.Mock()
+        def member(_process, _job, output):
+            ctypes.cast(output, ctypes.POINTER(wintypes.BOOL)).contents.value = True
+            return True
+        api.IsProcessInJob.side_effect = member
+        with mock.patch.object(processes, "_WORKER_JOB_HANDLE", 42), mock.patch.object(processes, "_kernel32", return_value=api), mock.patch.object(processes, "_job_process_ids", return_value=set()):
+            with self.assertRaisesRegex(RuntimeError, "no longer reports its owner"):
+                processes.terminate_worker_children(42)
+        api.OpenProcess.assert_not_called()
+
+    def test_job_drain_waits_for_already_terminating_native_handle_or_times_out(self):
+        def member(_process, _job, output):
+            ctypes.cast(output, ctypes.POINTER(wintypes.BOOL)).contents.value = True
+            return True
+        for wait_status in (0, 258):
+            with self.subTest(wait_status=wait_status):
+                api = mock.Mock()
+                api.IsProcessInJob.side_effect = member
+                api.OpenProcess.return_value = 123
+                api.TerminateProcess.return_value = False
+                api.WaitForSingleObject.return_value = wait_status
+                with mock.patch.object(processes, "_WORKER_JOB_HANDLE", 42), mock.patch.object(processes, "_kernel32", return_value=api), mock.patch.object(processes.ctypes, "get_last_error", return_value=5), mock.patch.object(processes, "_job_process_ids", side_effect=[{os.getpid(), 4242}, {os.getpid()}]):
+                    if wait_status == 0:
+                        processes.terminate_worker_children(42)
+                    else:
+                        with self.assertRaises(TimeoutError):
+                            processes.terminate_worker_children(42)
+                self.assertEqual(123, api.WaitForSingleObject.call_args.args[0])
+                self.assertGreater(api.WaitForSingleObject.call_args.args[1], 0)
+                api.CloseHandle.assert_called_once_with(123)
+
 
 if __name__ == "__main__":
     unittest.main()

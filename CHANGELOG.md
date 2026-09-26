@@ -2,6 +2,14 @@
 
 ## Unreleased — Windows support
 
+- Add an explicit experimental Desktop bridge with native same-user TCP peer
+  verification and a private authenticated upstream; two real App Server clients
+  can resume the same owned test thread. Desktop restart/receipt acceptance remains pending.
+- Add a Desktop-launched stdio adapter to retain Desktop's injected tool
+  environment and Core arguments while sharing that server with LTC.
+- Persist Desktop submission intent before sending a turn so parent timeout or
+  worker loss cannot cause duplicate delivery; handle WebSocket pong frames.
+
 - Add independent per-attempt Windows Task Scheduler runners and a per-user
   coordinator supervisor, with no automatic business replay or execution limit.
 - Add private Windows ACLs, atomic file publication, transferable process-held
