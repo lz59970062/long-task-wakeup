@@ -136,8 +136,8 @@ Existing Desktop processes were left alone.
   log briefly after its bridge exited. Graceful teardown now drains only the
   owned Job's children using verified native process handles before releasing
   state; abnormal exits retain the kill-on-close fallback.
-- Both PowerShell 7 and Windows PowerShell 5.1 passed the launcher's read-only
-  preflight. The installed wrapper's version passthrough matches Desktop Core
+- Both PowerShell 7 and Windows PowerShell 5.1 passed the launcher's earlier
+  path/version checks. The installed wrapper's version passthrough matches Desktop Core
   `0.155.0-alpha.9.2`. No GUI launch or current Desktop restart was performed.
 - Desktop submission intent now precedes sending `turn/start`. Regression tests
   reproduce a parent timeout and worker crash after submission and verify that
@@ -159,6 +159,83 @@ Existing Desktop processes were left alone.
 **Pending:** restart Desktop onto the shared server, reopen the original session,
 then validate actual completion delivery and ACK. The old failed callback remains
 unacknowledged. These protocol tests do not declare that acceptance item complete.
+
+### Subsequent user restart attempt: launcher blocked
+
+The user ran `examples/windows/start-desktop-bridge.ps1` after closing Desktop.
+Its direct packaged-GUI launch failed. Suspended native creation probes reproduced
+Win32 error **5** for both packaged GUI executables; the cached matching Core
+passed the same probe. No GUI probe thread was resumed, no existing Desktop
+process was stopped, and no callback was delivered or acknowledged. Probes made
+outside the newly added worker Job and via a temporary least-privilege scheduled
+task still had an outer Job; that possible influence has not been ruled out.
+The temporary diagnostic task was removed.
+
+The launcher's earlier path/version preflight was insufficient. `-CheckOnly`
+now includes suspended process creation with immediate native-handle cleanup,
+reports `preflight_passed: false` and a nonzero exit on failure, and retains the
+underlying Windows error. The normal launch path also gates on this probe.
+Default direct startup remains blocked; the user should not repeat a restart
+based only on the earlier path/version result. The package-context experiment
+below adds narrower process-creation evidence, not complete Desktop acceptance.
+
+Both Windows PowerShell 5.1 and PowerShell 7 now returned the expected JSON
+(`native_error_code: 5`, `preflight_passed: false`, confirmed cleanup) and exit
+code 1 against the packaged GUI. A cached-Core positive control returned true
+and exit code 0 through the PowerShell launcher. The standalone probe also
+reported errors 2 and 216 for missing and non-executable files, respectively;
+a simulated cleanup timeout checked its five-second wait and exact-handle
+closure. These checks exercised process creation only, never GUI execution.
+
+### Package-context suspended creation
+
+A standard-library base-Python helper was then launched with
+`Invoke-CommandInDesktopPackage`, selecting this installed package's `App`
+application and **without `-PreventBreakaway`**. `GetCurrentPackageFullName`
+reported `OpenAI.Codex_26.915.4065.0_x64__2p2nqsd0c76g0`. In that context the
+same `app\ChatGPT.exe` passed native suspended creation with error **0**,
+`probe_resumed: false` and `cleanup_complete: true`; the cached Core also passed.
+The helper still reported `current_process_in_job: true`, so this success did
+not require removing the existing outer Job. The diagnostic record is
+`.windows-dev/desktop-research/native-suspended-package-standalone-028b2f0732b0462ca4e248c120ad7a8a.json`.
+
+The launcher adds an explicit experimental `-PackageContext` option using the
+base Python installation's `pythonw.exe` and a standard-library helper. Only the
+helper is launched through the package-context tool; it constructs the GUI
+child's environment and invokes the GUI executable directly. It changes no
+persistent user/global environment, package debug policy or package files, and
+does not pass `-PreventBreakaway`. The default direct route retains its error 5 result.
+
+The [Microsoft command documentation](https://learn.microsoft.com/en-us/powershell/module/appx/invoke-commandindesktoppackage?view=windowsserver2025-ps)
+only guarantees package identity and virtualized resource access. Its token is
+similar to, but not identical to, normal app activation; privacy controls,
+settings and other behavior are not guaranteed. This probe does not establish
+that the actual GUI, wrapper environment or App Tools work under that route.
+
+`-PackageContext -CheckOnly` reports native creation separately from the full
+preflight: `native_creation_passed` may be true while the running Desktop appears
+in `launch_blockers` and `preflight_passed` is false. The launcher refuses to stop
+that Desktop. Only after the user saves work, closes it and passes the full
+preflight does `-PackageContext` request a new GUI process. **Actual GUI execution,
+App Tools, original-session callback receipt and ACK are still unverified.**
+
+Final launcher checks on 2026-09-27:
+
+- `-PackageContext -CheckOnly` passed native creation in Windows PowerShell 5.1
+  and PowerShell 7. The helper and suspended GUI child both reported the exact
+  installed Codex package identity; child identity query status was 0. Both
+  checks confirmed no resumed GUI thread and complete cleanup. The full
+  preflight correctly remained false/exit 1 because the existing Desktop was open.
+- The helper now refuses a GUI child with a missing, mismatched or unreadable
+  package identity before actual launch. Ten focused regression tests passed
+  in 0.082 seconds using ordinary-user execution. An initial sandboxed test run
+  could not write its temporary fixtures; rerunning outside that restricted
+  context required no source change. GUI launch calls in these tests are mocked.
+- Both PowerShell scripts parse and `git diff --check` passes. The unrelated
+  404-test bridge suite above was not rerun for these launcher-only changes.
+- Actual launch waits for live bridge metadata for the selected profile with
+  a connected client; this observation alone still does not establish App Tools
+  compatibility or callback receipt/ACK.
 
 ## Remaining limits
 

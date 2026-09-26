@@ -3,8 +3,12 @@
 This opt-in adapter is intended to let Codex Desktop and LTC use **one App
 Server**, so callback delivery reaches the process that already owns the thread.
 It is not enabled by ordinary Windows setup. The existing Desktop conversation's
-end-to-end callback acceptance test remains pending until a deliberate Desktop
-restart and original-session delivery/ACK test.
+end-to-end callback acceptance test remains pending. The installed Windows Store
+Desktop still fails the launcher's default direct process creation with Win32
+error 5 (access denied). The explicit experimental `-PackageContext` option is
+based on a successful suspended process-creation probe under package identity;
+actual GUI execution, App Tools and original-session receipt/ACK through that
+option remain unverified.
 
 ## Findings and sources
 
@@ -105,12 +109,67 @@ If the worker dies or a response is lost, the retained lease prevents another
 callback attempt until the outcome is resolved. ACK or a confirmed completion
 can clear that intent; a missing response cannot.
 
-## Opt in after closing Desktop
+## Packaged Desktop startup evidence and limits
+
+The user tried the launcher on Windows and it failed before Desktop or a bridge
+was started. Native `CreateProcessW` probes reproduced error 5 for this package's
+`app\ChatGPT.exe` and `app\Codex.exe`; the matching cached Core could be created
+suspended and immediately cleaned up. The probes never resumed GUI code. Tool
+and scheduled-task probes still ran inside Windows Jobs, so their error code did
+not establish that every external launch context fails for the same reason.
+
+A subsequent standard-library Python probe ran under the installed Codex
+package's identity and successfully created `app\ChatGPT.exe` suspended: native
+error **0**, `probe_resumed: false`, and `cleanup_complete: true`. The probe still
+had an outer Windows Job. It used `Invoke-CommandInDesktopPackage` without
+`-PreventBreakaway`; the change in package context was sufficient for this
+process-creation test. It did not run Desktop, the wrapper or any App Tools call.
+The completed launcher preflight passed this same check in PowerShell 5.1 and 7.
+It also queried the suspended GUI child's own package identity and verified an
+exact match, which the package helper now requires before actual startup.
+
+The old `-CheckOnly` checked paths and wrapper versions but did **not** test GUI
+process creation. It could therefore report a successful preflight before this
+failure. It now tries native creation with the initial thread suspended, immediately
+terminates and waits for only that newly created process, and reports the native
+error plus `preflight_passed: false` with exit code 1 when creation fails. It does
+not run GUI code, stop existing Desktop instances, or create bridge state.
+The separate `native_creation_passed` field isolates this capability check;
+`launch_blockers` also reports running/uninspectable Desktop processes and an
+existing live or unreadable bridge. Those conditions also fail the full preflight.
+
+The launcher now offers **explicit experimental `-PackageContext`**, based on
+that narrower result. It runs a small standard-library helper using the base
+Python installation's `pythonw.exe` under the selected package identity. That
+helper builds the GUI child's environment and invokes its executable directly.
+The option does not set persistent user/global environment variables, alter
+package debug policy, modify package files, or use `-PreventBreakaway` to force
+the whole descendant tree to retain package context. It is never an automatic
+fallback from a failed direct launch.
+
+Microsoft describes
+[Invoke-CommandInDesktopPackage](https://learn.microsoft.com/en-us/powershell/module/appx/invoke-commandindesktoppackage?view=windowsserver2025-ps)
+as a debugging tool: the helper receives package identity and access to virtualized
+resources, but its token is **not identical** to a normally activated app's token.
+Privacy controls, app settings and other behavior are not guaranteed. A successful
+native creation check therefore does not establish a supported replacement for
+normal Desktop activation. Actual GUI startup, override inheritance and App Tools
+compatibility must still be tested before this route can be relied on.
+
+The installed package has no GUI execution alias. Ordinary
+[application activation](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-iapplicationactivationmanager-activateapplication)
+does not expose an environment argument; merely opening a window does not prove
+that the Core override arrived. Do not repeatedly restart Desktop or elevate the
+shell as a presumed fix for the default route's error 5.
+
+## Explicit opt-in and acceptance checks
 
 Changing the App Server requires closing **all** Codex Desktop windows/processes.
 Save or finish active work first. The supplied launcher refuses to stop a running
 Desktop and does not rewrite installed app files or global environment settings.
-It starts Desktop with overrides only in that new process's environment. Desktop
+The default route requires a Desktop executable that permits direct startup;
+`-PackageContext` explicitly selects the experimental route described above.
+Both pass overrides only in the new GUI process's environment. Desktop
 then starts `ltc-desktop-core.exe`, which owns the gateway and real Core. The
 script does not change the caller's environment or prestart a separate server.
 
@@ -119,13 +178,24 @@ point exists in `.venv`:
 
 ```powershell
 & .\.venv\Scripts\python.exe -m pip install -e .
-# Read-only preflight is safe while Desktop is still running:
-& .\examples\windows\start-desktop-bridge.ps1 -CheckOnly
-# After saving work and closing Desktop:
-& .\examples\windows\start-desktop-bridge.ps1
+# This never resumes the probe's GUI thread; Desktop may remain open for this check:
+& .\examples\windows\start-desktop-bridge.ps1 -PackageContext -CheckOnly
+# native_creation_passed may be true while Desktop is still a launch_blocker.
+# Save work and close Desktop yourself, then repeat the complete preflight:
+& .\examples\windows\start-desktop-bridge.ps1 -PackageContext -CheckOnly
+# Start only when preflight_passed is true and launch_blockers is empty:
+& .\examples\windows\start-desktop-bridge.ps1 -PackageContext
 ```
 
-Optional launcher arguments are `-Python`, `-CodexHome`, `-CodexBin`,
+Omit `-PackageContext` for the default direct route; on the tested Store package,
+that route's `-CheckOnly` still reports native error 5 and exits nonzero. Neither
+successful preflight nor a launch request confirms a working Desktop bridge.
+After a package-context launch request, the script waits for live bridge metadata
+for this profile and at least one connected client. It reports failure if that
+state is absent; a successful observation still requires the App Tools and
+original-session callback checks below.
+
+Other launcher arguments are `-Python`, `-CodexHome`, `-CodexBin`,
 `-DesktopExe` and `-CoreWrapper`. Use the actual existing Codex profile; do not copy authentication
 files into a test profile. If the launcher fails, inspect the private bridge log
 and do not start a second unverified server against the same conversation.
@@ -133,8 +203,10 @@ The launcher discovers the GUI through its package manifest, checks both its
 launcher and resident process, and selects a runnable Core cache copy only when
 its SHA-256 matches the installed Desktop bundle. It does not default to an older
 global npm CLI. It verifies that the adapter's `--version` passthrough returns
-the selected Core's version. Direct packaged-GUI startup and inheritance of the
-temporary CLI override remain part of the explicit restart validation.
+the selected Core's version. GUI execution through the selected route and
+inheritance of the temporary CLI override remain part of explicit restart
+validation. A successful suspended probe is only a process-creation check, not
+bridge or callback acceptance.
 
 The metadata is `<CODEX_HOME>\long-task-wakeup\desktop-bridge.json` by default.
 After reopening the original conversation, configure the existing LTC coordinator

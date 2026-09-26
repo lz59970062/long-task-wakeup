@@ -39,7 +39,13 @@ session. See [Windows setup and limits](docs/windows.md) for PowerShell instruct
 Windows original-session delivery to an open Codex Desktop conversation remains
 blocked by its active-writer check; that end-to-end acceptance test has not passed.
 An opt-in [Windows Desktop bridge](docs/windows-desktop-bridge.md) now provides a
-shared-server path with native peer verification; real Desktop acceptance remains pending.
+shared-server adapter with native peer verification. Startup against the tested
+Windows Store package still fails on the default direct route with native error 5.
+The experimental `-PackageContext` route is based on a successful package-context
+suspended-creation probe; actual GUI startup, App Tools and original-session
+delivery/ACK remain unverified. Its package-context helper uses a Microsoft
+diagnostic tool whose token and other app
+behavior are not guaranteed to match normal activation; see the linked procedure and limits.
 
 ```bash
 python3 -m pip install .
@@ -608,6 +614,10 @@ Windows 目录创建、重命名和删除不承诺断电持久性；注销或重
 Windows Desktop transport 尚未验证。每个 Agent profile 使用一个协调器队列，换队列前先排空并卸载。
 本机真实原会话回调被 Codex Desktop 的 active-writer 检查阻止，尚未通过端到端验收；
 原生任务执行及本地回调生命周期已通过，详见 [Windows 验证记录](docs/validation-windows.md)。
+默认直接启动 Store 版 Desktop 仍报错误 5；[实验桥接启动器](docs/windows-desktop-bridge.md)的
+`-PackageContext -CheckOnly` 已有挂起创建成功的证据，但实际界面、App Tools 和原会话 ACK 尚未验证。
+该选项通过微软诊断工具赋予小型 Python helper 包身份，不修改持久环境或包调试策略，也不使用
+`-PreventBreakaway`；它的 token 和其他应用行为不保证等同于正常激活。完整预检还会拒绝运行中的 Desktop。
 PI、DSH 适配尚未实现。测试版请使用独立队列和同版本 daemon，避免与已安装版本混用。
 
 旧版 screen worker 启动时必须把任务从 `launching` 持久化为 `running`，这一步就是启动握手。

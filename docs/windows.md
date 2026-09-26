@@ -75,8 +75,19 @@ variable. For deliberate shell syntax, invoke the shell explicitly, for example
 
 Windows callbacks use the Agent CLI to resume the exact bound session by default.
 An [experimental explicit Desktop bridge](windows-desktop-bridge.md) can connect
-Desktop and LTC to one shared App Server; it requires deliberate setup and has
-not yet passed the original Desktop conversation's end-to-end acceptance test.
+Desktop and LTC to one shared App Server. The tested Windows Store package still
+fails default direct startup with error 5. The launcher's explicit
+`-PackageContext -CheckOnly` option is based on a successful suspended-creation
+probe under package identity. It reports `native_creation_passed` separately from
+running-Desktop and other `launch_blockers` that fail the full preflight. After saving work, closing Desktop
+and passing the full preflight, `-PackageContext` requests experimental startup.
+It uses a standard-library base-`pythonw.exe` helper under package identity,
+without persistent environment changes, package debugging policy changes or
+`-PreventBreakaway`. Microsoft's
+[tool limitations](https://learn.microsoft.com/en-us/powershell/module/appx/invoke-commandindesktoppackage?view=windowsserver2025-ps)
+include a token that differs from normal activation and no guarantee of other app
+behavior. Actual GUI execution, App Tools, original-session delivery and ACK remain
+unverified. Read the linked bridge procedure before closing Desktop for a test.
 LTC does not guess a Desktop socket or silently switch sessions. Each callback includes a PowerShell
 ACK command pinned to this installation. Copy that command exactly, including
 the leading `&` and single-quoted paths; doubled single quotes inside paths are
