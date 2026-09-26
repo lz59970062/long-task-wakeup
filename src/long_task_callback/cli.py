@@ -49,8 +49,9 @@ from .agents.claude import (
     CLAUDE_PERMISSION_MODE_ENV,
 )
 from .runtime import worker_command
-from .platforms import LaunchError, OwnerState, ScreenBackend, SystemdUserBackend
+from .platforms import LaunchError, OwnerState, ScreenBackend, SystemdUserBackend, LaunchdBackend
 from .platforms import linux as linux_platform
+from .platforms import macos as macos_platform
 from .platforms import posix as posix_platform
 from .templates import TEMPLATES, REASONING_EFFORTS, load_template
 
@@ -1298,11 +1299,14 @@ class AppServerConnection:
 
     @staticmethod
     def _verify_peer_uid(connection: socket.socket) -> None:
-        if not hasattr(socket, "SO_PEERCRED"):
-            return
         try:
-            credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
-            _peer_pid, peer_uid, _peer_gid = struct.unpack("3i", credentials)
+            if sys.platform == "darwin":
+                peer_uid = macos_platform.peer_uid(connection.fileno())
+            elif hasattr(socket, "SO_PEERCRED"):
+                credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+                _peer_pid, peer_uid, _peer_gid = struct.unpack("3i", credentials)
+            else:
+                raise AppServerProtocolError("control-socket peer verification is unsupported on this platform")
         except OSError as exc:
             raise AppServerProtocolError(f"could not verify control-socket peer: {exc}") from exc
         if peer_uid != os.geteuid():
@@ -1899,7 +1903,11 @@ def close_parent_lock_copy(lock: tuple[object, Path]) -> None:
 
 
 def current_boot_id() -> str | None:
-    return linux_platform.current_boot_id()
+    return host_platform().current_boot_id()
+
+
+def host_platform():
+    return macos_platform if sys.platform == "darwin" else linux_platform
 
 
 def active_prompt(args: argparse.Namespace) -> str:
@@ -2442,6 +2450,8 @@ def daemon(args: argparse.Namespace) -> int:
 
         processed = 0
         while True:
+            if consume_daemon_reload_request(root):
+                reload_requested = True
             if reload_requested:
                 reap_background_resumes()
                 if daemon_has_live_delivery_workers(root):
@@ -2503,9 +2513,11 @@ def screen_binary() -> str | None:
 
 
 def screen_required_error() -> str:
+    installation = ("`brew install screen`" if sys.platform == "darwin"
+                    else "`sudo apt install screen` or `sudo dnf install screen`")
     return (
         "GNU screen is required for durable task ownership but was not found. "
-        "Install it first (for example: `sudo apt install screen` or `sudo dnf install screen`) "
+        f"Install it first (for example: {installation}) "
         f"and rerun the command. Override discovery with ${SCREEN_BIN_ENV}."
     )
 
@@ -2530,7 +2542,7 @@ def managed_result_path(root: Path, task_id: str) -> Path:
 
 
 def current_machine_id() -> str:
-    return linux_platform.current_machine_id()
+    return host_platform().current_machine_id()
 
 
 def write_managed_task(root: Path, task: dict[str, object]) -> None:
@@ -2555,7 +2567,7 @@ def load_managed_task(path: Path) -> dict[str, object]:
     backend = task.get("execution_backend", "screen")
     if task.get("version") == 2 and "execution_backend" not in task:
         raise ValueError("version 2 task requires an execution backend")
-    if backend not in ("screen", "systemd-user"):
+    if backend not in ("screen", "systemd-user", "launchd"):
         raise ValueError(f"unsupported execution backend: {backend!r}")
     if not isinstance(task.get("queue_dir"), str):
         raise ValueError("managed task is missing queue metadata")
@@ -2840,6 +2852,7 @@ def launch_managed_screen(root: Path, task: dict[str, object]) -> bool:
     task["state"] = "launching"
     task["launch_attempt_count"] = attempt_count
     task["launch_requested_at"] = time.time()
+    task["launch_boot_id"] = current_boot_id()
     task["screen_submitted_at"] = time.time()
     task.pop("next_launch_at", None)
     write_managed_task(root, task)
@@ -2863,10 +2876,15 @@ def select_execution_backend(args: argparse.Namespace) -> str:
     """Resolve once at submission; recovery never silently changes ownership."""
     # Direct API callers from 0.6 keep their historical screen behavior.
     choice = getattr(args, "backend", "screen")
-    if choice not in ("auto", "screen", "systemd"):
+    if choice not in ("auto", "screen", "systemd", "launchd"):
         raise ValueError(f"unsupported execution backend: {choice!r}")
-    if sys.platform != "linux":
-        raise ValueError("0.7.0 preview supports Linux only; native macOS/Windows adapters are not implemented")
+    if sys.platform not in ("linux", "darwin"):
+        raise ValueError("LTC supports Linux and macOS; native Windows is not implemented")
+    if choice == "launchd" or (choice == "auto" and sys.platform == "darwin"):
+        if LaunchdBackend().available():
+            return "launchd"
+        if choice == "launchd":
+            raise ValueError("launchd GUI domain unavailable; log in to macOS or explicitly select --backend screen")
     if choice in ("auto", "systemd") and SystemdUserBackend().available():
         return "systemd-user"
     if choice == "systemd":
@@ -2882,7 +2900,25 @@ def managed_owner_state(task: dict[str, object]) -> OwnerState:
     owner = task.get("execution_owner")
     if not isinstance(owner, str) or not owner:
         return OwnerState.UNKNOWN
-    return SystemdUserBackend().probe(owner)
+    return native_backend(str(task["execution_backend"])).probe(owner)
+
+
+def native_backend(name: str):
+    if name == "launchd":
+        return LaunchdBackend()
+    if name == "systemd-user":
+        return SystemdUserBackend()
+    raise ValueError(f"unsupported native backend: {name!r}")
+
+
+def collect_managed_owner(root: Path, task: dict[str, object]) -> None:
+    if task.get("execution_backend") != "launchd" or task.get("owner_collected_at"):
+        return
+    owner = task.get("execution_owner")
+    if (task.get("machine_id") == current_machine_id() and isinstance(owner, str)
+            and LaunchdBackend().collect(owner)):
+        task["owner_collected_at"] = time.time()
+        write_managed_task(root, task)
 
 
 def launch_managed_task(root: Path, task: dict[str, object]) -> bool:
@@ -2895,11 +2931,12 @@ def launch_managed_task(root: Path, task: dict[str, object]) -> bool:
         return launch_managed_screen(root, task)
     if not Path(str(task["environment_path"])).exists():
         return mark_managed_task_interrupted(root, task, "launch_environment_missing")
-    backend = SystemdUserBackend()
+    backend = native_backend(str(task["execution_backend"]))
     attempt = managed_launch_attempt_count(task) + 1
     owner = backend.owner_name(str(task["id"]), attempt, root)
     task.update(state="launching", launch_attempt_count=attempt,
-                launch_requested_at=time.time(), execution_owner=owner)
+                launch_requested_at=time.time(), execution_owner=owner,
+                launch_boot_id=current_boot_id())
     task.pop("next_launch_at", None)
     write_managed_task(root, task)
     argv = worker_command("_task-worker", "--task-file",
@@ -2938,10 +2975,12 @@ def recover_managed_tasks(root: Path) -> int:
             if state == "completed":
                 if queue_managed_task_callback(root, task):
                     processed += 1
+                collect_managed_owner(root, task)
                 continue
             if state in ("interrupted", "launch_failed"):
                 if queue_managed_task_callback(root, task):
                     processed += 1
+                collect_managed_owner(root, task)
                 continue
             if state not in ("submitted", "launching", "running"):
                 continue
@@ -2962,7 +3001,8 @@ def recover_managed_tasks(root: Path) -> int:
                 if queue_managed_task_callback(root, task):
                     processed += 1
                 continue
-            recorded_boot = task.get("boot_id") if state == "running" else task.get("submission_boot_id")
+            recorded_boot = (task.get("boot_id") if state == "running"
+                             else task.get("launch_boot_id") or task.get("submission_boot_id"))
             rebooted = bool(current_boot and recorded_boot and recorded_boot != current_boot)
             if rebooted:
                 reason = "interrupted_by_host_reboot" if state == "running" else "not_started_before_host_reboot"
@@ -3099,12 +3139,13 @@ def submit_managed_run(args: argparse.Namespace) -> int:
     environment = {
         name: value
         for name, value in os.environ.items()
-        if name not in ("INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID", "STY", "WINDOW")
+        if name not in ("INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID", "STY", "WINDOW",
+                        macos_platform.OWNER_ENV, "XPC_SERVICE_NAME", "XPC_FLAGS")
     }
     task: dict[str, object] = {
         # Older daemons must reject native tasks instead of launching them in
         # screen. Screen records remain readable by 0.6 installations.
-        "version": 2 if backend == "systemd-user" else 1,
+        "version": 1 if backend == "screen" else 2,
         "id": task_id,
         "submitted_at": time.time(),
         "execution_backend": backend,
@@ -3171,9 +3212,6 @@ def submit_managed_run(args: argparse.Namespace) -> int:
 
 def run_task_worker(args: argparse.Namespace) -> int:
     """Native service entry; admission is rechecked under the task owner lock."""
-    if not os.environ.get("INVOCATION_ID"):
-        print("ltc: native worker requires a systemd service invocation", file=sys.stderr)
-        return 125
     task_path = Path(args.task_file).expanduser().absolute()
     try:
         task = load_managed_task(task_path)
@@ -3185,10 +3223,22 @@ def run_task_worker(args: argparse.Namespace) -> int:
             raise ValueError("task already owned")
         try:
             task = load_managed_task(task_path)
-            if (task.get("execution_backend") != "systemd-user" or task.get("state") != "launching"
+            if (task.get("execution_backend") not in ("systemd-user", "launchd") or task.get("state") != "launching"
                     or task.get("launch_attempt_count") != args.attempt):
                 raise ValueError("stale or unauthorized native worker")
-            task["owner_invocation_id"] = os.environ["INVOCATION_ID"]
+            if task["execution_backend"] == "launchd":
+                backend = LaunchdBackend()
+                owner = backend.owner_name(str(task["id"]), args.attempt, root)
+                boot = current_boot_id()
+                if (task.get("execution_owner") != owner or not backend.admits_worker(owner)
+                        or task.get("machine_id") != current_machine_id()
+                        or not boot or task.get("launch_boot_id") != boot):
+                    raise ValueError("worker does not match its launchd owner, host or boot")
+                task["owner_invocation_id"] = owner
+            else:
+                if not os.environ.get("INVOCATION_ID"):
+                    raise ValueError("native worker requires a systemd service invocation")
+                task["owner_invocation_id"] = os.environ["INVOCATION_ID"]
             return run_managed_worker_locked(root, task)
         finally:
             release_owner_lock(lock, remove=False)
@@ -3414,9 +3464,9 @@ def agent(args: argparse.Namespace) -> int:
 
 
 def add_common_flags(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--backend", choices=("auto", "systemd", "screen"),
+    parser.add_argument("--backend", choices=("auto", "systemd", "launchd", "screen"),
                         default=os.environ.get("LTC_EXECUTION_BACKEND", "auto"),
-                        help="Task owner: prefer systemd user service; screen is the compatibility fallback")
+                        help="Task owner: systemd on Linux, launchd on macOS; screen is the compatibility fallback")
     parser.add_argument("--callback-format", choices=("compact", "full"), default="compact",
                         help="Callback envelope (default: compact, verbose evidence saved locally)")
     parser.add_argument(
@@ -3882,7 +3932,7 @@ def add_proxy_environment_flags(parser: argparse.ArgumentParser) -> None:
 
 
 def daemon_process_identity(pid: int) -> dict[str, object] | None:
-    return linux_platform.process_identity(pid)
+    return host_platform().process_identity(pid)
 
 
 def write_daemon_runtime(root: Path | None = None) -> None:
@@ -3937,7 +3987,31 @@ def send_standalone_reload(pid: int, *, expected_queue: Path | None = None) -> b
     identity = payload.get("process_identity")
     if not isinstance(identity, dict):
         return False
+    if sys.platform == "darwin":
+        # macOS has no pidfd signal. The lock-owning daemon verifies this
+        # request against itself, avoiding a check-then-kill PID reuse race.
+        root = Path(str(payload.get("queue_dir", "")))
+        if not root.is_absolute():
+            return False
+        write_request(root / "daemon-reload.json", {"pid": pid, "process_identity": identity})
+        return True
     return linux_platform.signal_if_identity_matches(pid, identity, signal.SIGHUP)
+
+
+def consume_daemon_reload_request(root: Path) -> bool:
+    path = root / "daemon-reload.json"
+    try:
+        request = json.loads(path.read_text(encoding="utf-8"))
+        identity = daemon_process_identity(os.getpid())
+        accepted = (isinstance(request, dict) and request.get("pid") == os.getpid()
+                    and identity is not None and request.get("process_identity") == identity)
+        path.unlink()
+        fsync_directory(root)
+        return accepted
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return False
 
 
 def clear_daemon_runtime() -> None:
@@ -4188,6 +4262,11 @@ def install_systemd(args: argparse.Namespace) -> int:
     return status
 
 
+def install_launchd(args: argparse.Namespace) -> int:
+    from . import launchd_service
+    return launchd_service.install(args)
+
+
 def select_daemon_service(args: argparse.Namespace) -> str:
     """Choose coordinator hosting separately from task execution ownership.
 
@@ -4195,20 +4274,27 @@ def select_daemon_service(args: argparse.Namespace) -> str:
     Supervisor configuration automatically; it remains an explicit option.
     """
     service = getattr(args, "service", "systemd")
-    if service not in ("auto", "systemd", "supervisor", "standalone"):
+    if service not in ("auto", "systemd", "launchd", "supervisor", "standalone"):
         raise ValueError(f"unsupported daemon service: {service!r}")
     if service == "auto":
+        if sys.platform == "darwin":
+            return "launchd" if LaunchdBackend().available() else "standalone"
         return "systemd" if SystemdUserBackend().available() else "standalone"
+    if service == "launchd" and sys.platform != "darwin":
+        raise ValueError("launchd coordinator requires macOS")
+    if service == "systemd" and sys.platform != "linux":
+        raise ValueError("systemd coordinator requires Linux; use --service launchd on macOS")
     return service
 
 
 def setup(args: argparse.Namespace) -> int:
-    if not getattr(args, "callback_only", False):
-        try:
+    try:
+        service = select_daemon_service(args)
+        if not getattr(args, "callback_only", False):
             select_execution_backend(args)
-        except ValueError as exc:
-            print(f"ltc: setup cannot continue: {exc}", file=sys.stderr)
-            return 2
+    except ValueError as exc:
+        print(f"ltc: setup cannot continue: {exc}", file=sys.stderr)
+        return 2
     skill_args = argparse.Namespace(
         path=args.skill_path,
         force=args.force,
@@ -4243,9 +4329,10 @@ def setup(args: argparse.Namespace) -> int:
         now=args.now,
         print=False,
     )
-    service = select_daemon_service(args)
     if service == "systemd":
         return install_systemd(systemd_args)
+    if service == "launchd":
+        return install_launchd(systemd_args)
     try:
         configure_proxy_environment(systemd_args)
         if service == "supervisor":
@@ -4742,7 +4829,7 @@ def main() -> int:
 
     doctor_parser = sub.add_parser("doctor", help="Check local readiness and print an Agent-owned repair plan as JSON")
     doctor_parser.add_argument("--queue-dir", help="Queue to inspect and configure")
-    doctor_parser.add_argument("--backend", choices=("auto", "systemd", "screen"),
+    doctor_parser.add_argument("--backend", choices=("auto", "systemd", "launchd", "screen"),
                                default=os.environ.get("LTC_EXECUTION_BACKEND", "auto"))
     doctor_parser.add_argument("--operation", choices=("run", "agent", "done"), default="run",
                                help="Workflow whose prerequisites are checked (default: run)")
@@ -4759,7 +4846,7 @@ def main() -> int:
     done_parser = sub.add_parser("done", help="Queue a callback after an externally managed task finishes")
     add_common_flags(done_parser)
 
-    run_parser = sub.add_parser("run", help="Submit a command to an independent Linux task owner")
+    run_parser = sub.add_parser("run", help="Submit a command to an independent Linux or macOS task owner")
     add_common_flags(run_parser)
     run_parser.add_argument("wrapped_command", nargs=argparse.REMAINDER)
 
@@ -4794,24 +4881,25 @@ def main() -> int:
     daemon_parser.add_argument("--retry-backoff", type=float, default=DEFAULT_RETRY_BACKOFF, help="Retry delay multiplier")
     daemon_parser.add_argument("--resume-timeout", type=float, default=DEFAULT_RESUME_TIMEOUT, help="Maximum seconds for one Codex resume before retrying")
 
-    systemd_parser = sub.add_parser("install-systemd", help="Install a user-level systemd service for the wakeup daemon")
-    systemd_parser.add_argument("--name", default="codex-long-task-wakeup", help="Systemd service name")
-    systemd_parser.add_argument("--queue-dir", help="Wakeup queue directory")
-    systemd_parser.add_argument("--interval", type=float, default=2.0, help="Daemon polling interval in seconds")
-    systemd_parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Retries after a callback is not acknowledged")
-    systemd_parser.add_argument("--retry-delay", type=float, default=DEFAULT_RETRY_DELAY, help="Initial retry delay in seconds")
-    systemd_parser.add_argument("--retry-backoff", type=float, default=DEFAULT_RETRY_BACKOFF, help="Retry delay multiplier")
-    systemd_parser.add_argument("--resume-timeout", type=float, default=DEFAULT_RESUME_TIMEOUT, help="Maximum seconds for one Codex resume before retrying")
-    systemd_parser.add_argument("--restart-sec", type=float, default=5.0, help="Restart delay in seconds")
-    systemd_parser.add_argument("--exec-start", help="Path to codex-long-task-wakeup executable")
-    systemd_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
-    systemd_parser.add_argument("--claude-bin", help="Path to claude executable used by the daemon")
-    systemd_parser.add_argument("--path", help="PATH environment for the daemon service")
-    add_proxy_environment_flags(systemd_parser)
-    systemd_parser.add_argument("--force", action="store_true", help="Overwrite an existing service file")
-    systemd_parser.add_argument("--enable", action="store_true", help="Run systemctl --user enable after writing the service")
-    systemd_parser.add_argument("--now", action="store_true", help="Start or restart the service after writing it")
-    systemd_parser.add_argument("--print", action="store_true", help="Print the service file instead of writing it")
+    for service in ("systemd", "launchd"):
+        service_parser = sub.add_parser(f"install-{service}", help=f"Install a user-level {service} coordinator")
+        service_parser.add_argument("--name", default="codex-long-task-wakeup", help="Service name / LaunchAgent label")
+        service_parser.add_argument("--queue-dir", help="Wakeup queue directory")
+        service_parser.add_argument("--interval", type=float, default=2.0, help="Daemon polling interval in seconds")
+        service_parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES)
+        service_parser.add_argument("--retry-delay", type=float, default=DEFAULT_RETRY_DELAY)
+        service_parser.add_argument("--retry-backoff", type=float, default=DEFAULT_RETRY_BACKOFF)
+        service_parser.add_argument("--resume-timeout", type=float, default=DEFAULT_RESUME_TIMEOUT)
+        service_parser.add_argument("--restart-sec", type=float, default=5.0, help="Restart delay in seconds")
+        service_parser.add_argument("--exec-start", help="Path to LTC executable")
+        service_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
+        service_parser.add_argument("--claude-bin", help="Path to claude executable used by the daemon")
+        service_parser.add_argument("--path", help="PATH environment for the daemon service")
+        add_proxy_environment_flags(service_parser)
+        service_parser.add_argument("--force", action="store_true", help="Overwrite an existing service file")
+        service_parser.add_argument("--enable", action="store_true", help="Enable the service for this user")
+        service_parser.add_argument("--now", action="store_true", help="Start the service or request a safe reload")
+        service_parser.add_argument("--print", action="store_true", help="Print configuration without installing it")
 
     install_parser = sub.add_parser("install-skill", help="Install the bundled skill for Codex and/or Claude Code")
     install_parser.add_argument("--path", help="Skills directory to install into (overrides --target)")
@@ -4824,11 +4912,11 @@ def main() -> int:
     install_parser.add_argument("--force", action="store_true", help="Overwrite an existing long-task-callback skill")
 
     setup_parser = sub.add_parser("setup", help="Install the bundled skill and user-level wakeup daemon")
-    setup_parser.add_argument("--backend", choices=("auto", "systemd", "screen"), default=os.environ.get("LTC_EXECUTION_BACKEND", "auto"))
+    setup_parser.add_argument("--backend", choices=("auto", "systemd", "launchd", "screen"), default=os.environ.get("LTC_EXECUTION_BACKEND", "auto"))
     setup_parser.add_argument("--callback-only", action="store_true",
                               help="Configure callbacks for externally owned work without requiring a local task backend")
-    setup_parser.add_argument("--service", choices=("auto", "systemd", "supervisor", "standalone"), default="auto",
-                              help="Coordinator hosting; auto prefers systemd, otherwise standalone (Supervisor is opt-in)")
+    setup_parser.add_argument("--service", choices=("auto", "systemd", "launchd", "supervisor", "standalone"), default="auto",
+                              help="Coordinator hosting: systemd on Linux, launchd on macOS, otherwise standalone")
     setup_parser.add_argument("--skill-path", help="Skills directory to install into (overrides --skill-target)")
     setup_parser.add_argument(
         "--skill-target",
@@ -4836,14 +4924,14 @@ def main() -> int:
         default="both",
         help="Agent home to install the skill into (default: both)",
     )
-    setup_parser.add_argument("--name", default="codex-long-task-wakeup", help="Systemd service name")
+    setup_parser.add_argument("--name", default="codex-long-task-wakeup", help="Service name / LaunchAgent label")
     setup_parser.add_argument("--queue-dir", help="Wakeup queue directory")
     setup_parser.add_argument("--interval", type=float, default=2.0, help="Daemon polling interval in seconds")
     setup_parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Retries after a callback is not acknowledged")
     setup_parser.add_argument("--retry-delay", type=float, default=DEFAULT_RETRY_DELAY, help="Initial retry delay in seconds")
     setup_parser.add_argument("--retry-backoff", type=float, default=DEFAULT_RETRY_BACKOFF, help="Retry delay multiplier")
     setup_parser.add_argument("--resume-timeout", type=float, default=DEFAULT_RESUME_TIMEOUT, help="Maximum seconds for one Codex resume before retrying")
-    setup_parser.add_argument("--restart-sec", type=float, default=5.0, help="Systemd restart delay in seconds")
+    setup_parser.add_argument("--restart-sec", type=float, default=5.0, help="Service restart delay in seconds")
     setup_parser.add_argument("--exec-start", help="Path to codex-long-task-wakeup executable")
     setup_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
     setup_parser.add_argument("--claude-bin", help="Path to claude executable used by the daemon")
@@ -4852,8 +4940,8 @@ def main() -> int:
     setup_parser.add_argument("--force", action="store_true", help="Overwrite an existing skill and service file")
     setup_parser.add_argument("--keep-skill", action="store_true",
                               help="Keep existing skill files during coordinator setup, even with --force; install if missing")
-    setup_parser.add_argument("--enable", action="store_true", help="Run systemctl --user enable after writing the service")
-    setup_parser.add_argument("--now", action="store_true", help="Start or restart the service after writing it")
+    setup_parser.add_argument("--enable", action="store_true", help="Enable the service for this user")
+    setup_parser.add_argument("--now", action="store_true", help="Start the service or request a safe reload")
 
     ack_parser = sub.add_parser("ack", help="Mark a daemon callback as successfully received")
     ack_parser.add_argument("--queue-dir", help="Wakeup queue directory")
@@ -4948,6 +5036,8 @@ def main() -> int:
         return daemon(args)
     if args.mode == "install-systemd":
         return install_systemd(args)
+    if args.mode == "install-launchd":
+        return install_launchd(args)
     if args.mode == "install-skill":
         return install_skill(args)
     if args.mode == "setup":

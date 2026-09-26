@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — macOS support
+
+- Add independent one-shot launchd task jobs and a persistent user LaunchAgent
+  coordinator, selected automatically on macOS; add `install-launchd --print`.
+- Preserve recovery without replay across ambiguous launch outcomes, coordinator
+  replacement and reboot; collect exited task registrations after reconciliation.
+- Use native macOS host, boot and process identities, identity-bound reload requests
+  and UNIX socket peer credentials; support Apple's bundled screen logging.
+- Add macOS setup documentation, platform/lifecycle tests and macOS CI coverage.
+- Verify a real 120-second original-session Codex callback and durable ACK on macOS;
+  add a Windows development handoff with implementation entry points and acceptance criteria.
+
 ## 0.7.0a1 — Linux architecture preview
 
 - Add automatic local configuration checks to task commands and `ltc doctor`.

@@ -12,6 +12,11 @@ authors = [
   { name = "Local" }
 ]
 keywords = ["codex", "claude-code", "callback", "long-running-tasks"]
+classifiers = [
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+]
 dependencies = ["PyYAML>=6.0"]
 
 [project.scripts]

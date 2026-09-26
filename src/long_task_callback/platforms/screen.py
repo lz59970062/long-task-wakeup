@@ -1,4 +1,4 @@
-"""GNU screen ownership for Linux hosts and containers without systemd.
+"""GNU screen ownership for Linux containers and macOS compatibility tasks.
 
 Screen keeps a worker independent of its submitting shell or standalone LTC
 coordinator. It does not escape a container's lifetime or a systemd service's
@@ -48,7 +48,7 @@ class ScreenBackend:
     name = "screen"
 
     def available(self) -> bool:
-        if not sys.platform.startswith("linux"):
+        if sys.platform not in ("linux", "darwin"):
             return False
         executable = screen_binary()
         if executable is None:
@@ -95,14 +95,22 @@ class ScreenBackend:
                 raise ValueError("worker paths must not contain NUL")
         except (OSError, ValueError) as error:
             raise LaunchError(str(error), uncertain=False) from error
-        if not sys.platform.startswith("linux"):
-            raise LaunchError("screen workers currently require Linux", uncertain=False)
+        if sys.platform not in ("linux", "darwin"):
+            raise LaunchError("screen workers require Linux or macOS", uncertain=False)
         executable = screen_binary()
         if executable is None:
             raise LaunchError("GNU screen was not found", uncertain=False)
+        command = [executable, "-dmS", owner, "-L", "-Logfile", output_path, *argv]
+        if sys.platform == "darwin":
+            # Apple's bundled screen 4.0 lacks -Logfile. The fixed shell program
+            # only redirects output; every path/worker argument stays literal.
+            # Ignore screenrc so user settings cannot create extra windows.
+            command = [executable, "-c", "/dev/null", "-dmS", owner,
+                       "/bin/sh", "-c", 'log=$1; shift; exec "$@" >>"$log" 2>&1',
+                       "ltc-screen", output_path, *argv]
         try:
             result = subprocess.run(
-                [executable, "-dmS", owner, "-L", "-Logfile", output_path, *argv],
+                command,
                 cwd=working_directory,
                 stdin=subprocess.DEVNULL,
                 # A detached owner must not retain coordinator-owned pipes.
@@ -131,7 +139,7 @@ class ScreenBackend:
             _validate_owner(owner)
         except ValueError:
             return OwnerState.UNKNOWN
-        if not sys.platform.startswith("linux"):
+        if sys.platform not in ("linux", "darwin"):
             return OwnerState.UNKNOWN
         executable = screen_binary()
         if executable is None:

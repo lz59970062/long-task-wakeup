@@ -34,8 +34,8 @@ class RealStandaloneScreenTests(unittest.TestCase):
         self.fail(explanation)
 
     def test_real_standalone_start_ignores_pid_reused_by_unrelated_live_process(self) -> None:
-        if sys.platform != "linux":
-            self.skipTest("Linux process identity is required")
+        if sys.platform not in ("linux", "darwin"):
+            self.skipTest("Linux or macOS process identity is required")
         with tempfile.TemporaryDirectory(prefix="ltc-stale-pid-") as temporary:
             directory = Path(temporary)
             home = directory / "codex-home"
@@ -109,8 +109,8 @@ class RealStandaloneScreenTests(unittest.TestCase):
 
     def test_killing_standalone_coordinator_preserves_screen_work_without_systemd(self) -> None:
         screen = shutil.which("screen")
-        if sys.platform != "linux" or screen is None:
-            self.skipTest("Linux and GNU screen are required")
+        if sys.platform not in ("linux", "darwin") or screen is None:
+            self.skipTest("Linux/macOS and GNU screen are required")
         with tempfile.TemporaryDirectory(prefix="ltc-real-screen-") as temporary:
             directory = Path(temporary)
             sockets = directory / "screen-sockets"
@@ -143,7 +143,7 @@ class RealStandaloneScreenTests(unittest.TestCase):
                 raise SystemExit(7)
                 """), encoding="utf-8")
             args = argparse.Namespace(
-                backend="auto", agent="codex", cwd=str(directory), task="real standalone screen fixture",
+                backend="screen" if sys.platform == "darwin" else "auto", agent="codex", cwd=str(directory), task="real standalone screen fixture",
                 command=None, exit_code=None, message=None, session="fixture-no-real-agent-session",
                 last=False, via_daemon=False, queue_dir=str(root), approvals_reviewer="auto_review",
                 approval_policy="on-request", sandbox_mode="workspace-write", dry_run=False,

@@ -110,7 +110,7 @@ def environment_profile() -> dict[str, object]:
 
     operating_system = {"linux": "linux", "darwin": "macos", "win32": "windows"}.get(sys.platform, "other")
     return {"os": operating_system, "container": cli.running_in_container() if sys.platform == "linux" else False,
-            "supported": sys.platform == "linux"}
+            "supported": sys.platform in ("linux", "darwin")}
 
 
 def runtime_issues(root: Path) -> list[dict[str, object]]:
@@ -201,7 +201,8 @@ def runtime_issues(root: Path) -> list[dict[str, object]]:
             if task.get("machine_id") != machine:
                 add("task_foreign_host", task_id, backend, "Inspect the task in its original host/container; do not probe or restart an owner using another host's identity.")
                 continue
-            recorded_boot = task.get("boot_id") if state == "running" else task.get("submission_boot_id")
+            recorded_boot = (task.get("boot_id") if state == "running"
+                             else task.get("launch_boot_id") or task.get("submission_boot_id"))
             if boot and recorded_boot and recorded_boot != boot:
                 add("task_boot_changed", task_id, backend, "The recorded execution predates this boot; inspect checkpoints and restore recovery reporting, not automatic command replay.")
                 continue
@@ -276,7 +277,7 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
             "environment": environment, "checks": {"support": "unsupported", "configuration": "not_checked", "runtime": "not_checked"},
             "unverified": list(UNVERIFIED), "operation": operation, "queue_dir": str(root), "work": work,
             "issues": [{"code": "platform_unsupported", "kind": "support", "component": "platform",
-                        "action": "This preview has no native adapter for this OS. Use a supported Linux deployment or implement the platform adapter; installing Linux services here will not fix it."}],
+                        "action": "This preview has no native adapter for this OS. Use a supported Linux or macOS deployment; installing another OS's services here will not fix it."}],
             "repair_command": None, "recheck_command": recheck, "instruction": INSTRUCTION,
         }
     if work["state"] == "unknown":
@@ -294,7 +295,9 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
             if selected == "screen" and not ScreenBackend().available():
                 raise ValueError("selected screen executable is not usable")
         except (OSError, ValueError, RuntimeError):
-            issues.append({"code": "backend_unavailable", "action": "Provide the requested Linux task backend; use screen when no systemd user manager is available."})
+            issues.append({"code": "backend_unavailable", "action": (
+                "Provide the requested task backend: launchd in a logged-in macOS GUI session, "
+                "systemd on Linux, or explicitly select screen when the native manager is unavailable.")})
     if not queue_writable(root):
         issues.append({"code": "queue_unwritable", "action": "Repair access/storage for this queue and its existing directories without deleting task records."})
     if operation in {"run", "agent"} and not queue_writable(cli.managed_tasks_root(root)):

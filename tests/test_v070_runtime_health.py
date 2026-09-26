@@ -319,7 +319,7 @@ class DeliveryHealthTests(HealthArtifacts, unittest.TestCase):
 
 class EnvironmentHealthTests(unittest.TestCase):
     def test_environment_profile_does_not_infer_native_support_from_cli_presence(self):
-        for platform, expected_os, supported in (("linux", "linux", True), ("darwin", "macos", False),
+        for platform, expected_os, supported in (("linux", "linux", True), ("darwin", "macos", True),
                                                  ("win32", "windows", False), ("freebsd14", "other", False)):
             with self.subTest(platform=platform), mock.patch.object(diagnostics.sys, "platform", platform), mock.patch.object(
                 cli, "running_in_container", return_value=True
@@ -332,7 +332,7 @@ class EnvironmentHealthTests(unittest.TestCase):
     def test_unsupported_native_os_stops_before_linux_checks_and_proposes_no_linux_repair(self):
         args = argparse.Namespace(mode="doctor", operation="run", backend="auto", agent="codex",
                                   session="actual-session", last=False, queue_dir="/fixture/queue")
-        for platform in ("darwin", "win32"):
+        for platform in ("freebsd14", "win32"):
             with self.subTest(platform=platform), mock.patch.object(diagnostics.sys, "platform", platform), contextlib.ExitStack() as stack:
                 probes = [stack.enter_context(mock.patch.object(module, name)) for module, name in (
                     (diagnostics, "queue_writable"), (diagnostics, "coordinator_issue"),

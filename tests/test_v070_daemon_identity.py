@@ -22,6 +22,9 @@ IDENTITY = {"boot_id": "current-boot", "machine_id": "current-machine",
 
 class StandaloneDaemonIdentityTests(unittest.TestCase):
     def setUp(self) -> None:
+        platform = mock.patch.object(sys, "platform", "linux")
+        platform.start()
+        self.addCleanup(platform.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)

@@ -388,8 +388,9 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(cli.recover_managed_tasks(root), 1)
 
             command = launch.call_args.args[0]
-            self.assertEqual(command[:3], ["/usr/bin/screen", "-dmS", f"ltc-{task_path.parent.name}"])
-            self.assertIn("-Logfile", command)
+            self.assertEqual(command[0], "/usr/bin/screen")
+            self.assertEqual(command[command.index("-dmS") + 1], f"ltc-{task_path.parent.name}")
+            self.assertEqual("-Logfile" in command, sys.platform != "darwin")
             self.assertIn("_screen-worker", command)
             self.assertIn("--token=-abc", command)
             self.assertNotIn("--token", command)
@@ -1731,6 +1732,7 @@ class CliTests(unittest.TestCase):
         )
 
         with (
+            mock.patch.object(sys, "platform", "linux"),
             mock.patch.object(cli, "screen_binary", return_value="/usr/bin/screen"),
             mock.patch.object(cli, "install_skill", return_value=0) as install_skill,
             mock.patch.object(cli, "ensure_callback_hook_file") as ensure_callback_hook_file,

@@ -12,7 +12,7 @@ Code turn.
 
 There are three public workflows:
 
-- `ltc run -- <command>` submits a new long-running task. The daemon launches it through an independent Linux task owner (systemd user service preferred; screen fallback).
+- `ltc run -- <command>` submits a new long-running task. The daemon launches it through an independent task owner (systemd on Linux, launchd on macOS; screen fallback).
 - `ltc agent codex|claude -- <prompt>` submits a fresh child agent through the same durable
   lifecycle. Available since `0.6.5`.
 - `ltc done ...` queues a completion callback for work already owned by screen, tmux,
@@ -47,15 +47,16 @@ count. An unsafe `--last` target keeps full reminders because its identity is un
 
 ## Ownership invariant
 
-The 0.7.0a1 Linux topology separates the coordinator and task owners:
+The 0.7 topology separates the coordinator and task owners:
 
 ```text
-systemd user service -> ltc daemon (submission recovery and callback delivery)
-independent per-task systemd user service -> LTC worker -> command / child agent
+systemd user service / macOS LaunchAgent -> ltc daemon (recovery and callbacks)
+independent systemd service / one-shot launchd job -> LTC worker -> command / child agent
 ```
 
-`--backend auto` prefers an available systemd user manager (v240+), otherwise
-screen. `--backend systemd` requires that manager; `--backend screen` explicitly
+`--backend auto` prefers an available systemd user manager (v240+) on Linux or
+the logged-in GUI launchd domain on macOS, otherwise screen. `--backend systemd`
+or `--backend launchd` requires that native manager; `--backend screen` explicitly
 selects the compatibility backend. Existing screen tasks retain their owner. The
 native backend needs no screen. A screen process can remain inside its launching
 service's control group: do not assume it survives stopping that service.
@@ -64,7 +65,7 @@ After submission, record the task ID, execution backend and artifact paths, then
 return control. For long work, avoid polling processes or logs on a timer. Live
 monitoring is appropriate when requested or diagnosing callback infrastructure.
 Do not change a running task's owner or automatically retry an unknown native
-launch. Native macOS/Windows and PI/DSH support are not implemented in this preview.
+launch. Native Windows and PI/DSH support are not implemented in this preview.
 
 ## Duration policy
 
@@ -107,7 +108,8 @@ Read `environment`, `checks.configuration`, `checks.runtime` and each issue's
 `kind`/`code` to distinguish missing setup from a runtime fault or unsupported OS.
 `repair_command` can be null: an absent task owner or unresolved delivery needs
 artifact/session inspection and lifecycle recovery, not a generic reinstall.
-Native macOS/Windows currently report unsupported without Linux setup commands.
+Native Windows reports unsupported without Linux setup commands. macOS reports
+launchd/screen readiness and provides a repair command for its selected environment.
 The setup repair uses `--keep-skill` to retain an installed skill while installing
 one when missing. It can update the LTC coordinator configuration; inspect existing
 service customizations before doing so. Never replace a missing binding with an
@@ -146,7 +148,7 @@ python3 -m pip install "git+https://github.com/lz59970062/long-task-wakeup.git"
 ltc setup --force --enable --now
 ```
 
-`setup` installs this skill for Codex and Claude Code and configures the selected coordinator service. It requires either a reachable systemd user manager or screen for the compatibility backend. It creates the user-editable fixed prompt hook at
+`setup` installs this skill for Codex and Claude Code and configures the selected coordinator service. It requires a reachable native manager (systemd/launchd) or screen for the compatibility backend. It creates the user-editable fixed prompt hook at
 `${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-hook.md` without overwriting existing content.
 The delivery worker reads that UTF-8 file on attempts whose saved user-reminder decision is
 due, so edits apply on the next due attempt without a restart. Non-empty content is appended
@@ -155,6 +157,29 @@ under `[long-task-callback-user-hook]`; hook read failures warn and continue wit
 `setup` also checks for the Claude Code CLI and runs `claude auth status` with output suppressed.
 This check is advisory and must not block Codex-only installation or print credentials/account
 details. Claude configuration must be present in the shell that later submits `ltc agent claude`.
+
+## macOS
+
+`ltc setup --force --enable --now` selects a user LaunchAgent in the logged-in GUI
+session and independent one-shot launchd jobs for new tasks. Screen is optional.
+Use `ltc install-launchd --print` to preview the plist, `--backend launchd` to
+require the native task owner, or `--backend screen --service standalone` for
+headless sessions without a GUI domain. Apple's bundled screen is supported.
+
+Task plists live in private task directories, never in login startup directories.
+They have no KeepAlive/restart policy. A coordinator restart does not restart the
+task. Sleep pauses work; logout and reboot can interrupt it. Never replay a saved
+task automatically. Setup requests identity-verified reload after deliveries drain;
+new LaunchAgent environment/arguments take effect on the next service load.
+Native process/service access may require an ordinary terminal outside an Agent
+tool sandbox. Preserve the original queue/session and inspect any persisted work
+before repeating submission. Desktop socket delivery uses local peer credentials;
+CLI delivery is the fallback when the optional socket is unavailable.
+
+```bash
+launchctl print "gui/$(id -u)/codex-long-task-wakeup"
+tail -f "${CODEX_HOME:-$HOME/.codex}/long-task-wakeup/daemon.log"
+```
 
 ## Containers (Docker / AutoDL)
 
@@ -285,7 +310,7 @@ guessing.
 
 ### Daemon restart
 
-For native tasks, the independent systemd unit owns the worker. Restarting the
+For native tasks, the independent systemd unit or launchd job owns the worker. Restarting the
 coordinator should not restart that task. If querying the owner fails, its state
 is unknown; never treat a manager connection failure as permission to relaunch.
 A saved result takes precedence over owner visibility. Reconstruct a missing
@@ -301,12 +326,12 @@ automatically relaunch that task. Generate worker tokens with an `ltc_` prefix a
 as a single `--token=value` argument. Treat a legacy `launching` record without an attempt counter
 as an unknown prior launch failure and never automatically retry it during upgrade.
 
-Native systemd launches with ambiguous outcomes are not retried automatically,
+Native systemd/launchd launches with ambiguous outcomes are not retried automatically,
 even if no unit is visible. Inspect the task record and outputs.
 
 ### Same-host reboot
 
-Neither backend preserves the running process across a host reboot. Never automatically rerun the command and do not add a
+No backend preserves the running process across a host reboot. Never automatically rerun the command and do not add a
 `--resume-command` mechanism. Restore the originally bound Codex or Claude Code conversation with
 the task id, screen name, log path, interruption reason, and available checkpoint/artifact context.
 
@@ -476,7 +501,8 @@ needed from the user.
 
 ## Daemon operations
 
-The systemd user service keeps `ltc daemon` available for submissions, recovery, and callbacks:
+The systemd user service (Linux) or LaunchAgent (macOS) keeps `ltc daemon` available
+for submissions, recovery, and callbacks. On Linux:
 
 ```bash
 systemctl --user status codex-long-task-wakeup.service

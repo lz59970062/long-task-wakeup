@@ -1,10 +1,13 @@
 # 0.7 architecture and platform handoff
 
-0.7.0a1 is a Linux preview. Native macOS, Windows, PI and DSH integrations are
-not implemented. The public commands and legacy screen records remain compatible
+For the completed Mac work, live callback evidence and the next implementation
+steps, start with [Mac-to-Windows handoff](handoff-macos-to-windows.md).
+
+The 0.7 preview supports Linux and macOS. Native Windows, PI and DSH integrations
+are not implemented. The public commands and legacy screen records remain compatible
 with 0.6 tasks. Native tasks use record version 2, so older daemons reject them
 rather than accidentally running them through screen. Do not run an older daemon against newly submitted
-`systemd-user` records: use a separate preview queue, or drain and upgrade its
+`systemd-user` or `launchd` records: use a separate preview queue, or drain and upgrade its
 coordinator before submitting new tasks.
 
 ## Responsibilities
@@ -13,8 +16,10 @@ coordinator before submitting new tasks.
 | --- | --- | --- |
 | `cli.py` | Argument parsing, existing queue/goal lifecycle, admission and reconciliation | Infer completion from an unavailable process manager |
 | `platforms/base.py` | Execution-owner contract and explicit uncertain outcomes | Own agent prompts or resume commands |
-| `platforms/screen.py` | GNU screen owner for non-systemd Linux/containers | Infer no process from a failed query |
+| `platforms/screen.py` | GNU screen owner for Linux/containers and macOS | Infer no process from a failed query |
 | `platforms/linux.py` | Independent systemd user units, native identity | Restart arbitrary user commands |
+| `platforms/macos.py` | Independent one-shot launchd jobs, native host/boot/process identity | Register business commands for login or automatically restart them |
+| `launchd_service.py` | macOS coordinator LaunchAgent installation and safe activation | Stop a live coordinator to apply configuration |
 | `platforms/posix.py` | OS-held file locks and directory syncing | Pretend these primitives work on Windows |
 | `storage.py` | Atomic private JSON/text persistence | Store state in installation directories |
 | `agents/` | Agent metadata, session discovery, child/resume commands and capabilities | Launch tasks or change queue lifecycle |
@@ -91,18 +96,58 @@ If identity or pidfd support is unavailable, the existing coordinator remains
 untouched. Persistent PID/runtime files are scoped to `CODEX_HOME`; use separate
 profiles for separate standalone coordinators.
 
-## macOS and Windows handoff
+## macOS ownership and recovery
+
+The macOS adapter uses a LaunchAgent coordinator and independently registered
+one-shot launchd jobs in `gui/<uid>`. `--backend auto` selects launchd when that
+domain is reachable; `--backend launchd` requires it. `--service auto` selects
+the LaunchAgent in that session, otherwise standalone. Headless sessions can
+explicitly use screen and a standalone coordinator. See [macOS setup](macos.md).
+
+Task labels include queue, task and attempt identity. Plists live in private task
+directories, outside `Library/LaunchAgents`, with `RunAtLoad=true`,
+`KeepAlive=false` and `AbandonProcessGroup=false`. Only the coordinator uses
+`KeepAlive=true`. Workers verify their launchd label/environment, parent and
+manager-reported PID, then recheck the saved attempt, queue, host and launch boot
+under the task lock. launchd properties contain only worker arguments and file
+references; the saved environment and prompt remain in private task files.
+
+The coordinator records the launch boot separately because a sandboxed submitter
+may not be permitted to read `kern.bootsessionuuid`. Host identity uses
+`gethostuuid`; process identity uses `proc_pidinfo` with microsecond start time.
+macOS has no Linux pidfd signal primitive. Reload writes an identity-bound request
+into the queue; only the matching coordinator consumes it, drains deliveries and
+execs itself. An old PID cannot authorize signaling an unrelated process.
+
+`launchctl print` is diagnostic text, not a stable API. The adapter recognizes
+only specific top-level PID/state observations; unknown formats and failures
+remain UNKNOWN. Missing-service responses require a reachable GUI domain before
+absence is accepted. A loaded job that has never run is not treated as dead.
+Completed/terminal tasks have exited registrations collected without stopping a
+live worker. Plists remain as evidence and are never automatically loaded again.
+
+Apple's bundled screen is supported without its missing `-Logfile` option.
+Local Desktop socket peers are checked with Darwin `getpeereid`; CLI delivery
+remains the fallback when the optional Desktop socket is unavailable.
+
+Terminal closure and coordinator replacement do not stop native tasks while the
+user GUI session remains alive. Logout/reboot can interrupt execution and sleep
+pauses compute. No automatic task replay or unattended logout survival is promised.
+
+## Windows handoff
+
+The [detailed Windows handoff](handoff-macos-to-windows.md) maps the current POSIX
+dependencies, lock/handle transfer, storage, process ownership and CLI integration
+points, with a staged plan and native acceptance criteria. Native Windows remains
+unimplemented; the following is its design target.
 
 Implement `ExecutionBackend` for owner identity, availability, launch and tri-state
 probe. Then extend backend selection, persisted-record validation, and worker
-admission. `run_task_worker` currently checks systemd `INVOCATION_ID` and the saved
-attempt; a macOS implementation must validate its own launch context rather than
-fabricate those values. Linux boot/machine identity and POSIX locking are explicit
+admission. `run_task_worker` checks each native owner's launch context and the saved
+attempt. Host/boot/process identity and POSIX locking are explicit
 seams; review all direct POSIX operations before claiming native Windows support.
 
-macOS target: user LaunchAgent coordinator plus separately registered one-shot
-launchd jobs. Do not enable unconditional KeepAlive for business commands. Windows
-target: user logon coordinator and per-attempt scheduled runner, native Job Object
+Windows target: user logon coordinator and per-attempt scheduled runner, native Job Object
 containment established before the workload runs. Manager restart must not close
 the sole task handle. Runner death is interrupted/unknown, not permission to rerun.
 These are design targets, not tested implementations.
@@ -159,9 +204,9 @@ unresolved delivery failures are distinct observations. ACKed/canceled failures
 are historical evidence, not current delivery faults. Observations never relaunch
 business commands or modify task, callback or lease records.
 
-The report separates support, configuration and runtime readiness. Native macOS
-and Windows currently return an unsupported-platform issue without Linux setup
-commands. A null repair command means the Agent must inspect lifecycle evidence or
+The report separates support, configuration and runtime readiness. Windows
+returns an unsupported-platform issue without Linux setup commands; macOS gets
+platform-appropriate launchd/screen selection and repair. A null repair command means the Agent must inspect lifecycle evidence or
 platform support before choosing an action. A live owner does not prove workload
 progress; local readiness does not prove authentication or end-to-end delivery.
 

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="Long Task Callback (ltc): run a task under an independent Linux owner and wake the same Codex or Claude Code session when it finishes">
+  <img src="./assets/readme/hero.svg" width="100%" alt="Long Task Callback (ltc): run a task under an independent Linux or macOS owner and wake the same Codex or Claude Code session when it finishes">
 </p>
 
 <p align="center">
@@ -14,23 +14,25 @@ way back to the same conversation.
 There are three normal entry points:
 
 - **Run** — `ltc run -- <command>` submits a new task. The daemon requests an independent
-  Linux task owner, so the task is not owned by the agent turn.
+  Linux or macOS task owner, so the task is not owned by the agent turn.
 - **Agent** — `ltc agent codex|claude -- <prompt>` starts a fresh child agent with the
   same durable ownership and callback lifecycle.
 - **Done** — `ltc done ...` reports completion of a task that is already owned by
   screen, tmux, Slurm, another scheduler, or an existing script.
 
 The daemon is the control and callback-delivery process. It does not become the parent of the
-training process. A separate systemd user service (or the screen compatibility backend) owns the LTC worker, which owns the task.
+training process. A separate systemd user service on Linux or one-shot launchd job on macOS
+(or the screen compatibility backend) owns the LTC worker, which owns the task.
 
 [中文说明](#中文说明) · Formerly `codex-long-task-wakeup` (the old command remains an alias)
 
 ## 0.7.0 preview
 
-**0.7.0a1 is the Linux architecture preview.** It separates native execution
+**The 0.7.0 preview supports Linux and macOS.** It separates native execution
 backends, Agent adapters, private persistence and compact callback rendering.
 New Linux tasks prefer an independent systemd user service; screen remains the
 compatibility fallback and continues to own existing tasks.
+New macOS tasks prefer separate one-shot launchd jobs in the logged-in GUI session.
 
 ```bash
 python3 -m pip install .
@@ -50,13 +52,16 @@ for reading before acting. Use `--callback-format full` for full inline callback
 The existing system/user reminder cadence still applies. This reduces repeated
 prose without truncating saved results or user instructions.
 
-Native macOS/Windows and PI/DSH integrations are future adapters, **not supported
-platforms/agents in this preview**. See [architecture and handoff](docs/architecture.md)
+Native Windows and PI/DSH integrations remain future adapters. See
+[macOS setup](docs/macos.md) and [architecture and handoff](docs/architecture.md)
 for module responsibilities, recovery guarantees, extension points and validation.
 Docker and AutoDL use the non-systemd screen/standalone profile; see
 [container setup and lifecycle boundaries](docs/containers.md).
 See the [preview validation record](docs/validation-0.7.0a1.md) for tested
 environments, commands and remaining platform work.
+The macOS adapter has a separate [local validation record](docs/validation-macos.md).
+Mac development is complete, including a real two-minute original-session callback.
+For the next platform, use the [Windows development handoff](docs/handoff-macos-to-windows.md).
 
 ### Configuration recovery owned by the Agent
 
@@ -90,7 +95,7 @@ For externally owned work reported with `done`, the repair uses
 </p>
 
 ```text
-systemd user service
+systemd user service (Linux) / LaunchAgent (macOS)
   └─ ltc daemon                 control, recovery and callback delivery
 
 Independent per-task service (screen for legacy tasks)
@@ -116,6 +121,7 @@ instead of model polling; the worker and daemon wait without spending model turn
 ## Install
 
 Linux requires a reachable systemd user manager (v240+) or GNU screen.
+macOS uses the built-in launchd manager; the native backend needs no screen.
 The selected backend is recorded at submission and never silently changed during recovery.
 
 ```bash
@@ -128,7 +134,8 @@ ltc setup --force --enable --now
 ```
 
 `setup` installs the bundled skill for Codex and Claude Code. `--service auto`
-uses a systemd user service when available, otherwise standalone; Supervisor is
+uses a systemd user service on Linux or a launchd LaunchAgent on macOS when available,
+otherwise standalone; Supervisor is
 an explicit `--service supervisor` choice. `--service standalone --now` starts
 the coordinator without creating systemd configuration, suitable for AutoDL. It also creates an empty, user-editable callback prompt hook at
 `${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-hook.md`. Existing hook content is never
@@ -147,7 +154,10 @@ Verify:
 ```bash
 ltc --version
 # screen --version  # only for the screen backend
+# Linux:
 systemctl --user status codex-long-task-wakeup.service
+# macOS:
+launchctl print "gui/$(id -u)/codex-long-task-wakeup"
 ```
 
 ## Run: submit a new long task
@@ -532,7 +542,8 @@ host failure, an already received but not durably ACKed callback may be delivere
 agents must inspect existing processes and artifacts before launching follow-up work.
 
 The daemon is normally installed as
-`~/.config/systemd/user/codex-long-task-wakeup.service`. The daemon may also be run by supervisor
+`~/.config/systemd/user/codex-long-task-wakeup.service` on Linux or
+`~/Library/LaunchAgents/codex-long-task-wakeup.plist` on macOS. The daemon may also be run by supervisor
 or as a standalone background process in environments without user systemd; the screen backend requires GNU screen. The native Linux backend requires a reachable systemd user manager.
 
 ```bash
@@ -548,7 +559,7 @@ mode and no fallback to one.
 
 **Long Task Callback (ltc)** 有三个入口：
 
-- **Run**：`ltc run -- <命令>`。提交新任务，默认优先使用独立的 systemd 用户服务；
+- **Run**：`ltc run -- <命令>`。提交新任务，Linux 默认使用独立的 systemd 用户服务，macOS 使用独立的一次性 launchd 作业；
   无可用用户管理器时使用 screen 兼容后端。
 - **Agent（预览）**：`ltc agent codex|claude -- <任务>`。用同一套持久化和 callback
   生命周期启动一个全新的 Codex 或 Claude Code 子代理。
@@ -558,7 +569,7 @@ mode and no fallback to one.
 正确的职责关系是：
 
 ```text
-systemd 用户服务
+systemd 用户服务 / macOS LaunchAgent
   └─ ltc daemon                 负责控制、恢复和 callback 投递
 
 独立任务服务（旧任务保留 screen）
@@ -566,7 +577,7 @@ systemd 用户服务
       └─ 训练任务
 ```
 
-0.7.0a1 是 Linux 新架构测试版：任务执行、Agent 适配、状态存储和回调格式分别维护。
+当前 0.7.0 预览版支持 Linux 和 macOS：任务执行、Agent 适配、状态存储和回调格式分别维护。
 原生任务服务独立于回调协调器；协调器重启后核对已有结果与进程归属，不重复启动。
 旧 screen 任务继续使用原后端，但不承诺停止其所在系统服务后仍然存活。
 
@@ -574,8 +585,9 @@ systemd 用户服务
 `details/<id>.md`；自定义指令和恢复说明会提示先读详情。`--callback-format full` 可恢复
 完整内联格式。系统和用户提示仍按 4/3 间隔出现，原文不会被自动改写。
 
-macOS、Windows 原生以及 PI、DSH 适配尚未实现；后续转接参见
-[架构文档](docs/architecture.md)。测试版请使用独立队列和同版本 daemon，避免与已安装版本混用。
+Mac 安装方式见 [macOS 指南](docs/macos.md)：`ltc setup --force --enable --now` 自动选择
+LaunchAgent 协调器和独立 launchd 任务。任务作业不注册为登录启动项，不会在重启后自动重跑。
+Windows 原生以及 PI、DSH 适配尚未实现。测试版请使用独立队列和同版本 daemon，避免与已安装版本混用。
 
 旧版 screen worker 启动时必须把任务从 `launching` 持久化为 `running`，这一步就是启动握手。
 LTC 等待一秒；若 screen 在握手前消失，则记录失败并按指数退避重试，最多三次。最终失败后任务
