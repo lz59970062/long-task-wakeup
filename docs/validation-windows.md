@@ -3,6 +3,15 @@
 Baseline: `d2974cd` (Mac handoff), developed on `codex/windows-support`.
 Package version remains `0.7.0a1`; no release or remote CI run is claimed here.
 
+Consolidation on 2026-09-27: **418 tests, 406 passed, 12 skipped, zero failures**
+in 46.582 seconds, including native Scheduler/lifecycle and real Core bridge tests.
+The isolated run clears `CODEX_LONG_TASK_WAKEUP_DESKTOP_BRIDGE_FILE` and sets
+`CODEX_LONG_TASK_WAKEUP_DESKTOP_APP_SERVER=0` in the test process only, so inherited
+live Desktop configuration cannot redirect disposable fake-agent fixtures.
+Explicit bridge integration tests still enable and exercise their own transport.
+The successful suite callback was received and ACKed in the original conversation.
+The earlier automated counts below are historical results at each development stage.
+
 **Native execution and local callback lifecycle tests pass. The original-session
 callback and ACK subsequently passed on 2026-09-27 with the explicit experimental
 package-context Desktop bridge. The initial CLI-only failure below is historical;
