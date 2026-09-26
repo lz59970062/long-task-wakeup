@@ -43,7 +43,8 @@ class StandaloneDaemonIdentityTests(unittest.TestCase):
                 self.addCleanup(patcher.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.directory = Path(temporary.name)
+        # Runtime writers persist canonical paths, including macOS /var aliases.
+        self.directory = Path(temporary.name).resolve()
         self.state = self.directory / "state"
         self.state.mkdir()
         self.queue = self.directory / "queue"

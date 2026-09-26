@@ -1243,6 +1243,7 @@ class AppServerConnection:
         self.timeout = timeout
         self.socket: socket.socket | None = None
         self.buffer = b""
+        self.fragment: bytearray | None = None
         self.request_id = 0
         self.notifications: list[dict[str, object]] = []
 
@@ -1305,6 +1306,8 @@ class AppServerConnection:
         if self.socket is not None:
             self.socket.close()
             self.socket = None
+        self.buffer = b""
+        self.fragment = None
 
     def request(self, method: str, params: dict[str, object]) -> object:
         self.request_id += 1
@@ -1393,42 +1396,50 @@ class AppServerConnection:
         return message
 
     def _receive_message(self, deadline: float) -> tuple[int, bytes]:
-        final, opcode, payload = self._receive_frame(deadline)
-        while opcode in (0x9, 0xA):
-            if opcode == 0x9:
-                self._send_frame(0xA, payload)
-            final, opcode, payload = self._receive_frame(deadline)
-        if final or opcode in (0x8, 0xA):
-            return opcode, payload
-        if opcode != 0x1:
-            raise AppServerProtocolError("control socket started an unsupported fragmented message")
-        chunks = [payload]
+        # Both frame and message state must survive short completion polls.
         while True:
-            final, continuation_opcode, continuation = self._receive_frame(deadline)
-            if continuation_opcode in (0x9, 0xA):
-                if continuation_opcode == 0x9:
-                    self._send_frame(0xA, continuation)
+            final, opcode, payload = self._receive_frame(deadline)
+            if opcode in (0x9, 0xA):
+                if opcode == 0x9:
+                    self._send_frame(0xA, payload)
                 continue
-            if continuation_opcode != 0x0:
+            if opcode == 0x8:
+                self.fragment = None
+                return opcode, payload
+            if self.fragment is None:
+                if opcode == 0x0:
+                    raise AppServerProtocolError("control socket sent an unexpected continuation")
+                if final:
+                    return opcode, payload
+                if opcode != 0x1:
+                    raise AppServerProtocolError("control socket started an unsupported fragmented message")
+                self.fragment = bytearray(payload)
+                continue
+            if opcode != 0x0:
                 raise AppServerProtocolError("control socket interrupted a fragmented message")
-            chunks.append(continuation)
-            if sum(len(chunk) for chunk in chunks) > 1_048_576:
+            if len(self.fragment) + len(payload) > 1_048_576:
                 raise AppServerProtocolError("control socket message exceeds 1 MiB")
+            self.fragment.extend(payload)
             if final:
-                return opcode, b"".join(chunks)
+                message = bytes(self.fragment)
+                self.fragment = None
+                return 0x1, message
 
     def _receive_frame(self, deadline: float) -> tuple[bool, int, bytes]:
-        header = self._read_exact(2, deadline)
+        header = self._peek_exact(2, deadline)
         final = bool(header[0] & 0x80)
         if header[0] & 0x70:
             raise AppServerProtocolError("control socket frame used unsupported RSV bits")
         opcode = header[0] & 0x0F
         masked = bool(header[1] & 0x80)
         length = header[1] & 0x7F
+        offset = 2
         if length == 126:
-            length = struct.unpack("!H", self._read_exact(2, deadline))[0]
+            length = struct.unpack("!H", self._peek_exact(4, deadline)[2:4])[0]
+            offset = 4
         elif length == 127:
-            length = struct.unpack("!Q", self._read_exact(8, deadline))[0]
+            length = struct.unpack("!Q", self._peek_exact(10, deadline)[2:10])[0]
+            offset = 10
         if opcode >= 0x8 and (not final or length > 125):
             raise AppServerProtocolError("control socket sent an invalid control frame")
         if length > 1_048_576:
@@ -1438,8 +1449,11 @@ class AppServerConnection:
         # however. The peer is a same-UID Unix socket verified during connect,
         # so decode those frames for local compatibility instead of stranding
         # a successfully started callback turn.
-        mask = self._read_exact(4, deadline) if masked else None
-        payload = self._read_exact(length, deadline)
+        mask_size = 4 if masked else 0
+        frame = self._peek_exact(offset + mask_size + length, deadline)
+        mask = frame[offset:offset + mask_size] if masked else None
+        payload = frame[offset + mask_size:]
+        self.buffer = self.buffer[len(frame):]
         if mask is not None:
             payload = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
         return final, opcode, payload
@@ -1461,10 +1475,14 @@ class AppServerConnection:
         self.socket.sendall(header + mask + encoded)
 
     def _read_exact(self, size: int, deadline: float) -> bytes:
+        value = self._peek_exact(size, deadline)
+        self.buffer = self.buffer[size:]
+        return value
+
+    def _peek_exact(self, size: int, deadline: float) -> bytes:
         while len(self.buffer) < size:
             self.buffer += self._receive_bytes(size - len(self.buffer), deadline)
-        value, self.buffer = self.buffer[:size], self.buffer[size:]
-        return value
+        return self.buffer[:size]
 
     def _receive_bytes(self, size: int, deadline: float) -> bytes:
         if self.socket is None:

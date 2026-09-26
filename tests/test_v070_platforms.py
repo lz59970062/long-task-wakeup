@@ -73,9 +73,9 @@ class SystemdOwnershipTests(unittest.TestCase):
         self.assertIn(f"--unit={owner}", command)
         self.assertIn("--property=Restart=no", command)
         self.assertIn("--property=KillMode=control-group", command)
-        self.assertIn(f"--working-directory={cwd}", command)
-        self.assertIn(f"--property=StandardOutput=append:{log}", command)
-        self.assertIn(f"--property=StandardError=append:{log}", command)
+        self.assertIn(f"--working-directory={cwd.resolve()}", command)
+        self.assertIn(f"--property=StandardOutput=append:{log.resolve()}", command)
+        self.assertIn(f"--property=StandardError=append:{log.resolve()}", command)
         self.assertEqual(command[command.index("--") + 1 :], worker)
         for attached_option in ("--scope", "--pipe", "--pty", "--wait"):
             self.assertNotIn(attached_option, command)

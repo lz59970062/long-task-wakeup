@@ -51,6 +51,22 @@ jobs:
           python -m unittest discover -s tests -p test_launchd_integration.py -v
           python -m unittest discover -s tests -p test_screen_integration.py -v
 
+      - name: Native Linux task and coordinator lifecycle
+        if: runner.os == 'Linux'
+        env:
+          LTC_TEST_SYSTEMD: '1'
+          LTC_TEST_SCREEN: '1'
+          CODEX_HOME: ${{ runner.temp }}/ltc-test-profile
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/ltc-claude-profile
+          CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR: ${{ runner.temp }}/ltc-test-locks
+        run: |
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          sudo systemctl start "user@$(id -u).service"
+          python -c "from long_task_callback.platforms import SystemdUserBackend; assert SystemdUserBackend().available(), 'systemd user manager required'"
+          python -m unittest discover -s tests -p test_systemd_integration.py -v
+          python -m unittest discover -s tests -p test_screen_integration.py -v
+
       - name: Native Windows Task Scheduler ownership
         if: runner.os == 'Windows'
         shell: pwsh

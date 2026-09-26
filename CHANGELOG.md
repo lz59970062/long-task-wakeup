@@ -4,7 +4,8 @@
 
 - Add an explicit experimental Desktop bridge with native same-user TCP peer
   verification and a private authenticated upstream; two real App Server clients
-  can resume the same owned test thread. Desktop restart/receipt acceptance remains pending.
+  can resume the same owned test thread. The explicit package-context route passed Desktop startup, App Tools and
+  original-session receipt/ACK on the tested Windows installation.
 - Add a Desktop-launched stdio adapter to retain Desktop's injected tool
   environment and Core arguments while sharing that server with LTC.
 - Persist Desktop submission intent before sending a turn so parent timeout or
@@ -18,8 +19,10 @@
   literal PowerShell ACK commands, safe coordinator drain/replacement and removal.
 - Cover Windows lifecycle and shared queue contracts with native process tests;
   add Windows installation guidance and Python 3.9/3.12 CI configuration.
-- Record the successful native 120-second workload and the remaining live Codex
-  Desktop callback blocker separately; a completed workload is not callback ACK.
+- Record the successful native 120-second workload and subsequent original-session
+  callback ACK without restarting the workload; default CLI writer contention remains.
+- Preserve partial WebSocket frames and fragmented messages across completion-poll
+  timeouts on all platforms, including interleaved ping frames.
 
 ## Unreleased — macOS support
 

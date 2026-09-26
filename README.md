@@ -36,14 +36,12 @@ compatibility fallback and continues to own existing tasks.
 New macOS tasks prefer separate one-shot launchd jobs in the logged-in GUI session.
 Windows 10+ uses per-user Task Scheduler owners and Job Objects in a logged-in user
 session. See [Windows setup and limits](docs/windows.md) for PowerShell instructions.
-Windows original-session delivery to an open Codex Desktop conversation remains
-blocked by its active-writer check; that end-to-end acceptance test has not passed.
-An opt-in [Windows Desktop bridge](docs/windows-desktop-bridge.md) now provides a
-shared-server adapter with native peer verification. Startup against the tested
-Windows Store package still fails on the default direct route with native error 5.
-The experimental `-PackageContext` route is based on a successful package-context
-suspended-creation probe; actual GUI startup, App Tools and original-session
-delivery/ACK remain unverified. Its package-context helper uses a Microsoft
+Default CLI delivery to an open Windows Codex Desktop conversation encounters
+its active-writer check. The opt-in [Windows Desktop bridge](docs/windows-desktop-bridge.md)
+shares the existing thread owner with native peer verification. On 2026-09-27,
+the experimental `-PackageContext` route passed GUI startup, an App Tools call,
+and original-session callback receipt/ACK for a completed 120-second task.
+Default direct startup of the tested Store package still fails with native error 5. Its package-context helper uses a Microsoft
 diagnostic tool whose token and other app
 behavior are not guaranteed to match normal activation; see the linked procedure and limits.
 
@@ -611,11 +609,11 @@ Windows 10+ 安装方式见 [Windows 指南](docs/windows.md)：用户登录状�
 `ltc setup --service windows-task --force --enable --now`，通过 Agent CLI 回到原会话。
 PowerShell ACK 命令支持空格、中文与单引号路径；状态文件在创建时设置当前用户和 SYSTEM 私有 ACL。
 Windows 目录创建、重命名和删除不承诺断电持久性；注销或重启可能中断任务，未知结果不会自动重跑。
-Windows Desktop transport 尚未验证。每个 Agent profile 使用一个协调器队列，换队列前先排空并卸载。
-本机真实原会话回调被 Codex Desktop 的 active-writer 检查阻止，尚未通过端到端验收；
-原生任务执行及本地回调生命周期已通过，详见 [Windows 验证记录](docs/validation-windows.md)。
-默认直接启动 Store 版 Desktop 仍报错误 5；[实验桥接启动器](docs/windows-desktop-bridge.md)的
-`-PackageContext -CheckOnly` 已有挂起创建成功的证据，但实际界面、App Tools 和原会话 ACK 尚未验证。
+每个 Agent profile 使用一个协调器队列，换队列前先排空并卸载。
+默认 CLI 回调仍可能被打开的 Desktop 会话的 active-writer 检查阻止。
+2026-09-27，[实验桥接启动器](docs/windows-desktop-bridge.md)的 `-PackageContext` 路径
+已在本机通过实际界面启动、App Tools 调用，以及两分钟任务的原会话回调和 ACK；业务任务没有重跑。
+详见 [Windows 验证记录](docs/validation-windows.md)。默认直接启动 Store 版 Desktop 仍报错误 5。
 该选项通过微软诊断工具赋予小型 Python helper 包身份，不修改持久环境或包调试策略，也不使用
 `-PreventBreakaway`；它的 token 和其他应用行为不保证等同于正常激活。完整预检还会拒绝运行中的 Desktop。
 PI、DSH 适配尚未实现。测试版请使用独立队列和同版本 daemon，避免与已安装版本混用。

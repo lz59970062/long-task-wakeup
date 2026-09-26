@@ -81,7 +81,7 @@ class ScreenOwnershipTests(unittest.TestCase):
         with mock.patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
             self.backend.launch("ltc-abcd1234", arguments, self.directory, log)
         argv = run.call_args.args[0]
-        self.assertEqual(argv, ["/usr/bin/screen", "-dmS", "ltc-abcd1234", "-L", "-Logfile", str(log), *arguments])
+        self.assertEqual(argv, ["/usr/bin/screen", "-dmS", "ltc-abcd1234", "-L", "-Logfile", str(log.resolve()), *arguments])
         self.assertFalse(run.call_args.kwargs.get("shell", False))
         self.assertEqual(run.call_args.kwargs["stdout"], subprocess.DEVNULL)
         self.assertEqual(run.call_args.kwargs["stderr"], subprocess.DEVNULL)

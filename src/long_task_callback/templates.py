@@ -114,7 +114,7 @@ def _load_user_template(path: Path, name: str) -> AgentTemplate:
         claude = agent_defaults.get("claude", {})
         handoff = _text(data["handoff"], "template handoff") if "handoff" in data else None
         return AgentTemplate(
-            name, version, prompt, str(path),
+            name, version, prompt, str(path.resolve()),
             codex.get("model"), codex.get("reasoning_effort"), claude.get("model"), handoff,
             agent_defaults=agent_defaults,
         )

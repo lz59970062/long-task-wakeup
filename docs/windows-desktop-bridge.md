@@ -3,12 +3,13 @@
 This opt-in adapter is intended to let Codex Desktop and LTC use **one App
 Server**, so callback delivery reaches the process that already owns the thread.
 It is not enabled by ordinary Windows setup. The existing Desktop conversation's
-end-to-end callback acceptance test remains pending. The installed Windows Store
+end-to-end callback receipt and ACK passed on 2026-09-27 using `-PackageContext`;
+see [the validation record](validation-windows.md#live-original-session-acceptance--2026-09-27). The installed Windows Store
 Desktop still fails the launcher's default direct process creation with Win32
 error 5 (access denied). The explicit experimental `-PackageContext` option is
-based on a successful suspended process-creation probe under package identity;
-actual GUI execution, App Tools and original-session receipt/ACK through that
-option remain unverified.
+validated on one Windows installation for GUI startup, App Tools and original-session
+receipt/ACK. It remains experimental and does not establish compatibility with
+every Desktop version or tool workflow.
 
 ## Findings and sources
 

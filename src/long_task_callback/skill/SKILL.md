@@ -183,7 +183,8 @@ Use native argument lists. Recognized npm/forwarding `.cmd` launchers are resolv
 without a shell; unsupported wrappers require their underlying executable.
 Windows callbacks default to CLI resume of the actual original session. An
 experimental shared-server bridge is available only through explicit setup;
-its real Desktop original-session acceptance is still pending. Execute the callback's emitted
+its package-context route passed real Desktop original-session receipt/ACK on
+2026-09-27 on one tested installation. It remains experimental. Execute the callback's emitted
 PowerShell ACK verbatim, including its leading `&` and quoted paths. ACK confirms
 receipt only, not goal completion. Never replace the target with `--last`.
 

@@ -3,9 +3,10 @@
 Baseline: `d2974cd` (Mac handoff), developed on `codex/windows-support`.
 Package version remains `0.7.0a1`; no release or remote CI run is claimed here.
 
-**Native execution and local callback lifecycle tests pass. Live delivery to this
-already-open Codex Desktop conversation remains blocked by Codex's active-writer
-check, so the complete original-session callback acceptance criterion is NOT met.**
+**Native execution and local callback lifecycle tests pass. The original-session
+callback and ACK subsequently passed on 2026-09-27 with the explicit experimental
+package-context Desktop bridge. The initial CLI-only failure below is historical;
+the default CLI active-writer limitation remains.**
 
 ## Environment
 
@@ -250,3 +251,25 @@ Final launcher checks on 2026-09-27:
   3.9/3.12, ARM64, packaged/frozen executables and logout survival remain unverified.
 - The environment did not provide an available Linux/WSL deployment for an extra
   local native regression run; no WSL installation was attempted.
+
+
+## Live original-session acceptance — 2026-09-27
+
+After an explicit `-PackageContext` Desktop restart, the shared Core reported the
+original session loaded. The GUI and an App Tools `list_artifacts` call worked.
+The previously completed native task `1aa2ba13` (120.0003 seconds, exit 0,
+one workload launch) was requeued for callback delivery only. Its callback reached
+the bound original conversation; the agent inspected the details, result and log,
+then wrote the real ACK at 00:13:29 +08:00. The coordinator moved the callback to
+`done`, with no running or failed copy. The workload was never relaunched.
+
+Private local evidence: `.windows-dev/live-demo/callback-received.json`, the task
+result/log and queue ACK/done records. These are intentionally not published.
+Desktop 26.915.4065.0 and Core 0.155.0-alpha.9.2 were used. This validates this
+specific bridge route, not default Store process creation, all App Tools or every
+Desktop release. No writer lock was removed and no session was substituted.
+
+The completion stream emitted a fragmentation warning while ACK still completed
+delivery. Consolidation fixes preserve frame/message state across short polling
+timeouts; portable regression tests cover partial headers, masks and payloads,
+fragmented UTF-8, interleaved ping, close and message-size limits.

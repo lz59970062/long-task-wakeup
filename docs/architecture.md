@@ -191,7 +191,8 @@ private upstream Bearer token. Desktop and LTC must use that same server.
 and `platforms/windows_tcp.py` authenticates the connected reverse TCP tuple,
 PID, SID and creation identity. No unauthenticated upstream is exposed; browser
 Origin headers are rejected. See [bridge setup and limits](windows-desktop-bridge.md).
-Real Desktop original-session delivery remains pending. A durable submission
+Real Windows Desktop original-session delivery and ACK passed with the explicit
+package-context bridge on 2026-09-27; the default CLI active-writer limitation remains. A durable submission
 intent precedes `turn/start`, so response loss or a parent timeout preserves the
 cross-queue lease instead of authorizing another delivery.
 

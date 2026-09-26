@@ -86,8 +86,8 @@ without persistent environment changes, package debugging policy changes or
 `-PreventBreakaway`. Microsoft's
 [tool limitations](https://learn.microsoft.com/en-us/powershell/module/appx/invoke-commandindesktoppackage?view=windowsserver2025-ps)
 include a token that differs from normal activation and no guarantee of other app
-behavior. Actual GUI execution, App Tools, original-session delivery and ACK remain
-unverified. Read the linked bridge procedure before closing Desktop for a test.
+behavior. GUI execution, one App Tools call, original-session delivery and ACK passed
+on the tested installation on 2026-09-27; other Desktop versions and workflows remain unverified. Read the linked bridge procedure before closing Desktop for a test.
 LTC does not guess a Desktop socket or silently switch sessions. Each callback includes a PowerShell
 ACK command pinned to this installation. Copy that command exactly, including
 the leading `&` and single-quoted paths; doubled single quotes inside paths are
