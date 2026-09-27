@@ -27,6 +27,40 @@ or on-demand Task Scheduler runner on Windows
 
 [中文说明](#中文说明) · Formerly `codex-long-task-wakeup` (the old command remains an alias)
 
+## 0.7.1 preview: explicit callback modes
+
+This checkout distinguishes **CLI**, **Desktop shared Core**, and **manual receipt**.
+`--callback-mode auto` detects the current Codex Desktop origin. New Desktop tasks
+are refused before execution when the shared connection is unavailable; users
+can explicitly choose `--callback-mode manual` to save results for later handling.
+See [modes, readiness and retry](docs/callback-modes.md).
+
+On Mac and Windows, the preview's standard `ltc setup` automatically generates
+a launcher for the current user and Python installation. Using it remains
+opt-in: quit Desktop at an idle time, then open `Start LTC Desktop.command`
+(Mac), `Start LTC Desktop.cmd` (Windows), or use `ltc desktop launch`.
+Setup never starts or interrupts Desktop. Mac preparation discovers an app
+bundle; Windows launch/preflight discovers the Store package. Use `--desktop-app` to select an app explicitly, or
+`--no-desktop-launcher` to skip generation on either platform. The common
+`ltc desktop prepare|launch|status` interface uses packaged runtime resources;
+it does not require a checkout or its `examples` directory. See
+[Mac Desktop setup](docs/macos-desktop-bridge.md) and
+[Windows Desktop setup](docs/windows-desktop-bridge.md) for platform limits and
+remaining live acceptance checks. Upgrade the coordinator before using this
+preview's new task/callback record versions.
+
+**Use branch `codex/macos-desktop-callback` for this preview.** The stable
+`v0.7.0` installation below does not include automatic Desktop launcher generation.
+This branch remains a preview with the live acceptance checks described above.
+
+**中文：** CLI 与桌面共享 Core 是两条分别验收的完整路线。普通桌面未配置共享
+连接时，自动回调不可用；可以明确选择手动接收结果。`doctor` 分别报告运行条件
+和回调能力，`ltc retry --id …` 只补投已有结果，不重跑业务任务。
+本预览的 Mac 和 Windows 安装流程都会自动生成当前用户的启动器，生成文件中的绝对路径按本次
+安装计算；请在每台机器运行安装流程，不要复制另一台机器的启动脚本。普通
+`pip install` 后仍需执行标准的 `ltc setup`。本预览分支为 `codex/macos-desktop-callback`，正式版 `v0.7.0`
+不包含这项自动生成功能。
+
 ## 0.7.0
 
 **LTC 0.7.0 is the stable release with native execution on Linux, macOS and Windows.** It separates native execution
@@ -164,6 +198,28 @@ overwritten, including by `setup --force`. The file is read again before each du
 attempt, so edits apply to the next due callback without restarting the daemon. Non-empty
 content is appended to the callback prompt under `[long-task-callback-user-hook]`; a missing,
 empty, or temporarily unreadable file does not block callback delivery.
+
+For the **unreleased 0.7.1 preview**, setup also creates platform launchers under
+`<CODEX_HOME>/long-task-wakeup`: `Start LTC Desktop.command` on Mac, and
+`Start LTC Desktop.cmd` plus `Start LTC Desktop.ps1` on Windows. The private
+`desktop.json` records the current profile and installed Python/runtime paths.
+All required launcher resources are included in the wheel. An absent Desktop app
+does not prevent CLI setup or launcher generation; after installing Desktop,
+use `ltc desktop prepare` on Mac if no configuration exists, or
+`ltc desktop launch --check-only` on Windows. Generated absolute paths are local
+installation settings, not usernames or checkout paths embedded in the
+distributed source. Rerun setup after moving or replacing the Python environment.
+Windows defaults to direct launch; `setup --desktop-launch-mode package-context`
+explicitly selects and saves its experimental Store package route. This Desktop
+setup step only generates files; `ltc desktop launch --check-only` runs the Windows suspended
+process-creation probe without running GUI code. It never silently changes routes.
+
+The preview's `scripts/install_from_git.sh` runs both pip installation and
+`setup --force --enable --now` using the same interpreter. `LTC_PYTHON` selects
+that interpreter, and arguments after `--` are passed to setup. This helper must
+install branch `codex/macos-desktop-callback` (or a commit from that branch);
+running it against `v0.7.0` cannot add the new launcher feature. Direct pip
+installation deliberately has no setup hook; follow it with `ltc setup` as above.
 
 During setup, LTC checks whether the Claude Code CLI is available and runs `claude auth status`
 with output suppressed. This is advisory: setup continues when Claude is absent or authentication
@@ -610,6 +666,10 @@ systemd 用户服务 / macOS LaunchAgent / Windows 用户登录计划任务
 
 Mac 安装方式见 [macOS 指南](docs/macos.md)：`ltc setup --force --enable --now` 自动选择
 LaunchAgent 协调器和独立 launchd 任务。任务作业不注册为登录启动项，不会在重启后自动重跑。
+`codex/macos-desktop-callback` 分支的 0.7.1 预览会在 Mac 和 Windows 按当前用户与 Python 安装位置自动生成 Desktop 启动器；
+资源随安装包分发，不依赖源码仓库或 `examples`。Mac 生成 `.command`，Windows 生成 `.cmd` 和 `.ps1`，
+统一使用 `ltc desktop prepare|launch|status`。详见 [Mac](docs/macos-desktop-bridge.md) 和
+[Windows](docs/windows-desktop-bridge.md) 共享 Core 安装说明。正式版 `v0.7.0` 尚无该生成功能。
 Windows 10+ 安装方式见 [Windows 指南](docs/windows.md)：用户登录状态下使用
 `ltc setup --service windows-task --force --enable --now`，通过 Agent CLI 回到原会话。
 PowerShell ACK 命令支持空格、中文与单引号路径；状态文件在创建时设置当前用户和 SYSTEM 私有 ACL。
@@ -622,6 +682,8 @@ Windows 目录创建、重命名和删除不承诺断电持久性；注销或重
 该选项通过微软诊断工具赋予小型 Python helper 包身份，不修改持久环境或包调试策略，也不使用
 `-PreventBreakaway`；它的 token 和其他应用行为不保证等同于正常激活。完整预检还会拒绝运行中的 Desktop。
 Windows Desktop 包上下文桥接仍属于实验功能，核心正式发布不代表所有 Desktop 投递方式均已验证。
+新预览可用 `setup --desktop-launch-mode package-context` 保存该选择；默认直接启动不会失败后自动切换。
+这次安装流程改动在 macOS 开发，尚未完成 Windows 原生安装验收，历史回调成功不能替代这项验收。
 PI、DSH 适配尚未实现。从 0.6 升级时，先排空已有任务并升级协调器，再提交原生任务；
 并行安装请使用独立 Agent profile、队列和对应版本 daemon，避免混用。
 

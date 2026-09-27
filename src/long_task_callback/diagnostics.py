@@ -17,7 +17,7 @@ import sys
 import tempfile
 import time
 
-from . import __version__
+from . import __version__, callback_transport
 from .agents import get_agent
 from .platforms import posix, windows_io
 from .platforms import OwnerState
@@ -340,6 +340,18 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
     except SystemExit:
         issues.append({"code": "session_unbound", "action": "Recover the actual originating Agent session ID and pass --session; never invent a target or substitute --last."})
 
+    capability = getattr(args, "_callback_capability", None)
+    if not isinstance(capability, dict):
+        try:
+            route = callback_transport.selection(args)
+            capability = callback_transport.inspect_route({**route, "agent": callback_agent, "target": target})
+        except (OSError, ValueError):
+            capability = {"status": "blocked", "reason": "invalid_callback_configuration",
+                          "action": "Inspect the selected callback mode and private Desktop configuration."}
+    if capability.get("status") == "blocked":
+        issues.append({"code": "callback_transport_blocked", "kind": "callback", "component": "callback_delivery",
+                       "action": capability.get("action", "Configure the original session's shared Core; do not resubmit saved work.")})
+
     skill_home = cli.codex_home() if callback_agent == "codex" else cli.claude_home() if callback_agent == "claude" else None
     if skill_home is not None and not (skill_home / "skills" / "long-task-callback" / "SKILL.md").is_file():
         issues.append({"code": "skill_missing", "action": "Install the bundled LTC skill for the selected Agent so it can inspect, acknowledge and continue callbacks."})
@@ -354,6 +366,8 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
             repair.extend([f"--{agent}-bin", executable])
     recheck = worker_command("doctor", "--queue-dir", str(root), "--backend", choice,
                              "--agent", callback_agent, "--operation", operation)
+    if getattr(args, "callback_mode", "auto") != "auto":
+        recheck.extend(["--callback-mode", args.callback_mode])
     if target is not None:
         if target.get("kind") == "session":
             recheck.extend(["--session", target["value"]])
@@ -366,6 +380,7 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
     checks = {"support": "supported",
               "configuration": "needs_attention" if any(issue["kind"] == "configuration" for issue in issues) else "ready",
               "runtime": "needs_attention" if any(issue["kind"] == "runtime" for issue in issues) else "ready"}
+    checks["callback"] = str(capability.get("status", "unverified"))
     # Setup repairs bootstrap/configuration or a missing coordinator. A lost
     # task owner or failed delivery instead needs inspection and reconciliation,
     # not a generic service reinstall that cannot restore the business process.
@@ -378,6 +393,7 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
         "scope": "local_prerequisites",
         "environment": environment,
         "checks": checks,
+        "callback": capability,
         "unverified": list(UNVERIFIED),
         "operation": operation,
         "queue_dir": str(root),
@@ -435,6 +451,10 @@ def delivery_issues(root: Path) -> list[dict[str, object]]:
     from . import cli
 
     actions = {
+        "callback_transport_blocked": (
+            "The task result is retained. Repair the original session connection and use ltc retry "
+            "for this callback ID; do not rerun its business command."
+        ),
         "callback_delivery_failed": (
             "Inspect delivery evidence and the bound original session; repair the handoff "
             "without rerunning business work, deleting leases, or blindly resuming."
@@ -492,6 +512,7 @@ def delivery_issues(root: Path) -> list[dict[str, object]]:
                     continue
                 agent = cli.request_agent(request)
                 code = ("callback_outcome_unknown" if request.get("retain_target_lease") is True
+                        else "callback_transport_blocked" if request.get("delivery_state") == "blocked"
                         else "callback_delivery_failed")
                 add(code, agent, callback_id)
     except FileNotFoundError:

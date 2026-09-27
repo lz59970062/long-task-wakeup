@@ -33,9 +33,10 @@ except ImportError:  # pragma: no cover - the durable run lifecycle is POSIX-onl
 
 from . import __version__
 from . import callbacks
+from . import callback_transport
 from . import diagnostics
 from . import storage
-from .desktop_connection import BridgeEndpoint, load_bridge_endpoint
+from .desktop_connection import BridgeEndpoint, UnixBridgeEndpoint, load_bridge_endpoint, load_unix_bridge_endpoint
 from .agents import AGENTS, AGENT_NAMES, ChildOptions, get_agent
 from .agents.base import (
     DEFAULT_APPROVALS_REVIEWER,
@@ -525,6 +526,9 @@ def make_request(args: argparse.Namespace, prompt: str) -> dict[str, object]:
         "approval_policy": getattr(args, "approval_policy", None) or DEFAULT_APPROVAL_POLICY,
         "sandbox_mode": getattr(args, "sandbox_mode", None) or DEFAULT_SANDBOX_MODE,
     }
+    request.update(callback_transport.selection(args))
+    if request.get("callback_mode"):
+        request["version"] = 2  # Older daemons must not discard route/manual intent.
     if agent == "claude":
         request["permission_mode"] = getattr(args, "permission_mode", None) or os.environ.get(
             CLAUDE_PERMISSION_MODE_ENV, DEFAULT_CLAUDE_PERMISSION_MODE
@@ -855,8 +859,10 @@ def load_request(path: Path) -> dict[str, object]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("request must be a JSON object")
-    if data.get("version") != 1:
+    if data.get("version") not in (1, 2):
         raise ValueError("unsupported request version")
+    if data.get("version") == 2 and data.get("callback_mode") not in ("cli", "desktop", "manual"):
+        raise ValueError("version 2 callback requires an explicit mode")
     if not isinstance(data.get("id"), str) or data["id"] != path.stem:
         raise ValueError("request id must match its filename")
     if not isinstance(data.get("cwd"), str):
@@ -1151,7 +1157,8 @@ def select_pending(root: Path, now: float) -> Path | None:
             request = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return path
-        if isinstance(request, dict) and target_has_live_resume(root, request):
+        if isinstance(request, dict) and (request.get("callback_mode") == "manual"
+                                         or target_has_live_resume(root, request)):
             continue
         return path
     return None
@@ -1204,18 +1211,36 @@ class AppServerRpcError(AppServerProtocolError):
     """The local Codex App Server explicitly rejected a JSON-RPC request."""
 
 
-def desktop_app_server_socket(request: dict[str, object]) -> Path | BridgeEndpoint | None:
+class CallbackTransportBlocked(AppServerProtocolError):
+    """Definite pre-submission failure requiring route repair, not blind retry."""
+
+
+class CallbackTargetBusy(RuntimeError):
+    """The correct Core still has an active turn; wait without consuming a retry."""
+
+
+def desktop_app_server_socket(request: dict[str, object]) -> Path | BridgeEndpoint | UnixBridgeEndpoint | None:
     target = request.get("target")
+    if DESKTOP_APP_SERVER_ENV in os.environ and not truthy_env(DESKTOP_APP_SERVER_ENV):
+        if request.get("callback_mode") == "desktop":
+            raise CallbackTransportBlocked("Desktop App Server delivery is explicitly disabled")
+        return None
     if (
-        not truthy_env(DESKTOP_APP_SERVER_ENV)
+        request.get("callback_mode") == "manual"
+        or (not truthy_env(DESKTOP_APP_SERVER_ENV) and request.get("callback_mode") not in ("cli", "desktop"))
         or not isinstance(target, dict)
         or target.get("kind") != "session"
         or not isinstance(target.get("value"), str)
         or not target["value"]
     ):
         return None
+    configured_bridge = (request.get("callback_bridge_file") or os.environ.get(APP_SERVER_BRIDGE_FILE_ENV)
+                         if request.get("callback_mode") != "cli" else None)
+    if request.get("callback_mode") == "desktop" and sys.platform in ("darwin", "win32") and not configured_bridge:
+        raise CallbackTransportBlocked("Desktop callbacks require an explicitly configured shared Core")
+    if sys.platform == "darwin" and configured_bridge:
+        return load_unix_bridge_endpoint(Path(str(configured_bridge)).expanduser(), codex_home())
     if os.name == "nt":
-        configured_bridge = os.environ.get(APP_SERVER_BRIDGE_FILE_ENV)
         if not configured_bridge:
             return None
         return load_bridge_endpoint(Path(configured_bridge).expanduser(), codex_home())
@@ -1238,7 +1263,7 @@ def desktop_sandbox_policy(request: dict[str, object]) -> dict[str, object] | No
 
 
 class AppServerConnection:
-    def __init__(self, path: Path | BridgeEndpoint, timeout: float) -> None:
+    def __init__(self, path: Path | BridgeEndpoint | UnixBridgeEndpoint, timeout: float) -> None:
         self.path = path
         self.timeout = timeout
         self.socket: socket.socket | None = None
@@ -1252,7 +1277,8 @@ class AppServerConnection:
         if isinstance(self.path, BridgeEndpoint):
             connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         else:
-            if not self.path.is_socket():
+            unix_path = self.path.path if isinstance(self.path, UnixBridgeEndpoint) else self.path
+            if not unix_path.is_socket():
                 raise AppServerProtocolError(f"control socket unavailable at {self.path}")
             connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
@@ -1264,8 +1290,14 @@ class AppServerConnection:
                                      expected_identity=self.path.identity)
                 host = f"127.0.0.1:{self.path.port}"
             else:
-                connection.connect(str(self.path))
+                connection.connect(str(unix_path))
                 self._verify_peer_uid(connection)
+                if isinstance(self.path, UnixBridgeEndpoint):
+                    # Darwin SOL_LOCAL / LOCAL_PEERPID, from sys/un.h.
+                    peer_pid = connection.getsockopt(0, 2)
+                    if (peer_pid != self.path.pid
+                            or macos_platform.process_identity(peer_pid) != self.path.identity):
+                        raise AppServerProtocolError("Desktop socket peer identity changed")
                 host = "localhost"
             key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
             request = (
@@ -1565,12 +1597,22 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
     request = payload.get("request")
     if not isinstance(request, dict):
         return None
+    if request.get("callback_mode") == "manual":
+        raise CallbackTransportBlocked("manual callback mode does not launch an Agent")
     if request_agent(request) != "codex":
         return None  # The Desktop App Server delivery path is Codex-only.
-    socket_path = desktop_app_server_socket(request)
+    try:
+        socket_path = desktop_app_server_socket(request)
+    except (OSError, ValueError) as exc:
+        if request.get("callback_mode") == "desktop":
+            raise CallbackTransportBlocked("configured Desktop bridge is unavailable; inspect and retry this callback only") from exc
+        raise
     target = request.get("target")
     sandbox_policy = desktop_sandbox_policy(request)
+    explicit_desktop = request.get("callback_mode") == "desktop" or isinstance(socket_path, (BridgeEndpoint, UnixBridgeEndpoint))
     if socket_path is None or sandbox_policy is None or not isinstance(target, dict) or not isinstance(target.get("value"), str):
+        if explicit_desktop:
+            raise CallbackTransportBlocked("Desktop callbacks require a bound session, shared Core and workspace-write callback policy")
         return None
     connection = AppServerConnection(socket_path, min(15.0, max(1.0, float(payload["timeout"]))))
     delivery_context = desktop_delivery_context(payload)
@@ -1585,7 +1627,11 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
             },
         )
         connection.notify("initialized", {})
-        connection.request("thread/resume", {"threadId": target["value"], "excludeTurns": True})
+        resumed = connection.request("thread/resume", {"threadId": target["value"], "excludeTurns": True})
+        thread = resumed.get("thread") if isinstance(resumed, dict) else None
+        status = thread.get("status") if isinstance(thread, dict) else None
+        if isinstance(status, dict) and status.get("type") == "active":
+            raise CallbackTargetBusy("original session still has an active turn")
         turn_params: dict[str, object] = {
             "threadId": target["value"],
             "cwd": str(payload["cwd"]),
@@ -1630,6 +1676,8 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
         connection = None
         return delivery
     except AppServerRpcError as exc:
+        if not turn_start_submitted and "already has an active writer" in str(exc):
+            raise CallbackTransportBlocked("bound session belongs to another Core; repair the connection before retrying") from exc
         if turn_start_submitted:
             if delivery_context is not None:
                 try:
@@ -1641,15 +1689,15 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
                         file=sys.stderr,
                     )
                     return DesktopAppServerDelivery(None, target["value"], None)
-            if isinstance(socket_path, BridgeEndpoint):
-                raise AppServerProtocolError("explicit Desktop bridge rejected the callback; CLI fallback disabled") from exc
+            if explicit_desktop:
+                raise CallbackTransportBlocked("explicit Desktop bridge rejected the callback; CLI fallback disabled") from exc
             print(
                 f"ltc: desktop App Server rejected turn/start: {exc}; falling back to CLI",
                 file=sys.stderr,
             )
         else:
-            if isinstance(socket_path, BridgeEndpoint):
-                raise AppServerProtocolError("explicit Desktop bridge could not resume the bound session; CLI fallback disabled") from exc
+            if explicit_desktop:
+                raise CallbackTransportBlocked("explicit Desktop bridge could not resume the bound session; CLI fallback disabled") from exc
             print(f"ltc: desktop App Server delivery unavailable: {exc}; falling back to CLI", file=sys.stderr)
         return None
     except (OSError, ValueError, TypeError, AppServerProtocolError) as exc:
@@ -1660,8 +1708,8 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
                 file=sys.stderr,
             )
             return DesktopAppServerDelivery(None, target["value"], None)
-        if isinstance(socket_path, BridgeEndpoint):
-            raise AppServerProtocolError("explicit Desktop bridge is unavailable; CLI fallback disabled") from exc
+        if explicit_desktop:
+            raise CallbackTransportBlocked("explicit Desktop bridge is unavailable; CLI fallback disabled") from exc
         print(f"ltc: desktop App Server delivery unavailable: {exc}; falling back to CLI", file=sys.stderr)
         return None
     finally:
@@ -1776,6 +1824,11 @@ def delivery_worker_main() -> int:
             except subprocess.TimeoutExpired:
                 terminate_process_group(process)
                 result = {"returncode": 124, "timed_out": True}
+    except CallbackTargetBusy:
+        result = {"returncode": 123, "delivery_state": "waiting_for_idle"}
+    except CallbackTransportBlocked as exc:
+        print(f"ltc: callback blocked: {exc}", file=sys.stderr)
+        result = {"returncode": 126, "delivery_state": "blocked", "error": str(exc)}
     except WorkerInterrupted as exc:
         if process is not None:
             terminate_process_group(process)
@@ -1987,8 +2040,8 @@ def move_request(source: Path, destination_dir: Path) -> Path:
             not isinstance(source_id, str)
             or not isinstance(source_data, dict)
             or not isinstance(destination_data, dict)
-            or source_data.get("version") != 1
-            or destination_data.get("version") != 1
+            or source_data.get("version") not in (1, 2)
+            or destination_data.get("version") not in (1, 2)
             or source_id != destination_id
             or source_id != source.stem
             or source_data != destination_data
@@ -2385,12 +2438,23 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
             return True
         if result is None:
             return True
+        if result.returncode == 123 and not acked:
+            request["attempts"] = max(0, attempts - 1)
+            request["next_attempt_at"] = time.time() + 10
+            request["last_deferred_reason"] = "original session has an active turn"
+            if running.exists() and not is_canceled(root, request_id):
+                write_request(running, request)
+                move_request(running, root / "pending")
+            return True
         if result.returncode == 124 and not acked:
             request["last_error"] = "agent resume timed out"
             print(
                 f"ltc: warning: daemon callback {running.name} timed out",
                 file=sys.stderr,
             )
+        if result.returncode == 126 and not acked:
+            request["delivery_state"] = "blocked"
+            request["last_error"] = "callback transport blocked; repair the original session connection, then use ltc retry --id " + request_id
         if result.returncode == 125 and not acked:
             request["last_error"] = "Desktop callback outcome is unknown; automatic retry suppressed to prevent duplicate delivery"
             request["retain_target_lease"] = True
@@ -2413,7 +2477,7 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
                 f"ltc: warning: daemon callback {running.name} exited with {result.returncode}",
                 file=sys.stderr,
             )
-        if not acked and result.returncode != 125:
+        if not acked and result.returncode not in (125, 126):
             request.setdefault("last_error", f"missing acknowledgement marker after exit {result.returncode}")
             max_retries = max(0, int(getattr(args, "retries", DEFAULT_RETRIES)))
             if attempts <= max_retries:
@@ -2433,6 +2497,8 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
                     file=sys.stderr,
                 )
                 return True
+        if result.returncode == 126 and running.exists():
+            write_request(running, request)
     except Exception as exc:
         destination_dir = root / "failed"
         print(f"ltc: warning: daemon failed to process {running.name}: {exc}", file=sys.stderr)
@@ -2743,7 +2809,7 @@ def write_managed_task(root: Path, task: dict[str, object]) -> None:
 
 def load_managed_task(path: Path) -> dict[str, object]:
     task = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(task, dict) or task.get("version") not in (1, 2):
+    if not isinstance(task, dict) or task.get("version") not in (1, 2, 3):
         raise ValueError("invalid managed task record")
     if task.get("id") != path.parent.name:
         raise ValueError("managed task id must match its directory")
@@ -2751,8 +2817,10 @@ def load_managed_task(path: Path) -> dict[str, object]:
     if task.get("task_kind") == "agent":
         get_agent(str(task.get("agent_worker", "")))
     backend = task.get("execution_backend", "screen")
-    if task.get("version") == 2 and "execution_backend" not in task:
-        raise ValueError("version 2 task requires an execution backend")
+    if task.get("version") in (2, 3) and "execution_backend" not in task:
+        raise ValueError("native task records require an execution backend")
+    if task.get("version") == 3 and task.get("callback_mode") not in ("cli", "desktop", "manual"):
+        raise ValueError("version 3 task requires an explicit callback mode")
     if backend not in ("screen", "systemd-user", "launchd", "windows-task"):
         raise ValueError(f"unsupported execution backend: {backend!r}")
     if not isinstance(task.get("queue_dir"), str):
@@ -2805,6 +2873,7 @@ def managed_task_namespace(task: dict[str, object]) -> argparse.Namespace:
         _callback_target_source=str(task.get("target_source", "managed-task")),
         _callback_agent=str(task.get("agent", "codex")),
         callback_format=str(task.get("callback_format", "compact")),
+        _callback_route={k: task[k] for k in ("callback_mode", "callback_origin", "callback_bridge_file") if k in task},
     )
 
 
@@ -3281,10 +3350,16 @@ def agent_wrapped_command(
 
 
 def child_agent_environment(environment: dict[str, str]) -> dict[str, str]:
-    return AGENTS.child_environment(environment)
+    child = AGENTS.child_environment(environment)
+    # A fresh CLI child is not the Desktop conversation which submitted it.
+    # Keep the parent's callback route in the task record, not this marker.
+    child.pop("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", None)
+    return child
 
 
 def submit_managed_run(args: argparse.Namespace) -> int:
+    if not callback_transport.preflight(args):
+        return 125
     try:
         backend = select_execution_backend(args)
     except ValueError as exc:
@@ -3339,9 +3414,9 @@ def submit_managed_run(args: argparse.Namespace) -> int:
                         macos_platform.OWNER_ENV, "XPC_SERVICE_NAME", "XPC_FLAGS")
     }
     task: dict[str, object] = {
-        # Older daemons must reject native tasks instead of launching them in
-        # screen. Screen records remain readable by 0.6 installations.
-        "version": 1 if backend == "screen" else 2,
+        # Older daemons must reject new route intent, even for screen tasks,
+        # instead of silently auto-delivering an explicit manual callback.
+        "version": 3,
         "id": task_id,
         "submitted_at": time.time(),
         "execution_backend": backend,
@@ -3370,6 +3445,7 @@ def submit_managed_run(args: argparse.Namespace) -> int:
         "environment_path": str(environment_path),
         "token": MANAGED_WORKER_TOKEN_PREFIX + secrets.token_urlsafe(32),
     }
+    task.update(callback_transport.selection(args))
     if task_kind == "agent" and agent_prompt_path is not None and agent_result_path is not None:
         task.update(
             {
@@ -3397,6 +3473,9 @@ def submit_managed_run(args: argparse.Namespace) -> int:
     args._health_work = {"state": "task_persisted", "id": task_id}
     print(f"ltc: submitted managed task {task_id}", file=sys.stderr)
     print(f"ltc: execution backend: {backend}", file=sys.stderr)
+    print(f"ltc: callback mode: {task['callback_mode']}", file=sys.stderr)
+    if task["callback_mode"] == "manual":
+        print("ltc: automatic callback disabled; inspect saved results and ACK from the bound session", file=sys.stderr)
     if backend == "screen":
         print(f"ltc: screen session: {task['screen_session']}", file=sys.stderr)
         print("ltc: screen fallback: service-stop survival depends on its containing service", file=sys.stderr)
@@ -3683,6 +3762,8 @@ def agent(args: argparse.Namespace) -> int:
 
 
 def add_common_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--callback-mode", choices=callback_transport.MODES, default="auto",
+                        help="Callback route: auto detects Codex Desktop; cli uses existing CLI/shared service; desktop requires its bridge; manual saves for later receipt")
     parser.add_argument("--backend", choices=("auto", "systemd", "launchd", "windows-task", "screen"),
                         default=os.environ.get("LTC_EXECUTION_BACKEND", "auto"),
                         help="Task owner: systemd on Linux, launchd on macOS, windows-task on Windows; screen is the POSIX fallback")
@@ -4533,7 +4614,10 @@ def select_daemon_service(args: argparse.Namespace) -> str:
 
 
 def setup(args: argparse.Namespace) -> int:
+    from . import desktop
+
     try:
+        desktop.validate_setup(args)
         service = select_daemon_service(args)
         if not getattr(args, "callback_only", False):
             select_execution_backend(args)
@@ -4551,6 +4635,11 @@ def setup(args: argparse.Namespace) -> int:
         return skill_status
     ensure_callback_hook_file()
     report_claude_agent_readiness(args)
+    try:
+        desktop.install_for_setup(codex_home(), args)
+    except (OSError, ValueError) as exc:
+        print(f"ltc: could not prepare the optional Desktop launcher: {exc}; "
+              "CLI setup can continue. Retry with ltc desktop prepare.", file=sys.stderr)
 
     systemd_args = argparse.Namespace(
         name=args.name,
@@ -4606,13 +4695,13 @@ def ack(args: argparse.Namespace) -> int:
     if args.message:
         payload["message"] = args.message
     write_request(marker, payload)
-    for state in ("failed", "running"):
+    for state in ("failed", "running", "pending"):
         source = request_path(root, state, args.id)
         if not source.exists():
             continue
         try:
             request = load_request(source)
-            if state == "failed":
+            if state == "failed" or (state == "pending" and request.get("callback_mode") == "manual"):
                 move_request(source, root / "done")
             try:
                 release_retained_target_lease(root, request)
@@ -4627,6 +4716,65 @@ def ack(args: argparse.Namespace) -> int:
         break
     print(f"ltc: acknowledged callback {args.id} in {root}", file=sys.stderr)
     return 0
+
+
+def retry_callback(args: argparse.Namespace) -> int:
+    """Requeue a known callback; never resubmit its completed workload."""
+    root = queue_dir(args).expanduser().absolute()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", args.id):
+        print("ltc: invalid callback id", file=sys.stderr)
+        return 2
+    delivery_lock = target_lock = None
+    try:
+        ensure_daemon_dirs(root)
+        delivery_lock = acquire_owner_lock(root, delivery_lock_id(args.id), blocking=False)
+        if delivery_lock is None:
+            raise ValueError("callback delivery is still active")
+        source = request_path(root, "failed", args.id)
+        if not source.exists():
+            source = request_path(root, "pending", args.id)
+        request = load_request(source)
+        if source.parent.name == "pending" and request.get("callback_mode") != "manual":
+            raise ValueError("callback is already pending")
+        if ack_path(root, args.id).exists() or is_canceled(root, args.id):
+            raise ValueError("acknowledged or canceled callbacks cannot be retried")
+        if request.get("retain_target_lease") is True or desktop_submission_pending(root, request):
+            raise ValueError("previous submission outcome is unknown; inspect the original session before recovery")
+        target_lock = acquire_target_lock(request, blocking=False)
+        if target_lock is None or retained_target_lease_is_held(request):
+            raise ValueError("the bound session has an active or unresolved delivery")
+        if args.callback_mode:
+            options = argparse.Namespace(callback_mode=args.callback_mode, agent=request_agent(request))
+            for key in ("callback_mode", "callback_origin", "callback_bridge_file"):
+                request.pop(key, None)
+            request.update(callback_transport.selection(options))
+            request["version"] = 2
+        capability = callback_transport.inspect_route(request)
+        if capability["status"] == "blocked":
+            raise ValueError("callback route remains blocked: " + str(capability.get("reason")))
+        history = request.setdefault("retry_history", [])
+        if not isinstance(history, list):
+            raise ValueError("callback retry history is invalid")
+        history.append({"at": time.time(), "attempts": request.get("attempts", 0), "last_error": request.get("last_error")})
+        request["retry_history"] = history[-10:]
+        request["attempts"] = 0
+        for key in ("last_error", "delivery_state", "next_attempt_at", "last_deferred_reason"):
+            request.pop(key, None)
+        if not source.exists() or ack_path(root, args.id).exists() or is_canceled(root, args.id):
+            raise ValueError("callback changed during recovery; inspect its current state")
+        write_request(source, request)
+        if source.parent.name != "pending":
+            move_request(source, root / "pending")
+        print(f"ltc: requeued callback {args.id}; business task was not relaunched", file=sys.stderr)
+        return 0
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"ltc: callback retry refused: {error}", file=sys.stderr)
+        return 2
+    finally:
+        if target_lock is not None:
+            release_owner_lock(target_lock, remove=False)
+        if delivery_lock is not None:
+            release_owner_lock(delivery_lock, remove=False)
 
 
 def goal_start(args: argparse.Namespace) -> int:
@@ -5001,6 +5149,10 @@ def status(args: argparse.Namespace) -> int:
     for state, path, request in items[:limit]:
         request_id = str(request.get("id", path.stem))
         line = f"  - [{state}] {request_task(request)} | {request_target(request)} | id {request_id}"
+        if request.get("callback_mode") == "manual":
+            line += " | manual receipt; automatic callback disabled"
+        if request.get("delivery_state") == "blocked":
+            line += " | callback blocked; saved workload result retained"
         if state == "running" and ack_path(root, request_id).exists():
             line += " | acknowledged; resumed Codex process still active"
         error = request.get("last_error")
@@ -5082,6 +5234,7 @@ def main() -> int:
                                help="Workflow whose prerequisites are checked (default: run)")
     doctor_parser.add_argument("--agent", choices=AGENT_NAMES, help="Callback Agent (default: detect current Agent)")
     doctor_parser.add_argument("--agent-worker", choices=AGENT_NAMES, help="Child Agent for --operation agent")
+    doctor_parser.add_argument("--callback-mode", choices=callback_transport.MODES, default="auto")
     doctor_target = doctor_parser.add_mutually_exclusive_group()
     doctor_target.add_argument("--session", help="Original Agent session to preserve during repair")
     doctor_target.add_argument("--last", action="store_true", help="Inspect an already explicitly chosen unsafe last-session target")
@@ -5089,6 +5242,24 @@ def main() -> int:
     prompt_policy_parser = sub.add_parser("prompt-policy", help="Show or set callback reminder intervals")
     prompt_policy_parser.add_argument("--system-every", type=positive_prompt_interval, help="Show standard reminders every N distinct callbacks (default: 4)")
     prompt_policy_parser.add_argument("--user-every", type=positive_prompt_interval, help="Show callback-hook reminders every N distinct callbacks (default: 3)")
+
+    retry_parser = sub.add_parser("retry", help="Requeue a failed/manual callback without rerunning its workload")
+    retry_parser.add_argument("--id", required=True)
+    retry_parser.add_argument("--queue-dir")
+    retry_parser.add_argument("--callback-mode", choices=callback_transport.MODES)
+
+    desktop_parser = sub.add_parser("desktop", help="Prepare, inspect or launch the opt-in Mac/Windows Desktop shared Core")
+    desktop_actions = desktop_parser.add_subparsers(dest="desktop_action", required=True)
+    prepare = desktop_actions.add_parser("prepare", help="Save configuration and a double-click launcher without restarting Desktop")
+    prepare.add_argument("--app", help="Desktop .app on Mac or .exe on Windows (default: platform discovery)")
+    prepare.add_argument("--wrapper", help="Custom Core wrapper (default: preserve selection, or use this LTC installation)")
+    prepare.add_argument("--core", help="Windows Desktop Core .exe override (default: matching Desktop Core)")
+    prepare.add_argument("--launch-mode", choices=("direct", "package-context"),
+                         help="Windows launch route; package-context is experimental and explicitly selected")
+    prepare.add_argument("--force", action="store_true")
+    desktop_actions.add_parser("status", help="Inspect the configured Core identity")
+    launch = desktop_actions.add_parser("launch", help="Launch Desktop only after its existing process has exited")
+    launch.add_argument("--check-only", action="store_true")
 
     done_parser = sub.add_parser("done", help="Queue a callback after an externally managed task finishes")
     add_common_flags(done_parser)
@@ -5191,6 +5362,12 @@ def main() -> int:
     setup_parser.add_argument("--force", action="store_true", help="Overwrite an existing skill and service file")
     setup_parser.add_argument("--keep-skill", action="store_true",
                               help="Keep existing skill files during coordinator setup, even with --force; install if missing")
+    desktop_setup = setup_parser.add_mutually_exclusive_group()
+    desktop_setup.add_argument("--desktop-app", help="Desktop .app on Mac or .exe on Windows for the generated launcher")
+    desktop_setup.add_argument("--no-desktop-launcher", action="store_true",
+                               help="Skip Mac/Windows Desktop launcher generation (default: prepare without launching)")
+    setup_parser.add_argument("--desktop-launch-mode", choices=("direct", "package-context"),
+                              help="Windows Desktop launch route (default: preserve selection, or direct)")
     setup_parser.add_argument("--enable", action="store_true", help="Enable the service for this user")
     setup_parser.add_argument("--now", action="store_true", help="Start the service or request a safe reload")
 
@@ -5267,6 +5444,11 @@ def main() -> int:
     shell_hook_parser.add_argument("--command", help="Executable path embedded in the hook")
 
     args = parser.parse_args()
+    if args.mode == "desktop":
+        from . import desktop
+        return desktop.command(args)
+    if args.mode == "retry":
+        return retry_callback(args)
     if args.mode == "doctor":
         return diagnostics.doctor(args)
     if args.mode == "done":

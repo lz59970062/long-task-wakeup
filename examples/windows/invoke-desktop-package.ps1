@@ -1,4 +1,4 @@
-<# Windows PowerShell 5.1 facade for the Appx diagnostic cmdlet. #>
+<# Compatibility entry point for the package-owned Windows PowerShell facade. #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$PackageFamilyName,
@@ -7,8 +7,8 @@ param(
     [Parameter(Mandatory = $true)][string]$RequestFile
 )
 $ErrorActionPreference = 'Stop'
-# The main script selects the installed manifest's App identity. Only this
-# windowless, short-lived diagnostic helper is explicitly given package context.
-# Do not use PreventBreakaway: child ownership follows the normal Windows rules.
-Invoke-CommandInDesktopPackage -PackageFamilyName $PackageFamilyName -AppId 'App' `
-    -Command $Python -Args ('"{0}" --request "{1}"' -f $Helper, $RequestFile) | Out-Null
+$resource = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) '..\..\src\long_task_callback\desktop_windows_assets\invoke-desktop-package.ps1'
+if (-not (Test-Path -LiteralPath $resource -PathType Leaf)) {
+    throw 'The checkout package helper is missing. Use the installed ltc desktop launch command.'
+}
+& $resource @PSBoundParameters

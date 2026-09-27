@@ -1,5 +1,22 @@
 # 0.7.0 architecture and platform handoff
 
+## 0.7.1 preview: explicit callback modes
+
+The working preview separates callback capability from OS task ownership.
+See [callback modes](callback-modes.md), the
+[Mac Desktop launcher](macos-desktop-bridge.md) and the
+[Windows Desktop launcher](windows-desktop-bridge.md).
+`desktop.py` dispatches the common setup/prepare/launch/status lifecycle to
+`desktop_macos.py` or `desktop_windows.py`. Standard setup generates local
+launchers for both platforms. Windows locates the native wrapper in the current
+distribution's install records and uses `desktop_windows_assets` from the wheel;
+the examples directory is only a compatibility entry point. Generation and
+activation are separate, and Windows package-context startup remains explicit.
+New managed task records are version 3 and explicit callback records version 2;
+older coordinators reject them so they cannot silently ignore manual/desktop
+intent. Existing versions remain readable. The 0.7.0 material below is the
+released baseline; the preview's live Mac Desktop acceptance is still pending.
+
 See the [0.7.0 release validation record](validation-0.7.0.md) for final checks.
 The [Mac-to-Windows handoff](handoff-macos-to-windows.md) preserves the earlier
 implementation plan and Mac callback evidence.

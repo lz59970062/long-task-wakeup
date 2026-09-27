@@ -1,6 +1,6 @@
 """Desktop-owned Core launcher and transparent JSONL/websocket relay.
 
-Set CODEX_CLI_PATH to the installed ltc-desktop-core.exe. The Desktop supplies
+Set CODEX_CLI_PATH to the installed ltc-desktop-core launcher. The Desktop supplies
 fresh app-tools pipe environment and its normal Core configuration arguments.
 This launcher passes all of them to the real executable, changing only the
 listening transport for an App Server invocation. It never initializes a
@@ -36,19 +36,26 @@ class RelayError(RuntimeError):
 def real_core() -> Path:
     raw = os.environ.get(REAL_CODEX_ENV, "")
     path = Path(raw)
-    if not raw or not path.is_absolute() or path.suffix.lower() != ".exe" or not path.is_file():
-        raise RelayError("Desktop real Core must be an existing absolute .exe path")
+    if not raw or not path.is_absolute() or not path.is_file():
+        raise RelayError("Desktop real Core must be an existing absolute executable path")
     path = path.resolve()
     wrapper = Path(sys.argv[0]).resolve()
     if (os.path.normcase(str(path)) == os.path.normcase(str(wrapper))
-            or path.name.lower() in ("ltc-desktop-core.exe", "ltc-desktop-core-script.py")):
+            or path.name.lower() in ("ltc-desktop-core", "ltc-desktop-core.exe", "ltc-desktop-core-script.py")):
         raise RelayError("Desktop real Core must not refer to the wrapper itself")
     try:
         if wrapper.exists() and path.samefile(wrapper):
             raise RelayError("Desktop real Core must not refer to the wrapper itself")
         with path.open("rb") as handle:
-            if handle.read(2) != b"MZ":
-                raise RelayError("Desktop real Core is not a Windows executable")
+            magic = handle.read(4)
+        if sys.platform == "darwin":
+            if not os.access(path, os.X_OK) or magic not in (
+                b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce",
+                b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca",
+            ):
+                raise RelayError("Desktop real Core is not an executable Mach-O file")
+        elif path.suffix.lower() != ".exe" or magic[:2] != b"MZ":
+            raise RelayError("Desktop real Core is not a Windows executable")
     except OSError as exc:
         raise RelayError("Desktop real Core could not be inspected") from exc
     return path
@@ -68,7 +75,7 @@ def app_server_arguments(arguments: list[str]) -> list[str] | None:
     if index >= len(arguments) or arguments[index] != "app-server":
         return None
     tail = arguments[index + 1:]
-    if any(value in ("--help", "-h", "--version", "-V", "generate-ts", "generate-json-schema") for value in tail):
+    if any(value in ("--help", "-h", "--version", "-V", "daemon", "proxy", "generate-ts", "generate-json-schema") for value in tail):
         return None
     result = arguments[:index + 1]
     position = 0
@@ -84,6 +91,8 @@ def app_server_arguments(arguments: list[str]) -> list[str] | None:
                 transport = value.split("=", 1)[1]
             if transport != "stdio://":
                 raise RelayError("Desktop wrapper accepts only the default stdio transport")
+        elif value == "--stdio":
+            pass
         elif value.startswith("--ws-"):
             raise RelayError("Desktop wrapper owns the App Server websocket authentication flags")
         else:
@@ -307,6 +316,9 @@ def main(argv: list[str] | None = None) -> int:
             # --version/help/codegen stay read-only and bypass bridge state.
             return subprocess.call([str(executable), *arguments], stdin=sys.stdin, stdout=sys.stdout,
                                    stderr=sys.stderr, close_fds=True, **background_popen_kwargs())
+        if sys.platform == "darwin":
+            from .desktop_unix import run_app_server as run_unix_app_server
+            return run_unix_app_server(executable, listening)
         raw_metadata = os.environ.get(BRIDGE_FILE_ENV, "")
         if not raw_metadata:
             raise RelayError("Desktop bridge metadata path is not configured")
