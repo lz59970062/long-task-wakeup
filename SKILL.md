@@ -256,6 +256,27 @@ managing that configuration. Standalone `--enable` cannot register container sta
 For Docker images, run `ltc daemon` in foreground under `docker --init`, or use an
 external supervisor. A container CMD must not merely spawn a background daemon and exit.
 
+When setting up unattended container use, guide the user through the startup route
+appropriate to their platform: a verified AutoDL boot hook invoking standalone
+setup with `--keep-skill --now`, an existing administered Supervisor running
+`ltc daemon` with `autostart`/`autorestart`, or a foreground Docker daemon with
+`--restart unless-stopped`. Inspect the actual startup mechanism; creating
+`/root/autodl.sh` alone does not establish that an image executes it. AutoDL elastic
+deployment main commands must stay in the foreground. Preserve existing boot-hook
+commands, Agent profiles, queue paths and service customizations. Pin executable
+paths and runtime environment instead of relying on interactive Conda/NVM setup.
+For custom Supervisor layouts, use its verified configuration with `supervisorctl
+-c`; LTC's built-in installer uses bare control commands and an unscoped update.
+Choose one startup owner per queue and distinguish boot startup from crash recovery.
+Prepare changes within the user's authorized scope; guidance alone does not authorize
+restarting a busy container or replacing platform services. Detailed examples and
+removal steps are in the repository's `docs/containers.md`.
+
+After configuration, check the service and `ltc doctor` under the same profile, then
+verify startup at a planned idle container restart and a real original-session
+callback/ACK. Report any untested restart behavior explicitly. Coordinator autostart
+does not preserve or authorize replay of an interrupted business process.
+
 Terminal disconnection or standalone coordinator exit can leave screen tasks alive
 while the container remains running. If the coordinator is the container's main
 process, its exit ends the container as well. Container stop/recreation interrupts

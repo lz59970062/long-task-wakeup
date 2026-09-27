@@ -66,8 +66,10 @@ prose without truncating saved results or user instructions.
 PI/DSH integrations remain future adapters. See
 [macOS setup](docs/macos.md), [Windows setup](docs/windows.md) and [architecture and handoff](docs/architecture.md)
 for module responsibilities, recovery guarantees, extension points and validation.
-Docker and AutoDL use the non-systemd screen/standalone profile; see
-[container setup and lifecycle boundaries](docs/containers.md).
+Docker and AutoDL use screen when user systemd is unavailable; see
+[container setup, autostart and lifecycle boundaries](docs/containers.md).
+For unattended use, configure a verified AutoDL boot hook, an existing Supervisor,
+or Docker's `unless-stopped` policy. Standalone setup alone does not register startup.
 See the [preview validation record](docs/validation-0.7.0a1.md) for tested
 environments, commands and remaining platform work.
 The macOS adapter has a separate [local validation record](docs/validation-macos.md).
