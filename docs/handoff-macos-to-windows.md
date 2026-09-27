@@ -2,9 +2,10 @@
 
 交接日期：2026-09-26。面向在 Windows 机器上继续开发的 Agent / 维护者。
 
-后续状态：Windows 原生实现及本机测试已完成，见 [Windows 指南](windows.md) 和
-[Windows 验证记录](validation-windows.md)。当前 Desktop 原会话回调被 active-writer
-检查阻止，尚未通过完整验收。下文保留为 Mac 交接时的历史基线。
+后续状态：Windows 原生实现、实验桥接原会话回调及 ACK 已完成，跨平台 CI 已通过，
+改动已合回 `codex/0.7.0-preview`。接手请读新的
+[Windows 完成后的开发交接](handoff-windows-to-maintainer.md)。
+默认 CLI 的 active-writer 限制仍存在。下文保留为 Mac 交接时的历史基线。
 
 ## 1. 当前结论与接手基线
 
