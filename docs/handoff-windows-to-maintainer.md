@@ -41,7 +41,10 @@ py -3 -m venv .venv
 - Desktop 实验桥接：`desktop_core.py` 保留 Desktop 注入的工具环境和 Core 参数；
   `desktop_bridge.py` 提供经本机用户身份校验的共享 App Server；
   `desktop_connection.py` 校验连接元数据和 profile。
-- 打包版启动入口：`examples/windows/start-desktop-bridge.ps1` 及同目录辅助脚本。
+- 0.7.0 的打包版启动入口：`examples/windows/start-desktop-bridge.ps1` 及同目录辅助脚本。
+  0.7.1 本地预览已将实现移入安装包 `desktop_windows_assets/`，由统一的
+  `ltc setup` 生成本机 `.cmd`/`.ps1`，通过 `ltc desktop` 管理；examples 保留兼容入口。
+  新安装流程仍待 Windows 原生验收，不能沿用旧版本回调结果作为通过证据。
 - 共用修复：`cli.py` 保留短轮询超时前的 WebSocket 帧及消息分片，防止丢失完成通知；
   `templates.py` 规范化来源路径，兼容 macOS `/var` 与 `/private/var` 别名。
 - CI 收敛修复：兼容 Python 3.9 的 socket 超时异常；桥接启动 JSON 使用 ASCII 转义，

@@ -2,14 +2,21 @@
 
 This opt-in adapter is intended to let Codex Desktop and LTC use **one App
 Server**, so callback delivery reaches the process that already owns the thread.
-It is not enabled by ordinary Windows setup. The existing Desktop conversation's
+The 0.7.1 preview generates its launcher during ordinary Windows setup;
+shared Core activation still requires explicitly launching Desktop through it.
+The implementation and PowerShell resources ship in the installed wheel, with
+no dependency on a source checkout or `examples` directory. Use branch
+`codex/macos-desktop-callback`; stable `v0.7.0` does not include automatic launcher generation.
+The existing Desktop conversation's
 end-to-end callback receipt and ACK passed on 2026-09-27 using `-PackageContext`;
 see [the validation record](validation-windows.md#live-original-session-acceptance--2026-09-27). The installed Windows Store
 Desktop still fails the launcher's default direct process creation with Win32
 error 5 (access denied). The explicit experimental `-PackageContext` option is
 validated on one Windows installation for GUI startup, App Tools and original-session
 receipt/ACK. It remains experimental and does not establish compatibility with
-every Desktop version or tool workflow.
+every Desktop version or tool workflow. That historical acceptance used the
+earlier launcher; the preview's new installation and generated launcher flow
+has not received native Windows acceptance.
 
 ## Findings and sources
 
@@ -163,42 +170,94 @@ does not expose an environment argument; merely opening a window does not prove
 that the Core override arrived. Do not repeatedly restart Desktop or elevate the
 shell as a presumed fix for the default route's error 5.
 
-## Explicit opt-in and acceptance checks
+## Install and generate a launcher
+
+With the preview installed, use the same standard setup entry point as Mac:
+
+```powershell
+ltc setup --force --enable --now
+```
+
+Setup generates `Start LTC Desktop.cmd`, `Start LTC Desktop.ps1` and private
+`desktop.json` in `<CODEX_HOME>\long-task-wakeup` (the default profile is
+`%USERPROFILE%\.codex`). The generated files point to the current installed
+Python/runtime, profile and packaged resources. They contain local absolute
+paths by design; the distributed source contains no particular user's paths.
+No checkout, repository-local `.venv` or `examples` script is needed at runtime.
+Use the `ltc` executable from the installed Python environment if it is not on
+PATH, and rerun setup after moving or replacing that environment.
+
+Setup/prepare do not launch Desktop, stop existing instances, or execute the
+suspended GUI-creation probe. An absent Desktop app does not prevent CLI setup
+or launcher generation. They save dynamic discovery settings rather than
+discovering the installed app. After installing Desktop, use
+`ltc desktop launch --check-only` before launching it. Both `launch` and its
+`--check-only` mode discover the GUI through its Store package manifest and a
+runnable Core that matches the installed bundle; they do not default to an
+unrelated global npm CLI. Explicit selection is available:
+
+```powershell
+ltc setup --desktop-app 'C:\Apps\Codex\Codex.exe' --force --enable --now
+ltc desktop prepare --app 'C:\Apps\Codex\Codex.exe' --force
+# Custom native wrapper/Core installations can add --wrapper and --core.
+```
+
+`ltc setup --no-desktop-launcher` skips generation on Windows and Mac. The shared
+management interface is `ltc desktop prepare|launch|status`. Existing choices
+are retained by setup; `prepare --force` deliberately updates generated settings.
+Without `--force`, `prepare` refuses to replace an existing configuration.
+Do not copy another computer's generated launcher or authentication files.
+
+Direct process creation is the default launch route. To explicitly select and
+save the experimental Store package route, use one of:
+
+```powershell
+ltc setup --desktop-launch-mode package-context --force --enable --now
+# Or change only the Desktop launcher/configuration:
+ltc desktop prepare --launch-mode package-context --force
+```
+
+The saved mode is passed to the bundled launch implementation. Direct launch
+never silently falls back to package-context. Use `--launch-mode direct` with
+`desktop prepare --force` to select direct launch again. Historical references
+to `-PackageContext` in this document describe the underlying PowerShell route; users of
+the generated launcher select it with the public commands above.
+
+## Explicit activation and acceptance checks
 
 Changing the App Server requires closing **all** Codex Desktop windows/processes.
 Save or finish active work first. The supplied launcher refuses to stop a running
 Desktop and does not rewrite installed app files or global environment settings.
 The default route requires a Desktop executable that permits direct startup;
-`-PackageContext` explicitly selects the experimental route described above.
+the saved `package-context` mode selects the experimental route described above.
 Both pass overrides only in the new GUI process's environment. Desktop
 then starts `ltc-desktop-core.exe`, which owns the gateway and real Core. The
 script does not change the caller's environment or prestart a separate server.
 
-From this checkout, first install the updated package so its new console entry
-point exists in `.venv`:
+After generation, check the selected route and then explicitly launch:
 
 ```powershell
-& .\.venv\Scripts\python.exe -m pip install -e .
 # This never resumes the probe's GUI thread; Desktop may remain open for this check:
-& .\examples\windows\start-desktop-bridge.ps1 -PackageContext -CheckOnly
+ltc desktop launch --check-only
 # native_creation_passed may be true while Desktop is still a launch_blocker.
 # Save work and close Desktop yourself, then repeat the complete preflight:
-& .\examples\windows\start-desktop-bridge.ps1 -PackageContext -CheckOnly
+ltc desktop launch --check-only
 # Start only when preflight_passed is true and launch_blockers is empty:
-& .\examples\windows\start-desktop-bridge.ps1 -PackageContext
+ltc desktop launch
+# Or double-click the generated Start LTC Desktop.cmd.
+ltc desktop status
 ```
 
-Omit `-PackageContext` for the default direct route; on the tested Store package,
-that route's `-CheckOnly` still reports native error 5 and exits nonzero. Neither
+On the tested Store package, the default direct route's native check reports
+error 5 and exits nonzero. `launch --check-only` forwards the existing suspended
+native creation probe; it is separate from configuration generation. Neither
 successful preflight nor a launch request confirms a working Desktop bridge.
 After a package-context launch request, the script waits for live bridge metadata
 for this profile and at least one connected client. It reports failure if that
 state is absent; a successful observation still requires the App Tools and
 original-session callback checks below.
 
-Other launcher arguments are `-Python`, `-CodexHome`, `-CodexBin`,
-`-DesktopExe` and `-CoreWrapper`. Use the actual existing Codex profile; do not copy authentication
-files into a test profile. If the launcher fails, inspect the private bridge log
+Use the actual existing Codex profile. If the launcher fails, inspect the private bridge log
 and do not start a second unverified server against the same conversation.
 The launcher discovers the GUI through its package manifest, checks both its
 launcher and resident process, and selects a runnable Core cache copy only when
@@ -210,13 +269,15 @@ validation. A successful suspended probe is only a process-creation check, not
 bridge or callback acceptance.
 
 The metadata is `<CODEX_HOME>\long-task-wakeup\desktop-bridge.json` by default.
-After reopening the original conversation, configure the existing LTC coordinator
-with that explicit metadata file, preserving its original name and queue:
+New preview Desktop tasks bind their explicit mode and metadata path at
+submission. An existing coordinator or legacy deployment that uses the bridge
+environment setting must preserve its original name, queue and metadata path
+when updating setup:
 
 ```powershell
 $ltcProfile = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
 $env:CODEX_LONG_TASK_WAKEUP_DESKTOP_BRIDGE_FILE = Join-Path $ltcProfile 'long-task-wakeup\desktop-bridge.json'
-& .\.venv\Scripts\ltc.exe setup --service windows-task --keep-skill --force --now
+ltc setup --service windows-task --keep-skill --force --now
 ```
 
 For a custom deployment, include its existing `--name` and `--queue-dir`. The
@@ -234,12 +295,13 @@ rerun its already completed business command or manually manufacture an ACK.
 ## Inspect and stop
 
 ```powershell
-& .\.venv\Scripts\python.exe -m long_task_callback.desktop_bridge --status
+ltc desktop status
 # Only if a standalone gateway remains after its clients close:
-& .\.venv\Scripts\python.exe -m long_task_callback.desktop_bridge --stop
+python -m long_task_callback.desktop_bridge --stop
 ```
 
-Use the same `--codex-home` and `--metadata-file` if customized. Normally closing
+For the module command, use the Python interpreter that owns the installed LTC
+package and the same `--codex-home` and `--metadata-file` if customized. Normally closing
 Desktop also ends its adapter and removes the metadata; `--stop` is for a
 remaining standalone gateway with no clients. Stop is bound to the recorded
 live process and refuses active clients. The bridge does not install an automatic
@@ -253,3 +315,13 @@ To return to ordinary Desktop startup, close Desktop and any remaining bridge, r
 `CODEX_LONG_TASK_WAKEUP_DESKTOP_BRIDGE_FILE` from the shell used for LTC setup and
 update the same coordinator. Start Desktop normally. CLI delivery again has the
 original active-writer limitation while Desktop owns the thread.
+
+## Preview verification status
+
+The current packaging/setup changes were developed on macOS. No native Windows
+test or Desktop restart has been performed for this installation flow. The
+earlier Windows protocol, native process creation and real callback evidence
+remain useful but do not validate the new wheel resources, generated `.cmd`/`.ps1`
+launchers or saved route selection. Windows acceptance must install the wheel
+without relying on the checkout, generate the launchers, inspect the native
+preflight, and then confirm Desktop tools plus original-session receipt/ACK.

@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.7.1a1 — unreleased
+
+- Separate CLI, Desktop shared Core and manual callback modes; freeze the mode
+  with each task and report callback capability separately from local readiness.
+- Refuse new Desktop work before admission when its shared connection is
+  unavailable; preserve external `done` results and explicit manual callbacks.
+- Retain definite App Server ownership/bridge failures without blind retries;
+  add callback-only `retry` with existing target/lease/ACK safeguards.
+- Add an opt-in Mac Desktop launcher, private Unix peer PID/UID and creation
+  identity verification, and Desktop-owned Core cleanup on stdio EOF.
+- Generate Desktop launchers during standard `ltc setup` on both Mac and
+  Windows, using the current profile and installed Python runtime. Ship launcher
+  resources in the wheel, without a checkout, `.venv` or `examples` dependency.
+  Mac produces `.command`; Windows produces `.cmd`, `.ps1` and private
+  `desktop.json` settings through the common `desktop prepare|launch|status`
+  commands. Retain existing selections and support `--desktop-app` and
+  `--no-desktop-launcher` on both platforms. CLI setup and launcher generation
+  remain available before Desktop is installed.
+- Discover Windows Store Desktop through its manifest and select a matching
+  Core dynamically. Save an explicit `--desktop-launch-mode package-context`
+  choice; keep direct launch as the default without automatic fallback.
+  `desktop launch --check-only` retains the suspended native creation probe;
+  setup/prepare generate files without launching Desktop or running that probe.
+  Store direct-launch error 5 and the experimental package-context limitations
+  remain. This installation change has not received native Windows acceptance;
+  earlier Windows callback success does not validate the new setup path.
+- Extend the shell Git installation helper to run setup with the same Python
+  after pip installation, with `LTC_PYTHON` and setup arguments after `--`.
+  Add native Windows `scripts/install_from_git.ps1` with `-RepoUrl`, `-Python`,
+  optional `-Subdirectory` and `-SetupArguments` for the same pip-then-setup flow.
+  Direct pip installs continue to require an explicit setup command. These
+  preview changes are on `codex/macos-desktop-callback` and are absent from stable `v0.7.0`.
+- Use task record v3 and callback record v2 for new explicit mode intent, with
+  backward reads and deliberate rejection by older coordinators.
+- Real Mac two-client protocol/cleanup probe passed with an empty profile and
+  no model calls. Live Desktop original-session receipt/ACK remains pending.
+
 ## 0.7.0 — 2026-09-27
 
 Release the shared task lifecycle and native Linux, macOS and Windows execution

@@ -56,7 +56,7 @@ class NativeTaskLifecycleTests(unittest.TestCase):
         path = self.submit()
         submitted = cli.load_managed_task(path)
         self.assertEqual(submitted["execution_backend"], "systemd-user")
-        self.assertEqual(submitted["version"], 2)
+        self.assertEqual(submitted["version"], 3)
         with mock.patch.object(SystemdUserBackend, "launch") as launch, mock.patch.object(
             SystemdUserBackend, "probe", return_value=OwnerState.ALIVE
         ), mock.patch.object(cli, "launch_managed_screen") as screen:
@@ -129,7 +129,7 @@ class NativeTaskLifecycleTests(unittest.TestCase):
         launch.assert_not_called()
         completed = cli.load_managed_task(path)
         self.assertEqual(completed["state"], "completed")
-        self.assertEqual(completed["version"], 2)
+        self.assertEqual(completed["version"], 3)
         self.assertEqual(completed["execution_backend"], "systemd-user")
         pending = list((self.root / "pending").glob("*.json"))
         self.assertEqual(len(pending), 1)
@@ -250,7 +250,7 @@ class NativeTaskLifecycleTests(unittest.TestCase):
         task = cli.load_managed_task(path)
         self.assertEqual(task["state"], "completed")
         self.assertEqual(task["exit_code"], 7)
-        self.assertEqual(task["version"], 2)
+        self.assertEqual(task["version"], 3)
         self.assertEqual(task["execution_backend"], "systemd-user")
         self.assertEqual(len(list((self.root / "pending").glob("*.json"))), 1)
 
@@ -367,7 +367,7 @@ class NativeTaskLifecycleTests(unittest.TestCase):
         self.assertEqual(completed["state"], "completed")
         self.assertEqual(completed["outcome"], "completed")
         self.assertEqual(completed["exit_code"], 7)
-        self.assertEqual(completed["version"], 2)
+        self.assertEqual(completed["version"], 3)
         self.assertEqual(len(list((self.root / "pending").glob("*.json"))), 1)
 
 

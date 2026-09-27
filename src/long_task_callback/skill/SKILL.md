@@ -26,6 +26,50 @@ behavior change the task's original exit code unless the user explicitly request
 
 ## Callback rules that always apply
 
+### Callback modes (0.7.1 preview)
+
+`--callback-mode auto` recognizes the current Codex Desktop origin marker and
+selects `desktop`; other origins select `cli`. Use an explicit mode if the host
+omits that marker. A historical session source is not its current owner.
+`desktop` requires a verified shared Core and never silently falls back to a
+second CLI writer. An unavailable Desktop connection refuses a new `run` or
+`agent` before task admission. `done` still preserves already completed work.
+Do not force CLI mode to conceal a Desktop ownership conflict.
+
+`manual` explicitly saves results/callbacks for later receipt and does not start
+an Agent automatically. Choose it only when the user accepts this limitation.
+On Mac and Windows, `ltc setup` automatically generates a private double-click
+launcher bound to the installed Python and current profile: `.command` on Mac,
+`.cmd` plus `.ps1` on Windows. `setup --desktop-app PATH` selects a Mac `.app`
+or Windows `.exe`; `--no-desktop-launcher` skips generation. Missing Desktop does
+not block CLI setup. Mac discovers the app during preparation; Windows resolves
+the Store manifest and matching Core during launch/preflight. Windows helpers
+ship inside the wheel; do not depend on a checkout or its examples directory.
+Generated absolute paths belong to that machine; regenerate them after moving
+the Python installation rather than copying another user's files.
+`ltc desktop prepare` is available for later configuration changes;
+`ltc desktop launch --check-only` checks launch blockers, and `ltc desktop launch`
+requires existing Desktop work to be saved and the app closed. Obtain permission
+before interrupting active Desktop work. Preparation and checks need no restart.
+Windows defaults to direct startup. `setup --desktop-launch-mode package-context`
+or `desktop prepare --launch-mode package-context --force` saves the explicitly
+chosen experimental Store route. Never silently fall back to this diagnostic
+context after an access-denied failure. `--check-only` uses the existing suspended
+creation/cleanup probe; it is not GUI/tool/callback acceptance. Ordinary setup
+only generates files and performs no native GUI creation probe.
+
+Read `doctor`'s separate `callback` field. `owner_reachable` is a read-only
+observation, not proof of end-to-end receipt. Sandboxed tools may need authorized
+ordinary-user execution to inspect native peers; never weaken identity checks.
+After repairing a known failed handoff, `ltc retry --id ID --callback-mode desktop`
+requeues the original callback without rerunning its workload. Unknown submission
+outcomes, active deliveries, ACKs and cancellations prevent ordinary retry.
+Inspect manual results in the bound session before ACK, and label that receipt
+as manual rather than a successful autonomous callback test.
+
+Upgrade the coordinator before using new task record v3 / callback record v2.
+Older daemons deliberately reject them instead of dropping callback-mode intent.
+
 On every callback, inspect the result and relevant artifacts, decide whether the
 original goal is complete, blocked, or needs another action, and continue when the
 next step is clear and safe. Inspect existing work before relaunching it. Then run
@@ -146,7 +190,7 @@ without this automatic check.
 
 ```bash
 # Install screen only if using the compatibility backend.
-python3 -m pip install "git+https://github.com/lz59970062/long-task-wakeup.git@v0.7.0"
+python3 -m pip install "git+https://github.com/lz59970062/long-task-wakeup.git@codex/macos-desktop-callback"
 ltc setup --force --enable --now
 ```
 
@@ -168,7 +212,7 @@ the ordinary logged-in user's Task Scheduler session. `--backend auto` and
 from the release checkout in PowerShell without activating the venv:
 
 ```powershell
-git clone --branch v0.7.0 --depth 1 https://github.com/lz59970062/long-task-wakeup.git
+git clone --branch codex/macos-desktop-callback --depth 1 https://github.com/lz59970062/long-task-wakeup.git
 Set-Location long-task-wakeup
 py -3 -m venv .venv
 & .\.venv\Scripts\python.exe -m pip install .

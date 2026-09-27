@@ -249,7 +249,7 @@ class RuntimeHealthTests(HealthArtifacts, unittest.TestCase):
         ):
             report = diagnostics.inspect(args)
         self.assertEqual(report["status"], "needs_configuration")
-        self.assertEqual(report["checks"], {"support": "supported", "configuration": "ready", "runtime": "needs_attention"})
+        self.assertEqual(report["checks"], {"support": "supported", "configuration": "ready", "runtime": "needs_attention", "callback": "unverified"})
         self.assertTrue(report["environment"]["container"])
         self.assertIsNone(report["repair_command"], "reinstalling services cannot restore a lost business process")
         self.assert_group(report["issues"], "task_owner_missing", "screen", {"fixture-task"})
