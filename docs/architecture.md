@@ -1,13 +1,14 @@
-# 0.7 architecture and platform handoff
+# 0.7.0 architecture and platform handoff
 
-For the completed Mac work, live callback evidence and the next implementation
-steps, start with [Mac-to-Windows handoff](handoff-macos-to-windows.md).
+See the [0.7.0 release validation record](validation-0.7.0.md) for final checks.
+The [Mac-to-Windows handoff](handoff-macos-to-windows.md) preserves the earlier
+implementation plan and Mac callback evidence.
 
-The 0.7 preview supports Linux, macOS and native Windows. PI and DSH integrations
+The 0.7.0 stable core supports Linux, macOS and native Windows. PI and DSH integrations
 are not implemented. The public commands and legacy screen records remain compatible
 with 0.6 tasks. Native tasks use record version 2, so older daemons reject them
 rather than accidentally running them through screen. Do not run an older daemon against newly submitted
-`systemd-user`, `launchd` or `windows-task` records: use a separate preview queue, or drain and upgrade its
+`systemd-user`, `launchd` or `windows-task` records: use a separate queue and Agent profile, or drain and upgrade its
 coordinator before submitting new tasks.
 
 ## Responsibilities
@@ -267,6 +268,6 @@ Tests written by an independent author are executed and assessed by the maintain
 
 Python remains the core. npm can later distribute per-platform bundled executables;
 shipping on npm is not proof of platform support. Worker entry points support future
-frozen packaging, but no frozen/npm distribution has been tested in this preview.
+frozen packaging, but no frozen/npm distribution has been tested for 0.7.0.
 Keep one coordinator per queue, stable runtime paths, and old worker files until
 live tasks drain. User credentials and callback hooks never belong in the repository.

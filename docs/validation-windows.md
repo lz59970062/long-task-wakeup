@@ -1,5 +1,10 @@
 # Windows validation — 2026-09-26
 
+This is a chronological development record: earlier pending/failed checks remain
+as historical evidence and are superseded where the later acceptance sections
+say so. See [0.7.0 release validation](validation-0.7.0.md) for consolidated CI and
+release status; the Desktop bridge remains explicitly experimental.
+
 Baseline: `d2974cd` (Mac handoff), developed on `codex/windows-support`.
 Package version remains `0.7.0a1`; no release or remote CI run is claimed here.
 

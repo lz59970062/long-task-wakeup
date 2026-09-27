@@ -1,5 +1,5 @@
 # Build from the repository root:
-#   docker build -f examples/docker/Dockerfile -t ltc:0.7.0a1 .
+#   docker build -f examples/docker/Dockerfile -t ltc:0.7.0 .
 # BASE_IMAGE overrides must provide Python 3.9+ and Debian/Ubuntu apt tooling.
 ARG BASE_IMAGE=python:3.12-slim
 FROM ${BASE_IMAGE}

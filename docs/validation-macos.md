@@ -1,5 +1,8 @@
 # macOS validation — 2026-09-26
 
+Historical native validation evidence. See [0.7.0 release validation](validation-0.7.0.md)
+for the later unified commit, cross-platform CI and final package checks.
+
 Baseline: `7269b93` on `codex/0.7.0-preview`, plus the macOS adaptation delivered with this record.
 The package version remains `0.7.0a1`; this record does not describe a published release.
 

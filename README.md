@@ -27,9 +27,9 @@ or on-demand Task Scheduler runner on Windows
 
 [中文说明](#中文说明) · Formerly `codex-long-task-wakeup` (the old command remains an alias)
 
-## 0.7.0 preview
+## 0.7.0
 
-**The 0.7.0 preview includes native execution on Linux, macOS and Windows.** It separates native execution
+**LTC 0.7.0 is the stable release with native execution on Linux, macOS and Windows.** It separates native execution
 backends, Agent adapters, private persistence and compact callback rendering.
 New Linux tasks prefer an independent systemd user service; screen remains the
 compatibility fallback and continues to own existing tasks.
@@ -46,15 +46,17 @@ diagnostic tool whose token and other app
 behavior are not guaranteed to match normal activation; see the linked procedure and limits.
 
 ```bash
-python3 -m pip install .
+python3 -m pip install "git+https://github.com/lz59970062/long-task-wakeup.git@v0.7.0"
 ltc run --backend systemd --task "build project" -- make
 # Or explicitly select the existing owner:
 ltc run --backend screen --task "build project" -- make
 ```
 
-Use an isolated queue with a 0.7 daemon while evaluating this preview; the installed
-0.6 daemon does not understand the new backend. For example, pass the same
-`--queue-dir /absolute/path/to/preview-queue` to `ltc daemon`, `ltc run` and `ltc ack`.
+When upgrading from 0.6, drain existing work and upgrade the coordinator before
+submitting native tasks, or use a separate 0.7 queue and Agent profile. The 0.6
+daemon does not understand native task records. Pass the same
+`--queue-dir /absolute/path/to/ltc-queue` to `ltc daemon`, `ltc run` and `ltc ack`.
+Standalone coordinators also require separate `CODEX_HOME` profiles for isolation.
 The submitting shell must carry the original Agent session ID (or pass `--session`).
 
 Task-completion callbacks now carry a short result envelope and artifact/ACK paths. Full evidence
@@ -70,11 +72,12 @@ Docker and AutoDL use screen when user systemd is unavailable; see
 [container setup, autostart and lifecycle boundaries](docs/containers.md).
 For unattended use, configure a verified AutoDL boot hook, an existing Supervisor,
 or Docker's `unless-stopped` policy. Standalone setup alone does not register startup.
-See the [preview validation record](docs/validation-0.7.0a1.md) for tested
-environments, commands and remaining platform work.
-The macOS adapter has a separate [local validation record](docs/validation-macos.md).
-Mac development is complete, including a real two-minute original-session callback.
-The Windows adapter has its own [validation record](docs/validation-windows.md).
+See the [0.7.0 release validation record](docs/validation-0.7.0.md) for the final
+checks and evidence limits. Historical platform evidence is recorded separately:
+[Linux preview](docs/validation-0.7.0a1.md), [macOS](docs/validation-macos.md),
+and [Windows](docs/validation-windows.md). macOS validation includes a real
+two-minute original-session callback. The Windows Desktop package-context bridge
+remains experimental; the stable core release does not guarantee every Desktop transport.
 The [Windows development handoff](docs/handoff-macos-to-windows.md) records the earlier implementation plan.
 
 ### Configuration recovery owned by the Agent
@@ -147,7 +150,7 @@ The selected backend is recorded at submission and never silently changed during
 sudo apt install screen              # Debian/Ubuntu
 # sudo dnf install screen            # Fedora/RHEL
 
-python3 -m pip install "git+https://github.com/lz59970062/long-task-wakeup.git"
+python3 -m pip install "git+https://github.com/lz59970062/long-task-wakeup.git@v0.7.0"
 ltc setup --force --enable --now
 ```
 
@@ -597,7 +600,7 @@ systemd 用户服务 / macOS LaunchAgent / Windows 用户登录计划任务
       └─ 训练任务
 ```
 
-当前 0.7.0 预览版支持 Linux、macOS 和 Windows：任务执行、Agent 适配、状态存储和回调格式分别维护。
+当前 0.7.0 正式版支持 Linux、macOS 和 Windows：任务执行、Agent 适配、状态存储和回调格式分别维护。
 原生任务服务独立于回调协调器；协调器重启后核对已有结果与进程归属，不重复启动。
 旧 screen 任务继续使用原后端，但不承诺停止其所在系统服务后仍然存活。
 
@@ -618,7 +621,9 @@ Windows 目录创建、重命名和删除不承诺断电持久性；注销或重
 详见 [Windows 验证记录](docs/validation-windows.md)。默认直接启动 Store 版 Desktop 仍报错误 5。
 该选项通过微软诊断工具赋予小型 Python helper 包身份，不修改持久环境或包调试策略，也不使用
 `-PreventBreakaway`；它的 token 和其他应用行为不保证等同于正常激活。完整预检还会拒绝运行中的 Desktop。
-PI、DSH 适配尚未实现。测试版请使用独立队列和同版本 daemon，避免与已安装版本混用。
+Windows Desktop 包上下文桥接仍属于实验功能，核心正式发布不代表所有 Desktop 投递方式均已验证。
+PI、DSH 适配尚未实现。从 0.6 升级时，先排空已有任务并升级协调器，再提交原生任务；
+并行安装请使用独立 Agent profile、队列和对应版本 daemon，避免混用。
 
 旧版 screen worker 启动时必须把任务从 `launching` 持久化为 `running`，这一步就是启动握手。
 LTC 等待一秒；若 screen 在握手前消失，则记录失败并按指数退避重试，最多三次。最终失败后任务

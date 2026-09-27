@@ -1,6 +1,27 @@
 # Changelog
 
-## Unreleased — Windows support
+## 0.7.0 — 2026-09-27
+
+Release the shared task lifecycle and native Linux, macOS and Windows execution
+backends as stable. The optional Windows Desktop package-context bridge remains
+experimental and retains its documented installation and transport limitations.
+PI/DSH adapters and npm/frozen distribution are not included.
+
+### Shared lifecycle and Linux
+
+- Promote the Linux architecture preview: independent systemd task ownership,
+  screen compatibility, and non-systemd container deployment.
+- Separate platform backends, Agent adapters, private storage, runtime workers and
+  callback rendering while preserving legacy screen task records.
+- Default new task callbacks to compact envelopes with private detail artifacts;
+  retain full-format callbacks and the existing 4/3 reminder policy.
+- Add Agent-owned environment/configuration/runtime checks and repair guidance;
+  preserve unknown outcomes and inspect durable results before recovery.
+- Keep task ownership independent from coordinator hosting, with no automatic
+  replay of ambiguous native attempts. Drain and upgrade 0.6 coordinators before
+  submitting native task records, or use an isolated queue and Agent profile.
+
+### Windows
 
 - Add an explicit experimental Desktop bridge with native same-user TCP peer
   verification and a private authenticated upstream; two real App Server clients
@@ -24,7 +45,7 @@
 - Preserve partial WebSocket frames and fragmented messages across completion-poll
   timeouts on all platforms, including interleaved ping frames.
 
-## Unreleased — macOS support
+### macOS
 
 - Add independent one-shot launchd task jobs and a persistent user LaunchAgent
   coordinator, selected automatically on macOS; add `install-launchd --print`.

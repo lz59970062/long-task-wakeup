@@ -1,5 +1,9 @@
 # 0.7.0a1 preview validation
 
+Historical Linux preview evidence. Platform limitations below describe that
+snapshot; see [0.7.0 release validation](validation-0.7.0.md) for the consolidated
+Linux, macOS and Windows release.
+
 Validated locally on 2026-09-25, with lifecycle self-checks revalidated on
 2026-09-26. Tests were authored by a separate agent and run
 by the maintainer. No production LTC daemon was restarted, no real model call

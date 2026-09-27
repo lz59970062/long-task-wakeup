@@ -1,6 +1,6 @@
 # Linux containers and AutoDL
 
-LTC 0.7 uses GNU screen when a systemd user manager is unavailable. A container
+LTC 0.7.0 uses GNU screen when a systemd user manager is unavailable. A container
 does not need systemd, privileged mode, a host service socket or the Docker socket
 to run this backend. Keep LTC, the selected Agent CLI, its session files and the
 workload in the **same running container**, under the same user account.
@@ -30,19 +30,19 @@ existing Agent profile, queue, installation and workspace at stable paths.
 
 ## Docker image
 
-From the repository root:
+From the `v0.7.0` release checkout:
 
 ```bash
-docker build -f examples/docker/Dockerfile -t ltc:0.7.0a1 .
-docker run --rm ltc:0.7.0a1 ltc --version
-docker run --rm ltc:0.7.0a1 screen --version
+docker build -f examples/docker/Dockerfile -t ltc:0.7.0 .
+docker run --rm ltc:0.7.0 ltc --version
+docker run --rm ltc:0.7.0 screen --version
 ```
 
 The [example Dockerfile](../examples/docker/Dockerfile) installs Python-based LTC
 and screen. It contains **no Agent CLI, model runtime, GPU stack or workload
 dependencies**. Extend this image with the Codex or Claude Code CLI and the
 dependencies required by your commands before expecting a real callback. The
-following example uses `ltc-agent:0.7.0a1` as the name of that prepared image.
+following example uses `ltc-agent:0.7.0` as the name of that prepared image.
 Its selected Agent executable must be on the `ltc` user's `PATH`.
 
 An existing Debian/Ubuntu Python image can supply the base without changing the
@@ -51,7 +51,7 @@ Dockerfile:
 ```bash
 docker build -f examples/docker/Dockerfile \
   --build-arg BASE_IMAGE=your-local-python-image:tag \
-  -t ltc:0.7.0a1 .
+  -t ltc:0.7.0 .
 ```
 
 The override requires Python 3.9+ and `apt-get`; Alpine images use different
@@ -68,13 +68,13 @@ or workspace permissions for your deployment if the host uses a different UID.
 
 ```bash
 export LTC_WORKSPACE=/absolute/path/to/your/project
-docker volume create ltc-preview-state
-docker run -d --init --name ltc-preview \
-  --mount type=volume,src=ltc-preview-state,dst=/state \
+docker volume create ltc-state
+docker run -d --init --name ltc-service \
+  --mount type=volume,src=ltc-state,dst=/state \
   --mount "type=bind,src=$LTC_WORKSPACE,dst=/workspace" \
-  ltc-agent:0.7.0a1
-docker exec ltc-preview ltc install-skill --target both
-docker logs ltc-preview
+  ltc-agent:0.7.0
+docker exec ltc-service ltc install-skill --target both
+docker logs ltc-service
 ```
 
 `--init` adds a small init process to handle child-process reaping. A full systemd
@@ -87,8 +87,8 @@ On the **Docker host**, add `--restart unless-stopped` to the `docker run` above
 or update that existing container without recreating it:
 
 ```bash
-docker update --restart unless-stopped ltc-preview
-docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' ltc-preview
+docker update --restart unless-stopped ltc-service
+docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' ltc-service
 ```
 
 For Compose, set these keys on the service using the prepared image and the same
@@ -104,8 +104,8 @@ services:
 ```
 
 The host must start Docker itself on boot. `unless-stopped` leaves a manually
-stopped container stopped; use `docker start ltc-preview` to start it again.
-To remove automatic restart, use `docker update --restart no ltc-preview`
+stopped container stopped; use `docker start ltc-service` to start it again.
+To remove automatic restart, use `docker update --restart no ltc-service`
 (Compose: `restart: "no"`). This does not stop the current container.
 [Docker restart policy reference](https://docs.docker.com/engine/containers/start-containers-automatically/)
 
@@ -129,9 +129,9 @@ only to one `docker exec` shell do not become the coordinator's environment.
 Open the installed CLI in the container, for example:
 
 ```bash
-docker exec -it --workdir /workspace ltc-preview codex
+docker exec -it --workdir /workspace ltc-service codex
 # Or, when that is the CLI installed in your image:
-# docker exec -it --workdir /workspace ltc-preview claude
+# docker exec -it --workdir /workspace ltc-service claude
 ```
 
 From that Agent's shell/tool context, submit the actual workload:
@@ -183,8 +183,8 @@ the Python environment you intend to keep available:
 apt-get update
 apt-get install -y screen
 
-# From the LTC checkout, in the selected Python environment:
-python -m pip install .
+# In the selected Python environment:
+python -m pip install "git+https://github.com/lz59970062/long-task-wakeup.git@v0.7.0"
 ltc --version
 screen --version
 ```
@@ -196,7 +196,7 @@ opening the session**. If you already have persistent profiles, keep their curre
 paths instead; exporting a new path does not copy old sessions or authentication.
 
 ```bash
-export LTC_PERSIST_ROOT=/absolute/path/to/persistent-disk/ltc-preview
+export LTC_PERSIST_ROOT=/absolute/path/to/persistent-disk/ltc
 mkdir -p "$LTC_PERSIST_ROOT"
 export CODEX_HOME="$LTC_PERSIST_ROOT/codex"
 export CLAUDE_CONFIG_DIR="$LTC_PERSIST_ROOT/claude"
@@ -218,7 +218,7 @@ Its log is
 `$CODEX_HOME/long-task-wakeup/daemon.log`.
 
 Standalone coordinator PID/runtime files belong to the selected `CODEX_HOME`.
-Use a separate profile directory for an isolated preview or another standalone
+Use a separate profile directory for an isolated installation or another standalone
 coordinator, and start its Agent with that same profile. Merely changing
 `--queue-dir` does not isolate those coordinator files.
 
@@ -387,7 +387,7 @@ path, environment or permissions before starting it again. `startretries` is
 bounded; automatic restart is not a substitute for fixing startup errors.
 
 LTC also provides `setup --service supervisor --now` for an administered default
-Supervisor layout. In 0.7.0a1 it uses bare `supervisorctl`, can start `supervisord`
+Supervisor layout. In 0.7.0 it uses bare `supervisorctl`, can start `supervisord`
 if connection fails, and runs an unscoped `update`. It does not expose a
 `supervisorctl -c` option. `CODEX_LONG_TASK_WAKEUP_SUPERVISOR_CONF_DIR` changes only
 where the program file is written. For a platform-managed/custom layout, use the
@@ -417,9 +417,9 @@ LTC_SESSION_ID='replace-with-your-actual-container-session-id'
 For Docker, pass the actual container session ID from the host shell:
 
 ```bash
-docker exec ltc-preview ltc doctor --backend screen \
+docker exec ltc-service ltc doctor --backend screen \
   --agent codex --session "$LTC_SESSION_ID"
-docker logs --tail 50 ltc-preview
+docker logs --tail 50 ltc-service
 ```
 
 For Claude, select `--agent claude` and its actual session ID. From an Agent's own

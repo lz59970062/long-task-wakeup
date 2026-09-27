@@ -36,7 +36,7 @@ Read the user callback hook at initial LTC use when present. Its instructions st
 apply when not repeated. Since LTC 0.6.6, standard reminders appear on the first callback and every
 4 distinct callbacks thereafter; user-hook reminders on the first and every 3.
 A short callback omits repeated prose, not these responsibilities. Task results,
-routing and the ACK command remain present. In 0.7.0a1, full commands, timestamps and handoff text are saved at the supplied Details path. Read that file before acting when the envelope says so; otherwise inspect relevant result artifacts directly. An exit code is process status, not proof of test success.
+routing and the ACK command remain present. In 0.7.0, full commands, timestamps and handoff text are saved at the supplied Details path. Read that file before acting when the envelope says so; otherwise inspect relevant result artifacts directly. An exit code is process status, not proof of test success.
 
 Configure with `ltc prompt-policy --system-every 4 --user-every 3`; no options shows
 the effective policy. `1` means every callback. The file is
@@ -67,7 +67,7 @@ After submission, record the task ID, execution backend and artifact paths, then
 return control. For long work, avoid polling processes or logs on a timer. Live
 monitoring is appropriate when requested or diagnosing callback infrastructure.
 Do not change a running task's owner or automatically retry an unknown native
-launch. PI/DSH support is not implemented in this preview.
+launch. PI/DSH support is not implemented in 0.7.0.
 
 ## Duration policy
 
@@ -146,7 +146,7 @@ without this automatic check.
 
 ```bash
 # Install screen only if using the compatibility backend.
-python3 -m pip install "git+https://github.com/lz59970062/long-task-wakeup.git"
+python3 -m pip install "git+https://github.com/lz59970062/long-task-wakeup.git@v0.7.0"
 ltc setup --force --enable --now
 ```
 
@@ -165,9 +165,11 @@ details. Claude configuration must be present in the shell that later submits `l
 Use Windows 10+, Python 3.9+, an ACL-capable local filesystem such as NTFS, and
 the ordinary logged-in user's Task Scheduler session. `--backend auto` and
 `--service auto` select `windows-task`; screen and WSL are unnecessary. Install
-from a Windows-capable checkout in PowerShell without activating the venv:
+from the release checkout in PowerShell without activating the venv:
 
 ```powershell
+git clone --branch v0.7.0 --depth 1 https://github.com/lz59970062/long-task-wakeup.git
+Set-Location long-task-wakeup
 py -3 -m venv .venv
 & .\.venv\Scripts\python.exe -m pip install .
 & .\.venv\Scripts\ltc.exe setup --service windows-task --force --enable --now

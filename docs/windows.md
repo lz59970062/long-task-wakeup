@@ -10,15 +10,16 @@ Use an ordinary logged-in Windows user account with access to Task Scheduler and
 an ACL-capable local filesystem, preferably NTFS. LTC uses the current interactive
 user token and does not request administrator elevation or store a Windows
 password. A locked desktop is still logged in; logging out or rebooting can
-interrupt work. This preview does not provide an unattended Windows service that
+interrupt work. LTC 0.7.0 does not provide an unattended Windows service that
 runs while the user is logged out.
 
 ## Install and configure
 
-Start from a checkout containing `src/long_task_callback/platforms/windows.py`.
-Run these commands in PowerShell at that checkout:
+Install the 0.7.0 release from PowerShell:
 
 ```powershell
+git clone --branch v0.7.0 --depth 1 https://github.com/lz59970062/long-task-wakeup.git
+Set-Location long-task-wakeup
 py -3 -m venv .venv
 & .\.venv\Scripts\python.exe -m pip install .
 & .\.venv\Scripts\ltc.exe --version

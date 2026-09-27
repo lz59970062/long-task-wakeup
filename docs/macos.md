@@ -4,13 +4,13 @@ LTC supports macOS through the system launchd manager. The coordinator runs as a
 user LaunchAgent, and each task has its own one-shot launchd job. The default
 native backend does not need Homebrew screen or systemd.
 
-## Install from this preview branch
+## Install 0.7.0
 
 Use Python 3.9 or newer and a logged-in macOS GUI session. A virtual environment
 avoids modifying Homebrew's managed Python installation:
 
 ```bash
-git clone --branch codex/0.7.0-preview https://github.com/lz59970062/long-task-wakeup.git
+git clone --branch v0.7.0 --depth 1 https://github.com/lz59970062/long-task-wakeup.git
 cd long-task-wakeup
 python3 -m venv .venv
 .venv/bin/python -m pip install .
