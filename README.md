@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/lz59970062/long-task-wakeup"><img src="https://img.shields.io/badge/python-%E2%89%A53.9-3fb950" alt="Python ≥ 3.9"></a>
   <a href="./pyproject.toml"><img src="https://img.shields.io/badge/license-MIT-58a6ff" alt="MIT license"></a>
-  <img src="https://img.shields.io/badge/agents-Codex%20%C2%B7%20Claude%20Code-d29922" alt="Works with Codex and Claude Code">
+  <img src="https://img.shields.io/badge/child_agents-Codex%20%C2%B7%20Claude%20Code%20%C2%B7%20Pi-d29922" alt="Codex, Claude Code and Pi child agents">
 </p>
 
 **Long Task Callback (ltc)** gives long-running agent work a durable process owner and an explicit
@@ -15,7 +15,7 @@ There are three normal entry points:
 
 - **Run** — `ltc run -- <command>` submits a new task. The daemon requests an independent
   Linux, macOS or Windows task owner, so the task is not owned by the agent turn.
-- **Agent** — `ltc agent codex|claude -- <prompt>` starts a fresh child agent with the
+- **Agent** — `ltc agent codex|claude|pi -- <prompt>` starts a fresh child agent with the
   same durable ownership and callback lifecycle.
 - **Done** — `ltc done ...` reports completion of a task that is already owned by
   screen, tmux, Slurm, another scheduler, or an existing script.
@@ -99,7 +99,8 @@ for reading before acting. Use `--callback-format full` for full inline callback
 The existing system/user reminder cadence still applies. This reduces repeated
 prose without truncating saved results or user instructions.
 
-PI/DSH integrations remain future adapters. See
+Stable 0.7.0 does not include Pi or DSH adapters; this checkout adds Pi as a child
+worker with callbacks to Codex or Claude Code. DSH remains a future adapter. See
 [macOS setup](docs/macos.md), [Windows setup](docs/windows.md) and [architecture and handoff](docs/architecture.md)
 for module responsibilities, recovery guarantees, extension points and validation.
 Docker and AutoDL use screen when user systemd is unavailable; see
@@ -263,7 +264,7 @@ tail -f ~/.codex/long-task-wakeup/tasks/<task-id>/attempt-1.log
 
 Detach from screen with `Ctrl-a d`; detaching does not stop the task.
 
-## Agent: submit a fresh child agent (0.6.5)
+## Agent: submit a fresh child agent
 
 Agent mode follows the same public design as `run`: LTC options come first, and `--` separates
 them from the actual child task.
@@ -278,12 +279,19 @@ ltc agent codex \
   --cwd "$PWD" \
   --task "implement parser fixes" \
   -- "Fix the confirmed parser defects and run the relevant tests."
+
+ltc agent pi \
+  --cwd "$PWD" \
+  --task "review parser edge cases" \
+  -- "Inspect parser.py and its tests. Report concrete defects and suggested fixes."
 ```
 
-`codex|claude` selects the child process. Callback routing remains independent: LTC auto-detects
+`codex|claude|pi` selects the child process. Callback routing remains independent: LTC auto-detects
 the launching conversation, or the existing `--agent` and `--session` options can bind it
 explicitly. LTC creates private prompt and result files under its managed task directory and
 prints the result path at submission; callers do not supply file paths.
+Pi is a child worker only: the originating parent and `--agent` callback target remain
+`codex|claude`.
 
 For Claude Code, LTC carries the submission-time configuration, authentication, proxy, and custom
 environment into the child while removing `CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`, and
@@ -354,8 +362,10 @@ requirements or specification paths after `--`; a bare `test` in the prompt is o
 All LTC flags must precede `--`. Codex defaults to `gpt-5.6-luna` with reasoning effort `max`;
 explicit child options override these defaults. The selected model must be available to your
 CLI/account and support the selected effort; LTC does not silently substitute another model.
-`--model` also works for Claude, which otherwise inherits its CLI model configuration.
-`--reasoning-effort` is Codex-only. Without a template or explicit model options, existing
+`--model` also works for Claude and Pi, which otherwise inherit their CLI model configuration.
+Pi maps `--reasoning-effort` to `--thinking`; it accepts `off`, `minimal`, `low`, `medium`,
+`high`, `xhigh`, and `max`. Claude rejects `--reasoning-effort`. The built-in test template's
+Codex model and effort are never imposed on a Pi child. Without a template or explicit model options, existing
 agent commands retain their CLI defaults. `--agent` still selects the **parent callback** agent.
 
 The child derives expected behavior from requirements before examining implementation, writes
@@ -412,13 +422,19 @@ relative to the submitting shell's directory, independently of the child's `--cw
 Its filename stem is the template name and follows the same naming rule.
 
 `version` (a positive integer revision) and `prompt` (non-empty text) are required.
-Optional `codex` accepts `model` and `reasoning_effort`; optional `claude` accepts
+Optional `worker` and `description` describe a registered child route. Existing
+templates without them continue to work with `--template` and `--template-file`.
+Optional `codex` and `pi` accept `model` and `reasoning_effort`; optional `claude` accepts
 `model` only. `handoff` is optional text for the parent callback, not the child's
 prompt. For example, add `claude: {model: sonnet}` to configure a Claude child.
+For Pi, add `pi: {model: provider/id, reasoning_effort: high}` using an available model.
+Pi also accepts `system_prompt_file: prompts/system.md`, resolved relative to the
+template YAML directory; explicit `--system-prompt-file` takes precedence.
 Omitted per-agent defaults inherit that CLI's configuration. Explicit `--model`
 and `--reasoning-effort` override template defaults. The selected model must support
-the chosen effort. Recognized effort values are `minimal`, `low`, `medium`, `high`,
-`xhigh`, `max`, and `ultra`; availability depends on the model.
+the chosen effort. Codex effort values are `minimal`, `low`, `medium`, `high`,
+`xhigh`, `max`, and `ultra`; Pi accepts `off` through `max` as listed above and rejects
+`ultra`. Availability depends on the model.
 
 User templates take precedence over same-named built-ins. A user `test.yaml`
 **replaces** the built-in prompt, model defaults, and test-specific handoff;
@@ -435,6 +451,41 @@ handoff at submission. Editing or deleting the file afterward does not change an
 already submitted task or its callback instructions. Templates are user-authored
 instructions, not an enforcement boundary; inspect results before acting on them.
 
+### Register a template for Agent discovery
+
+```bash
+ltc template register review --file ./review.yaml --worker codex \
+  --description "Review the supplied requirements and code for concrete defects."
+ltc template list --json
+```
+
+For an existing user template, use `ltc template register review` without `--file`;
+`register` and `unregister` accept `--json` for structured results.
+
+Registration copies the YAML and referenced system prompt into the effective user
+template directory and generates a short `ltc-review` routing skill with Codex UI
+metadata. The route uses an absolute installed `--template-file` path. Its description
+allows Codex/Claude to discover the child task from other workspaces; in Codex,
+explicitly request `$ltc-review`. A managed index in an installed LTC skill records
+the available routes. Registration requires a worker and description;
+`--worker` and `--description` override optional YAML metadata.
+`--target codex|claude|both` chooses the parent homes receiving routing skills.
+Use `--dry-run` to inspect changes. Existing user configuration is preserved unless
+replacement is explicitly requested with `--force`.
+Unrelated skills and conflicting aliases are preserved even with `--force`.
+Registered names use lowercase letters, digits and hyphens.
+
+Registration honors `LTC_TEMPLATE_DIR`, then `XDG_CONFIG_HOME`; parent skill homes
+honor `CODEX_HOME` and `CLAUDE_CONFIG_DIR`. Copies live at `NAME.yaml` and, for Pi,
+`.ltc-assets/NAME/system-prompt-pi.md`, with registration metadata in
+`.ltc-registrations.json`. A missing main LTC skill is installed automatically;
+`setup --keep-skill` leaves existing LTC text untouched. `ltc template unregister review`
+removes managed routing files and the index entry, preserving templates, prompts
+and extra user files; edited routing files or aliases block removal. Unregister
+also supports `--dry-run`; it does not cancel queued work. See
+[profile paths and registration limits](docs/template-registration.md) for Codex
+aliases and separate parent-home registrations.
+
 ### Claude Code configuration
 
 Configure Claude Code in the shell that submits `ltc agent claude`, then verify it locally:
@@ -449,6 +500,57 @@ No single environment variable is universally required. Claude Code may use OAut
 Bedrock, Vertex, or Foundry. LTC also carries `CLAUDE_CONFIG_DIR`, proxy/certificate variables,
 and other custom environment values present at submission. Environment captured when the daemon
 was installed is not a substitute for the environment present when `ltc agent claude` is called.
+
+### Pi Agent configuration
+
+Configure Pi in the submitting shell, then check child readiness with:
+
+```bash
+command -v pi
+ltc doctor --operation agent --agent-worker pi
+ltc agent pi --model provider/model --reasoning-effort high --dry-run \
+  -- "Review parser.py against docs/spec.md"
+```
+
+Use `LONG_TASK_WAKEUP_PI_BIN` to select a specific Pi executable. LTC launches
+`pi --print --mode text --no-session`, supplies the prompt through stdin, and saves
+stdout to the managed private agent-result artifact. No Pi session is persisted.
+The child inherits submission-time Pi profile, authentication, API, proxy and extension
+configuration; LTC removes Codex/Claude parent markers plus `PI_SESSION_ID` and
+`PI_SESSION_FILE`. Do not put credentials in the prompt. Tool permissions and project
+extension trust follow Pi's own noninteractive configuration; LTC does not add
+`--approve`. `--sandbox-mode` is for Codex and `--permission-mode` is for Claude.
+The command contract was checked with Pi 0.87.1; native Windows/macOS Pi launch
+has not been verified in this session.
+
+### Pi system prompt files
+
+Use a separate system prompt file with a Pi child:
+
+```bash
+ltc agent pi --system-prompt-file ./prompts/pi-system.md --cwd "$PWD" \
+  -- "Review parser.py against docs/spec.md"
+```
+
+`--system-prompt-file` is Pi-only and separate from `--template`/`--template-file`,
+which build the task prompt sent through stdin. LTC passes the snapshot to Pi's
+`--system-prompt`: it replaces the built-in base system prompt while retaining
+Pi's normal project context, skills and appended instructions. A relative CLI path is resolved
+against the submitting shell's directory, independently of the child's `--cwd`.
+LTC reads a nonempty UTF-8 file at submission and copies it to the private
+`agent-system-prompt.md` task artifact. Later source changes or deletion do not
+affect the queued child. No interpolation or script evaluation occurs.
+Use `--dry-run` to inspect the resolved source without creating task files or
+starting a child process. A custom task YAML can set the default:
+
+```yaml
+pi:
+  system_prompt_file: prompts/system.md
+```
+
+That path is relative to the YAML file's directory; a CLI override uses the
+submitting shell directory. Missing, empty or invalid UTF-8 files fail submission.
+An editable sample is [examples/prompts/pi-system.md](examples/prompts/pi-system.md).
 
 ## Done: report an externally managed task
 
@@ -640,8 +742,8 @@ mode and no fallback to one.
 
 - **Run**：`ltc run -- <命令>`。提交新任务，Linux 默认使用独立的 systemd 用户服务，macOS 使用独立的一次性 launchd 作业，Windows 使用独立的按需计划任务与 Job Object。
   Linux/macOS 无可用用户管理器时使用 screen 兼容后端。
-- **Agent（预览）**：`ltc agent codex|claude -- <任务>`。用同一套持久化和 callback
-  生命周期启动一个全新的 Codex 或 Claude Code 子代理。
+- **Agent**：`ltc agent codex|claude|pi -- <任务>`。用同一套持久化和 callback
+  生命周期启动一个全新的 Codex、Claude Code 或 Pi 子代理；回调目标仍是原 Codex 或 Claude Code 会话。
 - **Done**：`ltc done ...`。任务已经由 screen、tmux、Slurm 或其他调度器托管时，
   只报告结束并投递 callback。
 
@@ -684,7 +786,7 @@ Windows 目录创建、重命名和删除不承诺断电持久性；注销或重
 Windows Desktop 包上下文桥接仍属于实验功能，核心正式发布不代表所有 Desktop 投递方式均已验证。
 新预览可用 `setup --desktop-launch-mode package-context` 保存该选择；默认直接启动不会失败后自动切换。
 这次安装流程改动在 macOS 开发，尚未完成 Windows 原生安装验收，历史回调成功不能替代这项验收。
-PI、DSH 适配尚未实现。从 0.6 升级时，先排空已有任务并升级协调器，再提交原生任务；
+正式版 0.7.0 不含 Pi、DSH 适配；当前源码已添加 Pi 子代理，DSH 尚未实现。从 0.6 升级时，先排空已有任务并升级协调器，再提交原生任务；
 并行安装请使用独立 Agent profile、队列和对应版本 daemon，避免混用。
 
 旧版 screen worker 启动时必须把任务从 `launching` 持久化为 `running`，这一步就是启动握手。
@@ -721,7 +823,7 @@ screen -r ltc-<task-id>
 tail -f ~/.codex/long-task-wakeup/tasks/<task-id>/attempt-1.log
 ```
 
-`0.6.5` 的 Agent 模式沿用 `run` 的命令语言：
+Agent 模式沿用 `run` 的命令语言：
 
 ```bash
 ltc agent claude --cwd "$PWD" --task "review parser" \
@@ -729,13 +831,42 @@ ltc agent claude --cwd "$PWD" --task "review parser" \
 
 ltc agent codex --cwd "$PWD" --task "fix parser" \
   -- "Fix the confirmed defects and run the relevant tests."
+
+ltc agent pi --cwd "$PWD" --task "review parser" \
+  -- "Inspect parser.py and report concrete defects."
 ```
 
-`codex|claude` 选择被启动的子代理；callback 目标仍由启动现场自动识别，必要时继续使用已有的
+`codex|claude|pi` 选择被启动的子代理；callback 目标仍由启动现场自动识别，必要时继续使用已有的
 `--agent` 和 `--session` 显式绑定。提示词和最终回答文件由 LTC 自动放入私有任务目录，用户
 无需传入路径。Claude 子代理继承提交时的认证、配置、代理和自定义环境，但不会继承
 `CODEX_THREAD_ID`、`CLAUDE_CODE_SESSION_ID` 和 `CLAUDECODE` 这些父会话标记；默认也不会
 启用 `--bare`。
+
+Pi 仅作为子代理，`--agent` 仍只接受 `codex|claude`。LTC 使用
+`pi --print --mode text --no-session`，从 stdin 传入任务并保存文本结果，不持久化 Pi 会话。
+Pi 继承提交时的 profile、认证、API、代理与扩展配置，但移除 Codex/Claude 父会话标记及
+`PI_SESSION_ID`、`PI_SESSION_FILE`。可用 `LONG_TASK_WAKEUP_PI_BIN` 指定可执行文件，
+用 `ltc doctor --operation agent --agent-worker pi` 检查本地条件。
+`--model provider/model` 直接传给 Pi，`--reasoning-effort` 映射为 `--thinking`，支持
+`off|minimal|low|medium|high|xhigh|max`，不支持 `ultra`。内置 test 模板的 Codex 默认模型和推理级别不套用于 Pi。
+Pi 工具权限与项目扩展信任遵循其自身非交互配置；LTC 不添加 `--approve`。
+`--sandbox-mode` 只用于 Codex，`--permission-mode` 只用于 Claude。本次未验证 Windows/macOS 原生 Pi 启动。
+
+Pi 支持 `ltc agent pi --system-prompt-file ./prompts/pi-system.md -- <任务>`。
+它与生成任务提示词的 `--template`/`--template-file` 分开；文件快照传给 Pi 的
+`--system-prompt`，替换内置基础系统提示词，保留 Pi 正常加载的项目上下文、skills 与追加指令。
+CLI 相对路径按提交 shell 目录解析，
+不受子代理 `--cwd` 影响。提交时读取非空 UTF-8 文件并复制为私有的
+`agent-system-prompt.md`，之后源文件修改或删除不影响已提交任务，不做插值或脚本求值。
+自定义 YAML 可用 `pi: {system_prompt_file: prompts/system.md}` 设置默认值，该路径相对 YAML 所在目录；
+显式 CLI 参数覆盖它。`--dry-run` 显示解析后的源路径，不创建任务文件或启动子代理。
+
+通用模板可用 `ltc template register NAME --file ./task.yaml` 注册；YAML 的 `worker` 与
+`description` 或对应 CLI 参数指定子代理和用途。已有用户模板可直接 `register NAME`。
+生成的 `ltc-NAME` 技能可被父 Agent 发现，路由固定使用已安装模板的绝对路径。
+`ltc template list --json` 查看注册信息；`unregister NAME` 移除受管路由与索引，保留模板、
+提示词和额外用户文件。注册与注销支持 `--dry-run` 和 `--json`，保留既有目录与 profile 选择。
+详见[模板注册与配置边界](docs/template-registration.md)。
 
 Claude Code 必须在实际提交 `ltc agent claude` 的 shell 中配置好，可先运行
 `command -v claude` 和 `claude auth status`。OAuth/keychain 不要求设置 `ANTHROPIC_API_KEY`；

@@ -36,8 +36,9 @@ from . import callbacks
 from . import callback_transport
 from . import diagnostics
 from . import storage
+from . import template_registration
 from .desktop_connection import BridgeEndpoint, UnixBridgeEndpoint, load_bridge_endpoint, load_unix_bridge_endpoint
-from .agents import AGENTS, AGENT_NAMES, ChildOptions, get_agent
+from .agents import AGENTS, AGENT_NAMES, CHILD_AGENT_NAMES, ChildOptions, get_agent, get_child_agent
 from .agents.base import (
     DEFAULT_APPROVALS_REVIEWER,
     DEFAULT_APPROVAL_POLICY,
@@ -85,8 +86,9 @@ SCREEN_BIN_ENV = "LONG_TASK_WAKEUP_SCREEN_BIN"
 TASKS_DIR_NAME = "tasks"
 AGENT_PROMPT_FILE_NAME = "agent-prompt.txt"
 AGENT_RESULT_FILE_NAME = "agent-result.txt"
+AGENT_SYSTEM_PROMPT_FILE_NAME = "agent-system-prompt.md"
 CHILD_AGENT_PARENT_ENV_NAMES = tuple(
-    dict.fromkeys(env_name for name in AGENT_NAMES for env_name in get_agent(name).parent_env_names)
+    dict.fromkeys(env_name for name in CHILD_AGENT_NAMES for env_name in get_child_agent(name).parent_env_names)
 )
 TARGET_LOCK_DIR_ENV = "CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR"
 PROXY_ENV_FILE_ENV = "CODEX_LONG_TASK_WAKEUP_PROXY_ENV_FILE"
@@ -2815,7 +2817,7 @@ def load_managed_task(path: Path) -> dict[str, object]:
         raise ValueError("managed task id must match its directory")
     get_agent(str(task.get("agent", "codex")))
     if task.get("task_kind") == "agent":
-        get_agent(str(task.get("agent_worker", "")))
+        get_child_agent(str(task.get("agent_worker", "")))
     backend = task.get("execution_backend", "screen")
     if task.get("version") in (2, 3) and "execution_backend" not in task:
         raise ValueError("native task records require an execution backend")
@@ -2895,10 +2897,15 @@ def managed_task_prompt(
         worker = str(task.get("agent_worker", "unknown"))
         details.extend(
             [
-                f"Child agent: {agent_display_name(worker)}",
+                f"Child agent: {get_child_agent(worker).display_name}",
                 f"Agent result: {task.get('agent_result_path')}",
             ]
         )
+        if task.get("agent_system_prompt_path"):
+            details.extend([
+                f"System prompt source: {task.get('agent_system_prompt_source')}",
+                f"System prompt snapshot: {task['agent_system_prompt_path']}",
+            ])
     if task.get("agent_template"):
         details.extend([
             f"Agent template: {task['agent_template']} v{task.get('agent_template_version')}",
@@ -2959,7 +2966,8 @@ def managed_callback_request(task: dict[str, object], prompt: str) -> dict[str, 
         request["agent_worker"] = task.get("agent_worker")
         request["agent_result_path"] = task.get("agent_result_path")
         for key in ("agent_template", "agent_template_version", "agent_template_source",
-                    "agent_template_handoff", "child_model", "child_reasoning_effort"):
+                    "agent_template_handoff", "child_model", "child_reasoning_effort",
+                    "agent_system_prompt_path", "agent_system_prompt_source"):
             if key in task:
                 request[key] = task[key]
     return request
@@ -3328,6 +3336,16 @@ def agent_prompt_text(parts: list[str]) -> str:
     return prompt_parts[0] if len(prompt_parts) == 1 else " ".join(prompt_parts)
 
 
+def read_agent_system_prompt(path: Path) -> str:
+    """Require an actual nonblank UTF-8 file, never Pi's inline-path fallback."""
+    if not path.is_file():
+        raise ValueError(f"system prompt must be a readable file: {path}")
+    text = path.read_bytes().decode("utf-8-sig")
+    if not text.strip():
+        raise ValueError(f"system prompt file must not be empty: {path}")
+    return text
+
+
 def agent_wrapped_command(
     worker: str,
     *,
@@ -3337,6 +3355,7 @@ def agent_wrapped_command(
     permission_mode: str,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    system_prompt_path: Path | None = None,
 ) -> list[str]:
     options = ChildOptions(
         cwd=cwd,
@@ -3345,8 +3364,9 @@ def agent_wrapped_command(
         permission_mode=permission_mode,
         model=model,
         reasoning_effort=reasoning_effort,
+        system_prompt_path=system_prompt_path,
     )
-    return get_agent(worker).child_command(options, os.environ)
+    return get_child_agent(worker).child_command(options, os.environ)
 
 
 def child_agent_environment(environment: dict[str, str]) -> dict[str, str]:
@@ -3395,9 +3415,12 @@ def submit_managed_run(args: argparse.Namespace) -> int:
     wrapped_command = list(getattr(args, "wrapped_command", []))
     agent_prompt_path: Path | None = None
     agent_result_path: Path | None = None
+    agent_system_prompt_path: Path | None = None
     if task_kind == "agent":
         agent_prompt_path = task_directory / AGENT_PROMPT_FILE_NAME
         agent_result_path = task_directory / AGENT_RESULT_FILE_NAME
+        if getattr(args, "agent_system_prompt_text", None) is not None:
+            agent_system_prompt_path = task_directory / AGENT_SYSTEM_PROMPT_FILE_NAME
         wrapped_command = agent_wrapped_command(
             str(args.agent_worker),
             cwd=os.path.abspath(args.cwd),
@@ -3406,6 +3429,7 @@ def submit_managed_run(args: argparse.Namespace) -> int:
             permission_mode=str(args.permission_mode),
             model=getattr(args, "child_model", None),
             reasoning_effort=getattr(args, "child_reasoning_effort", None),
+            system_prompt_path=agent_system_prompt_path,
         )
     environment = {
         name: value
@@ -3461,10 +3485,17 @@ def submit_managed_run(args: argparse.Namespace) -> int:
                 "agent_result_path": str(agent_result_path),
             }
         )
+        if agent_system_prompt_path is not None:
+            task.update({
+                "agent_system_prompt_path": str(agent_system_prompt_path),
+                "agent_system_prompt_source": args.agent_system_prompt_source,
+            })
     try:
         private_directory(task_directory)
         if agent_prompt_path is not None:
             write_private_text(agent_prompt_path, str(args.agent_prompt_text))
+        if agent_system_prompt_path is not None:
+            write_private_text(agent_system_prompt_path, args.agent_system_prompt_text)
         write_request(environment_path, {"version": 1, "environment": environment})
         write_managed_task(root, task)
     except OSError as exc:
@@ -3482,6 +3513,8 @@ def submit_managed_run(args: argparse.Namespace) -> int:
     print(f"ltc: task log: {log_path}", file=sys.stderr)
     if agent_result_path is not None:
         print(f"ltc: agent result: {agent_result_path}", file=sys.stderr)
+    if agent_system_prompt_path is not None:
+        print(f"ltc: agent system prompt: {agent_system_prompt_path}", file=sys.stderr)
     return 0
 
 
@@ -3624,6 +3657,14 @@ def run_managed_worker_locked(root: Path, task: dict[str, object]) -> int:
             prompt_path = Path(str(task["agent_prompt_path"]))
             result_path = Path(str(task["agent_result_path"]))
             prompt = prompt_path.read_text(encoding="utf-8")
+            system_prompt = task.get("agent_system_prompt_path")
+            if system_prompt is not None:
+                expected = prompt_path.parent / AGENT_SYSTEM_PROMPT_FILE_NAME
+                if not isinstance(system_prompt, str) or Path(system_prompt) != expected:
+                    raise ValueError("system prompt snapshot must be in its managed task directory")
+                # Pi otherwise treats a missing/unreadable filename as literal
+                # system text or silently falls back to its default prompt.
+                read_agent_system_prompt(expected)
             run_kwargs.update(
                 {
                     "input": prompt,
@@ -3632,7 +3673,7 @@ def run_managed_worker_locked(root: Path, task: dict[str, object]) -> int:
                     "env": child_agent_environment(environment),
                 }
             )
-            captures_stdout = get_agent(str(task["agent_worker"])).child_result_mode == "stdout"
+            captures_stdout = get_child_agent(str(task["agent_worker"])).child_result_mode == "stdout"
             if captures_stdout:
                 run_kwargs["stdout"] = subprocess.PIPE
             completed = subprocess.run(command, **run_kwargs)
@@ -3716,12 +3757,18 @@ def agent(args: argparse.Namespace) -> int:
     args.template_handoff = None
     args.child_model = getattr(args, "child_model", None)
     args.child_reasoning_effort = getattr(args, "child_reasoning_effort", None)
+    system_prompt_file = getattr(args, "system_prompt_file", None)
+    args.agent_system_prompt_source = None
+    args.agent_system_prompt_text = None
+    if system_prompt_file is not None and not str(system_prompt_file).strip():
+        raise SystemExit("--system-prompt-file must not be empty")
     if not args.agent_prompt_text.strip():
         raise SystemExit("agent mode requires non-empty task requirements")
     if args.child_model is not None and not args.child_model.strip():
         raise SystemExit("--model must not be empty")
-    if args.child_reasoning_effort and not get_agent(args.agent_worker).supports_reasoning_effort:
-        raise SystemExit("--reasoning-effort is supported only for Codex children")
+    child_adapter = get_child_agent(args.agent_worker)
+    if args.child_reasoning_effort and not child_adapter.supports_reasoning_effort:
+        raise SystemExit(f"{child_adapter.display_name} children do not support --reasoning-effort")
     if args.template is not None or args.template_file is not None:
         try:
             profile = load_template(args.template, template_file=args.template_file)
@@ -3733,7 +3780,19 @@ def agent(args: argparse.Namespace) -> int:
         args.template_handoff = profile.handoff
         args.child_model = args.child_model or profile.model_for(args.agent_worker)
         args.child_reasoning_effort = args.child_reasoning_effort or profile.reasoning_effort_for(args.agent_worker)
+        system_prompt_file = system_prompt_file or profile.system_prompt_file_for(args.agent_worker)
         args.agent_prompt_text = profile.render(args.agent_prompt_text)
+    if args.child_reasoning_effort and args.child_reasoning_effort not in child_adapter.reasoning_efforts:
+        raise SystemExit(f"unsupported {child_adapter.display_name} reasoning effort {args.child_reasoning_effort!r}")
+    if system_prompt_file is not None:
+        if not child_adapter.supports_system_prompt_file:
+            raise SystemExit(f"{child_adapter.display_name} children do not support --system-prompt-file")
+        try:
+            source = Path(system_prompt_file).expanduser().resolve()
+            args.agent_system_prompt_text = read_agent_system_prompt(source)
+        except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
+            raise SystemExit(f"ltc: could not load system prompt file: {exc}") from exc
+        args.agent_system_prompt_source = str(source)
     args.task_kind = "agent"
     args.command = args.command or f"ltc agent {args.agent_worker}"
     args.wrapped_command = []
@@ -3745,11 +3804,12 @@ def agent(args: argparse.Namespace) -> int:
                     "[long-task-agent-submission-dry-run]",
                     f"Task: {args.task}",
                     f"Working directory: {os.path.abspath(args.cwd)}",
-                    f"Child agent: {agent_display_name(args.agent_worker)}",
+                    f"Child agent: {child_adapter.display_name}",
                     f"Template: {args.template or 'none'} (version {getattr(args, 'template_version', None)})",
                     f"Template source: {args.template_source or 'none'}",
                     f"Child model: {args.child_model or 'CLI default'}",
                     f"Child reasoning effort: {args.child_reasoning_effort or 'CLI default'}",
+                    f"System prompt source: {args.agent_system_prompt_source or 'CLI default'}",
                     f"Expanded prompt:\n{args.agent_prompt_text}",
                     f"Template handoff: {args.template_handoff or 'none'}",
                     f"Execution: daemon -> {getattr(args, 'backend', 'auto')} backend -> independent worker -> child agent",
@@ -3848,19 +3908,20 @@ def install_skill_tree(target: Path, *, include_codex_plugin: bool, force: bool,
         return 1
 
     package_root = resources.files("long_task_callback").joinpath("skill")
-    if target.exists():
-        shutil.rmtree(target)
-    target.mkdir(parents=True, exist_ok=True)
+    with template_registration.preserve_installed_index(target):
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir(parents=True, exist_ok=True)
 
-    for item in package_root.iterdir():
-        if item.name == "agents" and not include_codex_plugin:
-            continue  # agents/openai.yaml is Codex plugin metadata; other agents ignore it.
-        destination = target / item.name
-        with resources.as_file(item) as source:
-            if item.is_dir():
-                shutil.copytree(source, destination)
-            else:
-                shutil.copy2(source, destination)
+        for item in package_root.iterdir():
+            if item.name == "agents" and not include_codex_plugin:
+                continue  # agents/openai.yaml is Codex plugin metadata; other agents ignore it.
+            destination = target / item.name
+            with resources.as_file(item) as source:
+                if item.is_dir():
+                    shutil.copytree(source, destination)
+                else:
+                    shutil.copy2(source, destination)
 
     print(f"Installed long-task-callback skill to {target}")
     return 0
@@ -3883,6 +3944,36 @@ def install_skill(args: argparse.Namespace) -> int:
         status |= install_skill_tree(claude_home() / "skills" / "long-task-callback", include_codex_plugin=False, force=args.force,
                                      keep_existing=bool(getattr(args, "keep_existing", False)))
     return status
+
+
+def template_command(args: argparse.Namespace) -> int:
+    try:
+        if args.template_action == "register":
+            result = template_registration.register(args)
+        elif args.template_action == "unregister":
+            result = template_registration.unregister(args)
+        else:
+            result = template_registration.list_templates()
+            if not args.json:
+                for entry in result:
+                    print(f"{entry['name']} ({entry['worker']}, ${entry['skill']}): {entry['description']}")
+                if not result:
+                    print("No registered child-agent templates.")
+                return 0
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        if args.dry_run or args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        elif args.template_action == "register":
+            print(f"Registered {result['name']} for {result['worker']}.")
+            print(f"Skill: ${result['skill']}")
+            print(f"Template: {result['template_file']}")
+        else:
+            print(f"{result['name']} is unregistered; template and system prompt files retained.")
+        return 0
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"ltc: {exc}", file=sys.stderr)
+        return 1
 
 
 def run_systemctl(args: list[str]) -> int:
@@ -5233,7 +5324,7 @@ def main() -> int:
     doctor_parser.add_argument("--operation", choices=("run", "agent", "done"), default="run",
                                help="Workflow whose prerequisites are checked (default: run)")
     doctor_parser.add_argument("--agent", choices=AGENT_NAMES, help="Callback Agent (default: detect current Agent)")
-    doctor_parser.add_argument("--agent-worker", choices=AGENT_NAMES, help="Child Agent for --operation agent")
+    doctor_parser.add_argument("--agent-worker", choices=CHILD_AGENT_NAMES, help="Child Agent for --operation agent")
     doctor_parser.add_argument("--callback-mode", choices=callback_transport.MODES, default="auto")
     doctor_target = doctor_parser.add_mutually_exclusive_group()
     doctor_target.add_argument("--session", help="Original Agent session to preserve during repair")
@@ -5268,16 +5359,26 @@ def main() -> int:
     add_common_flags(run_parser)
     run_parser.add_argument("wrapped_command", nargs=argparse.REMAINDER)
 
-    agent_parser = sub.add_parser("agent", help="Run a durable fresh Codex or Claude Code child agent")
+    agent_parser = sub.add_parser("agent", help="Run a durable fresh Codex, Claude Code or PI Agent child")
     agent_sub = agent_parser.add_subparsers(dest="agent_worker", required=True)
-    for worker in AGENT_NAMES:
-        child_parser = agent_sub.add_parser(worker, help=f"Run a fresh {agent_display_name(worker)} child agent")
+    for worker in CHILD_AGENT_NAMES:
+        adapter = get_child_agent(worker)
+        child_parser = agent_sub.add_parser(worker, help=f"Run a fresh {adapter.display_name} child agent")
         add_common_flags(child_parser)
         template_source = child_parser.add_mutually_exclusive_group()
         template_source.add_argument("--template", help="User template name in ~/.config/ltc/templates, or built-in test")
         template_source.add_argument("--template-file", help="Custom YAML template file (relative to the submitting shell directory)")
         child_parser.add_argument("--model", dest="child_model", help="Child model only; overrides template default")
-        child_parser.add_argument("--reasoning-effort", dest="child_reasoning_effort", choices=REASONING_EFFORTS, help="Codex child reasoning effort; model must support it")
+        if adapter.supports_system_prompt_file:
+            child_parser.add_argument(
+                "--system-prompt-file",
+                help="UTF-8 system prompt file; overrides template default and freezes its text at submission",
+            )
+        child_parser.add_argument(
+            "--reasoning-effort", dest="child_reasoning_effort",
+            choices=adapter.reasoning_efforts or REASONING_EFFORTS,
+            help="Child reasoning effort; PI Agent maps this to --thinking; model must support it",
+        )
         child_parser.add_argument("agent_prompt", nargs=argparse.REMAINDER)
 
     screen_worker_parser = sub.add_parser("_screen-worker", help=argparse.SUPPRESS)
@@ -5332,6 +5433,24 @@ def main() -> int:
         help="Agent home to install into (default: both — ${CODEX_HOME:-~/.codex}/skills and ${CLAUDE_CONFIG_DIR:-~/.claude}/skills)",
     )
     install_parser.add_argument("--force", action="store_true", help="Overwrite an existing long-task-callback skill")
+
+    template_parser = sub.add_parser("template", help="Register named child templates and advertise their skills")
+    template_actions = template_parser.add_subparsers(dest="template_action", required=True)
+    register_parser = template_actions.add_parser("register", help="Install a YAML template and discoverable task skill")
+    register_parser.add_argument("name", help="Template name: lowercase letters, digits and hyphens")
+    register_parser.add_argument("--file", help="Source YAML (default: existing named user template); relative paths use the current shell directory")
+    register_parser.add_argument("--worker", choices=CHILD_AGENT_NAMES, help="Child worker (default: YAML worker)")
+    register_parser.add_argument("--description", help="Skill discovery description (default: YAML description)")
+    register_parser.add_argument("--target", choices=("codex", "claude", "both"), default="both", help="Parent Agent skill profiles to update")
+    register_parser.add_argument("--force", action="store_true", help="Replace existing template files or edited owned entrypoints")
+    register_parser.add_argument("--dry-run", action="store_true", help="Validate and show registration changes without writing files")
+    register_parser.add_argument("--json", action="store_true", help="Print structured registration results")
+    list_parser = template_actions.add_parser("list", help="List registered task capabilities")
+    list_parser.add_argument("--json", action="store_true", help="Print structured registration metadata")
+    unregister_parser = template_actions.add_parser("unregister", help="Remove discovery entrypoints; preserve template and prompt files")
+    unregister_parser.add_argument("name")
+    unregister_parser.add_argument("--dry-run", action="store_true")
+    unregister_parser.add_argument("--json", action="store_true")
 
     setup_parser = sub.add_parser("setup", help="Install the bundled skill and user-level wakeup daemon")
     setup_parser.add_argument("--backend", choices=("auto", "systemd", "launchd", "windows-task", "screen"), default=os.environ.get("LTC_EXECUTION_BACKEND", "auto"))
@@ -5481,6 +5600,8 @@ def main() -> int:
         return windows_service.uninstall(args)
     if args.mode == "install-skill":
         return install_skill(args)
+    if args.mode == "template":
+        return template_command(args)
     if args.mode == "setup":
         return setup(args)
     if args.mode == "prompt-policy":

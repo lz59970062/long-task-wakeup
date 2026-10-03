@@ -18,7 +18,7 @@ import tempfile
 import time
 
 from . import __version__, callback_transport
-from .agents import get_agent
+from .agents import get_agent, get_child_agent
 from .platforms import posix, windows_io
 from .platforms import OwnerState
 from .platforms.screen import ScreenBackend
@@ -324,7 +324,7 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
     if operation == "agent" and not child_agent:
         issues.append({"code": "child_agent_unspecified", "action": "Pass --agent-worker with the actual intended child Agent to check delegated-task readiness."})
     if operation == "agent" and child_agent:
-        child_executable = shutil.which(get_agent(child_agent).executable(os.environ))
+        child_executable = shutil.which(get_child_agent(child_agent).executable(os.environ))
         if child_executable is None:
             issues.append({"code": "child_agent_unavailable", "action": "Install or configure the selected child Agent CLI before executing this delegated task."})
         else:

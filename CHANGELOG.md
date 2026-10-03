@@ -2,6 +2,29 @@
 
 ## 0.7.1a1 — unreleased
 
+- Add Pi Agent as a child worker with `ltc agent pi`, fresh nonpersistent text
+  execution, submission-time environment/configuration and private result capture.
+  Callbacks remain bound to the originating Codex or Claude session. Support Pi
+  model/thinking overrides, per-Pi template defaults, executable selection via
+  `LONG_TASK_WAKEUP_PI_BIN` and `doctor --operation agent --agent-worker pi`.
+  Pi permissions/extensions follow its own noninteractive configuration; native
+  Windows/macOS Pi launch remains unverified in this session.
+- Add Pi-only `--system-prompt-file` and template `pi.system_prompt_file` defaults.
+  Pass the snapshot to Pi's `--system-prompt` to replace its built-in base prompt
+  while retaining normal project context, skills and appended instructions.
+  Snapshot nonempty UTF-8 contents privately at submission; retain the source
+  path for review and keep queued tasks independent of later source changes.
+  Resolve CLI paths from the submitting shell and template defaults from their
+  YAML directory; dry-run reports the source without creating task files.
+- Add `ltc template register|list|unregister` for reusable child-task discovery.
+  Accept optional YAML `worker`/`description` metadata and CLI overrides; copy
+  templates and system prompts into the user template directory, generate short
+  `ltc-NAME` routing skills and maintain an installed LTC skill's managed index.
+  Pin each route to its installed absolute template path and emit Codex UI
+  metadata. Preserve configuration/home overrides and unrelated skills/aliases;
+  use standard Codex aliases only for the default Unix profile. Keep
+  `setup --keep-skill` text unchanged. Unregister removes managed discovery files
+  while retaining templates, prompts and extra user files, and refuses edited routes.
 - Separate CLI, Desktop shared Core and manual callback modes; freeze the mode
   with each task and report callback capability separately from local readiness.
 - Refuse new Desktop work before admission when its shared connection is
