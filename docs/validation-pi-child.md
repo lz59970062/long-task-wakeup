@@ -1,4 +1,4 @@
-# PI Agent child-worker validation
+# PI Agent child-worker and callback validation
 
 Recorded on 2026-09-28 on Linux with Python 3.12.4, Pi 0.87.1 and Node
 22.23.3. The checkout was fast-forwarded from `f2695b8` to remote `main`
@@ -11,8 +11,16 @@ unreleased preview, `0.7.1a1`.
 `pi --print --mode text --no-session`. It saves stdout as the private
 `agent-result.txt` and preserves the process exit code. `--model` supports
 Pi's provider-qualified notation; `--reasoning-effort` maps to `--thinking`.
-Callbacks remain bound to the originating Codex or Claude session. Pi is
-not registered for callback discovery or resume.
+
+Pi is also a callback parent. A task submitted from PI's shell tool binds
+`PI_SESSION_FILE` (the absolute session JSONL), falling back to `PI_SESSION_ID`,
+and callback delivery runs `pi --print --session <file>` with the callback prompt
+on stdin, appending one turn to that exact session. `--last` maps to `--continue`.
+PI is detected from `PI_SESSION_FILE`, `PI_SESSION_ID` or the `PI_CODING_AGENT`
+marker and takes precedence over inherited Codex/Claude markers; `--agent` can
+override that. Callback transport stays CLI-resume because the Desktop App Server
+path is Codex-only. Ephemeral sessions (`--no-session`) have no file to resume
+and require explicit `--session`.
 
 Pi-only `--system-prompt-file PATH` reads a nonblank UTF-8 source and saves a
 private `agent-system-prompt.md` snapshot before submission. Pi receives the
@@ -23,6 +31,26 @@ CLI relative paths use the submitting directory; template
 snapshots are checked before launching Pi so a missing file cannot silently
 become literal path text. An editable sample is
 `examples/prompts/pi-system.md`.
+
+## Callback delivery re-verified on 2026-10-03
+
+Added PI as a full callback adapter on the branch `feature/pi-agent-support`:
+`agents/pi.py` now implements `resume_command`, detection and `session_id_env`;
+`agents/__init__.py` registers `PiAdapter` in `AGENTS`; `cli.py` adds the PI
+acknowledgement text and `--pi-bin`/`LONG_TASK_WAKEUP_PI_BIN` daemon wiring;
+`diagnostics.py` keeps a valid repair command for a PI callback parent.
+
+| Check | Result |
+| --- | --- |
+| `tests/test_pi_agents.py` | 27 passed (adapter + public binding + end-to-end delivery with a fake `pi`) |
+| `tests/test_v070_agents.py` | Passed; registry/detection precedence updated for PI |
+| Full `unittest discover -s tests` (isolated homes/lock dir) | 487 discovered, all passed, 88 skipped |
+| Real `pi --print --session <session.jsonl> --offline` with an unresolvable model | PI opened the bound session file and stopped at model resolution; no option error and no cross-project fork prompt |
+| End-to-end delivery fixture | Fake `pi` received `--print --session <file>` and the callback prompt on stdin, acked, and the request moved to `done` |
+
+The end-to-end delivery test uses a fake `pi` executable and a real private
+delivery worker; it calls no model API. Delivery against a live PI session with a
+real provider was not exercised in this re-verification.
 
 ## Automated checks
 
@@ -56,7 +84,7 @@ python3 -m pip wheel --no-deps --no-build-isolation --no-cache-dir \
 The new tests cover both callback parents, environment snapshots, parent-marker
 removal, exact UTF-8 stdout and log capture, nonzero and empty failed results,
 model/thinking options, custom and built-in templates, frozen task artifacts,
-invalid-input rejection before persistence, child-only registration and Pi
+invalid-input rejection before persistence, the Pi registry entry and Pi
 executable diagnostics. Fake child processes exercise the actual private LTC
 worker; they do not call a model API.
 System-prompt tests additionally cover CLI/YAML precedence and relative paths,

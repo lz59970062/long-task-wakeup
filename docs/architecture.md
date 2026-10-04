@@ -17,9 +17,10 @@ older coordinators reject them so they cannot silently ignore manual/desktop
 intent. Existing versions remain readable. The 0.7.0 material below is the
 released baseline; the preview's live Mac Desktop acceptance is still pending.
 
-The preview also adds `ltc agent pi` as a child worker. It reuses task ownership,
-the private environment/prompt/result artifacts and callback delivery to the
-originating Codex or Claude session. Pi is not a callback-session adapter.
+The preview also adds Pi as both a child worker and a callback-session adapter.
+`ltc agent pi` reuses task ownership and the private environment/prompt/result
+artifacts; `--agent pi` resumes the persisted PI session file that the launching
+shell recorded (`PI_SESSION_FILE`).
 
 See the [0.7.0 release validation record](validation-0.7.0.md) for final checks.
 The [Mac-to-Windows handoff](handoff-macos-to-windows.md) preserves the earlier
@@ -49,7 +50,7 @@ coordinator before submitting new tasks.
 | `platforms/posix.py` | OS-held file locks and directory syncing | Pretend these primitives work on Windows |
 | `storage.py` | Atomic private JSON/text persistence | Store state in installation directories |
 | `agents/` | Agent metadata, session discovery, child/resume commands and capabilities | Launch tasks or change queue lifecycle |
-| `agents/pi.py` | Pi child command, stdout result capture and supported thinking levels | Discover or resume a Pi callback session |
+| `agents/pi.py` | Pi child command, stdout result capture, thinking levels, and print-mode resume of the bound session file | Open the interactive TUI or resume an ephemeral session |
 | `callbacks.py` | Compact, transport-independent envelopes | Drop custom instructions without an explicit details-read requirement |
 | `diagnostics.py` | Environment, configuration and lifecycle observations with Agent-owned recovery guidance | Execute repairs, change producer exit codes, or equate local checks with authenticated delivery |
 | `runtime.py`, `_entry.py` | Launch workers from this exact installation | Rediscover another LTC on PATH |
@@ -232,19 +233,28 @@ It supplies the name, display name, session ID environment, environment markers,
 child-result mode, supported reasoning options, command builders and detection.
 Templates derive their supported adapter sections from that registry. Unknown
 persisted agent names fail closed; they never fall back to a different agent.
-Child-only adapters are registered for child commands/templates, not callback
+Child-only adapters are registered for child commands/templates without callback
 session discovery or resume. Pi uses `--print --mode text --no-session`, prompt
 stdin and stdout result capture; it retains submission-time profile/authentication,
 API and extension configuration while stripping parent Codex/Claude and
-`PI_SESSION_ID`/`PI_SESSION_FILE` markers. `LONG_TASK_WAKEUP_PI_BIN` selects its
-executable. `--model` passes through (including `provider/model`) and
-`--reasoning-effort` becomes Pi `--thinking` with `off`, `minimal`, `low`, `medium`,
-`high`, `xhigh`, or `max`; `ultra` is rejected. Pi's tool permissions and project
-extension trust follow its own noninteractive configuration, without an automatic
-`--approve`. Codex sandbox and Claude permission flags do not apply to Pi.
-The command contract was checked against Pi 0.87.1; this session has not verified
-native Windows/macOS Pi launch. Built-in Codex template defaults are not merged
-into Pi's profile. Diagnostics use `ltc doctor --operation agent --agent-worker pi`.
+`PI_SESSION_ID`/`PI_SESSION_FILE`/`PI_CODING_AGENT` markers.
+`LONG_TASK_WAKEUP_PI_BIN` selects its executable. `--model` passes through
+(including `provider/model`) and `--reasoning-effort` becomes Pi `--thinking` with
+`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; `ultra` is rejected.
+Pi's tool permissions and project extension trust follow its own noninteractive
+configuration, without an automatic `--approve`. Codex sandbox and Claude
+permission flags do not apply to Pi. The command contract was checked against
+Pi 0.87.1; this session has not verified native Windows/macOS Pi launch. Built-in
+Codex template defaults are not merged into Pi's profile. Diagnostics use
+`ltc doctor --operation agent --agent-worker pi`.
+
+Pi also implements the callback transport. Binding prefers `PI_SESSION_FILE`
+(absolute session JSONL) over `PI_SESSION_ID`, and PI takes detection precedence
+over inherited Codex/Claude markers because its session variables are injected
+only into a live PI shell tool. Delivery runs `pi --print --session <file>` with
+the callback prompt on stdin, appending one turn and exiting; `--last` maps to
+`--continue`. An ephemeral session (`--no-session`) has no file to resume, so LTC
+asks for explicit `--session`. `ltc setup --pi-bin` pins the daemon executable.
 
 Pi-only `--system-prompt-file` selects a separate nonempty UTF-8 system prompt
 file. CLI relative paths use the submitting shell directory, independent of the
@@ -262,7 +272,9 @@ performs interpolation or script evaluation.
 New callback-session adapters, including a possible DSH adapter, require validation
 of their real noninteractive launch, session routing, result capture and approval
 semantics. CLI completion is not proof
-that the intended session accepted a callback. Codex Desktop transport remains a
+that the intended session accepted a callback. A session-file requirement is
+inherent to PI's per-project grouping; the absolute `PI_SESSION_FILE` avoids the
+cross-project fork prompt. Codex Desktop transport remains a
 separate, Codex-specific path; adapters can use CLI resume without implementing it.
 
 ## Compact callback protocol

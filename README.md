@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="Long Task Callback (ltc): run a task under an independent Linux, macOS or Windows owner and wake the same Codex or Claude Code session when it finishes">
+  <img src="./assets/readme/hero.svg" width="100%" alt="Long Task Callback (ltc): run a task under an independent Linux, macOS or Windows owner and wake the same Codex, Claude Code or PI Agent session when it finishes">
 </p>
 
 <p align="center">
   <a href="https://github.com/lz59970062/long-task-wakeup"><img src="https://img.shields.io/badge/python-%E2%89%A53.9-3fb950" alt="Python ≥ 3.9"></a>
   <a href="./pyproject.toml"><img src="https://img.shields.io/badge/license-MIT-58a6ff" alt="MIT license"></a>
-  <img src="https://img.shields.io/badge/child_agents-Codex%20%C2%B7%20Claude%20Code%20%C2%B7%20Pi-d29922" alt="Codex, Claude Code and Pi child agents">
+  <img src="https://img.shields.io/badge/agents-Codex%20%C2%B7%20Claude%20Code%20%C2%B7%20Pi-d29922" alt="Wakes Codex, Claude Code and Pi sessions; runs Codex, Claude Code and Pi child agents">
 </p>
 
 **Long Task Callback (ltc)** gives long-running agent work a durable process owner and an explicit
@@ -99,8 +99,8 @@ for reading before acting. Use `--callback-format full` for full inline callback
 The existing system/user reminder cadence still applies. This reduces repeated
 prose without truncating saved results or user instructions.
 
-Stable 0.7.0 does not include Pi or DSH adapters; this checkout adds Pi as a child
-worker with callbacks to Codex or Claude Code. DSH remains a future adapter. See
+Stable 0.7.0 does not include Pi or DSH adapters; this checkout adds Pi as both a
+child worker and a callback parent. DSH remains a future adapter. See
 [macOS setup](docs/macos.md), [Windows setup](docs/windows.md) and [architecture and handoff](docs/architecture.md)
 for module responsibilities, recovery guarantees, extension points and validation.
 Docker and AutoDL use screen when user systemd is unavailable; see
@@ -290,8 +290,8 @@ ltc agent pi \
 the launching conversation, or the existing `--agent` and `--session` options can bind it
 explicitly. LTC creates private prompt and result files under its managed task directory and
 prints the result path at submission; callers do not supply file paths.
-Pi is a child worker only: the originating parent and `--agent` callback target remain
-`codex|claude`.
+Pi works in both directions: it can run as the child, and a Pi session can be the callback parent
+(`--agent pi`) that LTC wakes when the task finishes.
 
 For Claude Code, LTC carries the submission-time configuration, authentication, proxy, and custom
 environment into the child while removing `CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`, and
@@ -516,12 +516,44 @@ Use `LONG_TASK_WAKEUP_PI_BIN` to select a specific Pi executable. LTC launches
 `pi --print --mode text --no-session`, supplies the prompt through stdin, and saves
 stdout to the managed private agent-result artifact. No Pi session is persisted.
 The child inherits submission-time Pi profile, authentication, API, proxy and extension
-configuration; LTC removes Codex/Claude parent markers plus `PI_SESSION_ID` and
-`PI_SESSION_FILE`. Do not put credentials in the prompt. Tool permissions and project
+configuration; LTC removes Codex/Claude parent markers plus `PI_SESSION_ID`,
+`PI_SESSION_FILE` and `PI_CODING_AGENT`. Do not put credentials in the prompt. Tool permissions and project
 extension trust follow Pi's own noninteractive configuration; LTC does not add
 `--approve`. `--sandbox-mode` is for Codex and `--permission-mode` is for Claude.
 The command contract was checked with Pi 0.87.1; native Windows/macOS Pi launch
 has not been verified in this session.
+
+### Pi Agent callbacks
+
+A long task submitted from a Pi shell tool binds the live Pi session and wakes it
+when the task finishes:
+
+```bash
+command -v pi
+ltc doctor --agent pi --session "$PI_SESSION_FILE"
+ltc done --agent pi --session "$PI_SESSION_FILE" --exit-code 0 \
+  --cwd "$PWD" --task "external benchmark"
+```
+
+Inside Pi's `bash`/`powershell` tool, LTC reads `PI_SESSION_FILE` (the absolute
+path to the current session JSONL) and stores it as the callback target. `PI_SESSION_ID`
+is used as a fallback identity, and `PI_CODING_AGENT`/`AI_AGENT` markers let LTC
+detect Pi when no session variable is bound. A bound Pi session takes precedence over
+inherited Codex/Claude markers; use `--agent` to override a deliberate choice.
+
+Delivery runs `pi --print --session <session-file>` in the task working directory and
+supplies the callback prompt on stdin, so it appends one turn to the exact
+persisted session and exits without opening the interactive UI. `--last` maps to
+`pi --continue`. `LONG_TASK_WAKEUP_PI_BIN` selects the executable for both child
+work and callback delivery; `ltc setup --pi-bin` pins it for the daemon.
+
+Pi has no persistent callback channel analogous to the Codex Desktop App Server,
+so `ltc doctor --agent pi` reports `cli_resume` and never forces Desktop mode.
+The callback relies on the persisted session file recorded at submission: if the
+session is ephemeral (`--no-session`) there is nothing to resume, and LTC asks for
+explicit `--session <file|id>` instead. Because sessions are grouped by working
+directory, prefer the absolute `PI_SESSION_FILE`; an explicit session id is
+resolved by Pi itself.
 
 ### Pi system prompt files
 
@@ -696,6 +728,7 @@ Inside an agent conversation, LTC normally binds automatically:
 
 - Codex: `CODEX_THREAD_ID`
 - Claude Code: `CLAUDE_CODE_SESSION_ID`
+- PI Agent: `PI_SESSION_FILE` (absolute session file), else `PI_SESSION_ID`
 
 Explicit binding is also supported:
 
@@ -743,7 +776,7 @@ mode and no fallback to one.
 - **Run**：`ltc run -- <命令>`。提交新任务，Linux 默认使用独立的 systemd 用户服务，macOS 使用独立的一次性 launchd 作业，Windows 使用独立的按需计划任务与 Job Object。
   Linux/macOS 无可用用户管理器时使用 screen 兼容后端。
 - **Agent**：`ltc agent codex|claude|pi -- <任务>`。用同一套持久化和 callback
-  生命周期启动一个全新的 Codex、Claude Code 或 Pi 子代理；回调目标仍是原 Codex 或 Claude Code 会话。
+  生命周期启动一个全新的 Codex、Claude Code 或 Pi 子代理；回调目标可以是原 Codex、Claude Code 或 Pi 会话。
 - **Done**：`ltc done ...`。任务已经由 screen、tmux、Slurm 或其他调度器托管时，
   只报告结束并投递 callback。
 
@@ -786,7 +819,7 @@ Windows 目录创建、重命名和删除不承诺断电持久性；注销或重
 Windows Desktop 包上下文桥接仍属于实验功能，核心正式发布不代表所有 Desktop 投递方式均已验证。
 新预览可用 `setup --desktop-launch-mode package-context` 保存该选择；默认直接启动不会失败后自动切换。
 这次安装流程改动在 macOS 开发，尚未完成 Windows 原生安装验收，历史回调成功不能替代这项验收。
-正式版 0.7.0 不含 Pi、DSH 适配；当前源码已添加 Pi 子代理，DSH 尚未实现。从 0.6 升级时，先排空已有任务并升级协调器，再提交原生任务；
+正式版 0.7.0 不含 Pi、DSH 适配；当前源码已添加 Pi，可同时作为子代理与 callback 宿主，DSH 尚未实现。从 0.6 升级时，先排空已有任务并升级协调器，再提交原生任务；
 并行安装请使用独立 Agent profile、队列和对应版本 daemon，避免混用。
 
 旧版 screen worker 启动时必须把任务从 `launching` 持久化为 `running`，这一步就是启动握手。
@@ -842,11 +875,15 @@ ltc agent pi --cwd "$PWD" --task "review parser" \
 `CODEX_THREAD_ID`、`CLAUDE_CODE_SESSION_ID` 和 `CLAUDECODE` 这些父会话标记；默认也不会
 启用 `--bare`。
 
-Pi 仅作为子代理，`--agent` 仍只接受 `codex|claude`。LTC 使用
-`pi --print --mode text --no-session`，从 stdin 传入任务并保存文本结果，不持久化 Pi 会话。
+Pi 既可作子代理，也可作 callback 宿主：在 Pi 的 shell 工具里提交任务时，LTC 读取
+`PI_SESSION_FILE`（当前会话 JSONL 的绝对路径）作为休眠唤醒目标，必要时回退到 `PI_SESSION_ID` 或
+`PI_CODING_AGENT`/`AI_AGENT` 标记，因此 `--agent` 现在接受 `pi`。
+LTC 使用 `pi --print --mode text --no-session` 启动 Pi 子代理，从 stdin 传入任务并保存文本结果，不持久化 Pi 会话；
+callback 则执行 `pi --print --session <会话文件>`，在任务工作目录中把回调提示词从 stdin 追加到同一会话后退出。
 Pi 继承提交时的 profile、认证、API、代理与扩展配置，但移除 Codex/Claude 父会话标记及
-`PI_SESSION_ID`、`PI_SESSION_FILE`。可用 `LONG_TASK_WAKEUP_PI_BIN` 指定可执行文件，
-用 `ltc doctor --operation agent --agent-worker pi` 检查本地条件。
+`PI_SESSION_ID`、`PI_SESSION_FILE`、`PI_CODING_AGENT`。可用 `LONG_TASK_WAKEUP_PI_BIN` 指定可执行文件，
+`ltc setup --pi-bin` 固定 daemon 使用的路径，用 `ltc doctor --operation agent --agent-worker pi` 检查本地条件。
+会话为临时（`--no-session`）时无法恢复，LTC 会要求显式传入 `--session <文件|ID>`；由于 Pi 会话按工作目录分组，建议使用绝对的 `PI_SESSION_FILE`。
 `--model provider/model` 直接传给 Pi，`--reasoning-effort` 映射为 `--thinking`，支持
 `off|minimal|low|medium|high|xhigh|max`，不支持 `ultra`。内置 test 模板的 Codex 默认模型和推理级别不套用于 Pi。
 Pi 工具权限与项目扩展信任遵循其自身非交互配置；LTC 不添加 `--approve`。

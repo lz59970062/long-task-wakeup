@@ -4,11 +4,19 @@
 
 - Add Pi Agent as a child worker with `ltc agent pi`, fresh nonpersistent text
   execution, submission-time environment/configuration and private result capture.
-  Callbacks remain bound to the originating Codex or Claude session. Support Pi
-  model/thinking overrides, per-Pi template defaults, executable selection via
-  `LONG_TASK_WAKEUP_PI_BIN` and `doctor --operation agent --agent-worker pi`.
-  Pi permissions/extensions follow its own noninteractive configuration; native
-  Windows/macOS Pi launch remains unverified in this session.
+  Support Pi model/thinking overrides, per-Pi template defaults, executable
+  selection via `LONG_TASK_WAKEUP_PI_BIN` and
+  `doctor --operation agent --agent-worker pi`. Pi permissions/extensions follow
+  its own noninteractive configuration; native Windows/macOS Pi launch remains
+  unverified in this session.
+- Add Pi Agent as a callback parent (`--agent pi`). Bind the persisted session
+  from `PI_SESSION_FILE` (falling back to `PI_SESSION_ID`), detect PI via
+  `PI_SESSION_FILE`/`PI_SESSION_ID`/`PI_CODING_AGENT`, and deliver with
+  `pi --print --session <file>` appending one stdin turn to the exact session;
+  `--last` maps to `--continue`. PI takes detection precedence over inherited
+  Codex/Claude markers, callbacks stay CLI-resume (no Desktop transport), and
+  ephemeral `--no-session` sessions require explicit `--session`. Add
+  `ltc setup --pi-bin` so the daemon pins the executable for resume.
 - Add Pi-only `--system-prompt-file` and template `pi.system_prompt_file` defaults.
   Pass the snapshot to Pi's `--system-prompt` to replace its built-in base prompt
   while retaining normal project context, skills and appended instructions.

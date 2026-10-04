@@ -9,10 +9,10 @@ an agent a callback target.
 from .base import AgentAdapter, ChildAgentAdapter, ChildOptions
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
-from .pi import PiChildAdapter
+from .pi import PiAdapter
 from .registry import AgentRegistry
 
-AGENTS = AgentRegistry((CodexAdapter(), ClaudeAdapter()), children=(PiChildAdapter(),))
+AGENTS = AgentRegistry((CodexAdapter(), ClaudeAdapter(), PiAdapter()))
 AGENT_NAMES = AGENTS.names
 CHILD_AGENT_NAMES = AGENTS.child_names
 

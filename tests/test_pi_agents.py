@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from unittest import mock
 
@@ -28,7 +29,7 @@ from test_cli import assert_private_file, executable_python_fixture, patch_fixtu
 PI_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 SESSION_MARKERS = (
     "CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDECODE",
-    "CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "PI_SESSION_ID", "PI_SESSION_FILE",
+    "CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "PI_SESSION_ID", "PI_SESSION_FILE", "PI_CODING_AGENT",
 )
 
 
@@ -40,24 +41,66 @@ class PiAdapterContractTests(unittest.TestCase):
             reasoning_effort=effort, system_prompt_path=system_prompt_path,
         )
 
-    def test_pi_is_a_child_only_integration_and_never_detected_as_a_callback(self):
-        self.assertEqual(set(AGENTS.names), {"codex", "claude"})
+    def test_pi_is_registered_as_both_a_child_worker_and_a_callback_parent(self):
+        self.assertEqual(set(AGENTS.names), {"codex", "claude", "pi"})
         self.assertEqual(set(CHILD_AGENT_NAMES), {"codex", "claude", "pi"})
-        self.assertEqual(get_child_agent("pi").name, "pi")
-        with self.assertRaises(ValueError):
-            get_agent("pi")
+        self.assertIs(get_agent("pi"), get_child_agent("pi"))
         for environment, expected in (
-            ({"PI_SESSION_ID": "pi-parent", "PI_SESSION_FILE": "/pi/session.jsonl"}, "codex"),
-            ({"PI_SESSION_ID": "pi-parent", "CODEX_THREAD_ID": "codex-parent"}, "codex"),
-            ({"PI_SESSION_ID": "pi-parent", "CLAUDE_CODE_SESSION_ID": "claude-parent"}, "claude"),
+            ({"PI_SESSION_FILE": "/pi/session.jsonl"}, "pi"),
+            ({"PI_SESSION_ID": "pi-parent"}, "pi"),
+            ({"PI_CODING_AGENT": "true"}, "pi"),
+            ({"PI_SESSION_ID": "pi-parent", "PI_SESSION_FILE": "/pi/session.jsonl"}, "pi"),
+            ({"PI_SESSION_ID": "pi-parent", "CODEX_THREAD_ID": "codex-parent"}, "pi"),
+            ({"PI_SESSION_FILE": "/pi/session.jsonl", "CLAUDE_CODE_SESSION_ID": "claude-parent",
+              "CLAUDECODE": "1"}, "pi"),
             ({"PI_PROVIDER": "fixture", "PI_MODEL": "fixture-model", "PI_REASONING_LEVEL": "high"}, "codex"),
         ):
             with self.subTest(environment=environment):
                 self.assertEqual(AGENTS.detect(environment), expected)
                 with mock.patch.dict(os.environ, environment, clear=True):
                     self.assertEqual(cli.resolve_agent(), expected)
-        with self.assertRaises(SystemExit):
-            cli.resolve_agent(argparse.Namespace(agent="pi"))
+        self.assertEqual(cli.resolve_agent(argparse.Namespace(agent="pi")), "pi")
+
+    def test_pi_resume_command_resumes_the_bound_session_file_in_print_mode(self):
+        session = ("/home/user/.pi/agent/sessions/--data-proj--/"
+                   "2026-10-03T14-37-07-412Z_01a10232-83d4-700f-a8a1-691db3724158.jsonl")
+        self.assertEqual(
+            get_agent("pi").resume_command({"target": {"kind": "session", "value": session}}, {}),
+            ["pi", "--print", "--session", session],
+        )
+        with mock.patch.dict(os.environ, {"LONG_TASK_WAKEUP_PI_BIN": "/opt/my Pi/bin/pi"}, clear=False):
+            self.assertEqual(
+                cli.resume_command({"agent": "pi", "target": {"kind": "session", "value": session}}),
+                ["/opt/my Pi/bin/pi", "--print", "--session", session],
+            )
+        self.assertEqual(
+            get_agent("pi").resume_command({"target": {"kind": "last"}}, {}),
+            ["pi", "--print", "--continue"],
+        )
+        self.assertNotIn("--no-session", get_agent("pi").resume_command(
+            {"target": {"kind": "session", "value": session}}, {}))
+        for target in (None, {}, {"kind": "session", "value": ""}, {"kind": "future-unknown"}):
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                get_agent("pi").resume_command({"target": target}, {})
+
+    def test_make_request_binds_the_pi_session_file_and_acknowledgement_names_pi(self):
+        session = "/home/user/.pi/agent/sessions/--data-proj--/2026-10-03T14-37-07-412Z_1.jsonl"
+        args = argparse.Namespace(
+            cwd="/tmp", session=None, last=False, agent=None, task="long task",
+            command=None, exit_code=None, message=None,
+            approvals_reviewer="auto_review", approval_policy="on-request", sandbox_mode="workspace-write",
+        )
+        with mock.patch.dict(os.environ, {"PI_SESSION_FILE": session, "PI_SESSION_ID": "1"}, clear=True):
+            request = cli.make_request(args, "wake up")
+            self.assertEqual(cli.resolve_agent(args), "pi")
+            prompt = cli.build_prompt(args)
+        self.assertEqual(request["agent"], "pi")
+        self.assertEqual(request["target"], {"kind": "session", "value": session})
+        self.assertEqual(request["target_source"], "PI_SESSION_FILE")
+        self.assertIn("called back into PI Agent", prompt)
+        acknowledgement = cli.build_acknowledgement_text("ltc ack --queue-dir /q --id abc", agent="pi")
+        self.assertIn("PI Agent non-interactively in print mode", acknowledgement)
+        self.assertIn("--queue-dir /q --id abc", acknowledgement)
 
     def test_pi_command_is_pure_fresh_print_text_mode_with_no_positional_prompt(self):
         environment = {"LONG_TASK_WAKEUP_PI_BIN": "/opt/my Pi/bin/pi", "PI_PROVIDER": "fixture"}
@@ -132,6 +175,11 @@ class PiAgentContractTests(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
 
+    def tearDown(self):
+        for delivery in list(cli._BACKGROUND_RESUMES.values()):
+            cli.stop_resume_process(delivery.process)
+        cli._BACKGROUND_RESUMES.clear()
+
     def invoke(self, options=(), *, parent="codex", prompt="Inspect the public Pi child contract."):
         argv = ["ltc", "agent", "pi", "--cwd", str(self.directory),
                 "--queue-dir", str(self.queue), "--backend", "screen", "--callback-mode", "cli",
@@ -201,6 +249,7 @@ class PiAgentContractTests(unittest.TestCase):
             "CODEX_THREAD_ID": "submitter-codex", "CLAUDE_CODE_SESSION_ID": "submitter-claude",
             "CLAUDECODE": "1", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "submitter-desktop",
             "PI_SESSION_ID": "submitter-pi", "PI_SESSION_FILE": "/fixture/parent-session.jsonl",
+            "PI_CODING_AGENT": "true",
             "PI_CODING_AGENT_DIR": str(self.directory / "Pi config with spaces"),
             "PI_PROVIDER": "custom-provider", "PI_MODEL": "custom-model", "PI_REASONING_LEVEL": "high",
             "OPENAI_API_KEY": "fixture-preserved-secret", "CUSTOM_WORKLOAD_SETTING": "submission-value",
@@ -342,22 +391,123 @@ class PiAgentContractTests(unittest.TestCase):
             with self.subTest(options=options, prompt=prompt):
                 self.assert_rejected(options, prompt=prompt)
 
-    def test_pi_cannot_be_selected_as_callback_parent_in_public_commands(self):
+    def test_pi_is_a_valid_public_callback_parent(self):
+        session = str(self.directory / "pi-session.jsonl")
         for arguments in (
             ["run", "--", sys.executable, "-c", "pass"],
             ["done", "--exit-code", "0"],
-            ["doctor", "--operation", "agent", "--agent-worker", "pi"],
-            ["agent", "pi", "--", "inspect contract"],
         ):
             # Common options precede the remainder prompt or command.
             separator = arguments.index("--") if "--" in arguments else len(arguments)
             argv = ["ltc", *arguments[:separator], "--queue-dir", str(self.queue),
-                    "--agent", "pi", "--session", "invalid-pi-parent", *arguments[separator:]]
+                    "--agent", "pi", "--session", session, "--dry-run", *arguments[separator:]]
             with self.subTest(arguments=arguments), mock.patch.object(sys, "argv", argv), \
-                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as rejected:
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as stderr:
                 cli.main()
-            self.assertNotEqual(rejected.exception.code, 0)
+            self.assertIn(session, stderr.getvalue())
             self.assertFalse(cli.managed_tasks_root(self.queue).exists())
+
+    def test_doctor_for_a_pi_callback_parent_keeps_cli_resume_and_a_valid_repair_command(self):
+        session = str(self.directory / "pi-session.jsonl")
+        args = argparse.Namespace(
+            mode="run", operation="run", backend="screen", agent="pi", session=session, last=False,
+            queue_dir=str(self.queue), dry_run=False, task="fixture task",
+            wrapped_command=["/bin/true"], callback_mode="cli", _health_backend="screen",
+        )
+        with mock.patch.object(diagnostics, "queue_writable", return_value=True), \
+                mock.patch.object(diagnostics, "coordinator_issue", return_value={
+                    "code": "daemon_not_running", "action": "Start the coordinator for this queue."}), \
+                mock.patch.object(diagnostics, "runtime_issues", return_value=[]), \
+                mock.patch.object(diagnostics, "delivery_issues", return_value=[]), \
+                mock.patch.object(diagnostics.ScreenBackend, "available", return_value=True), \
+                mock.patch.object(diagnostics.callback_transport, "inspect_route",
+                                  return_value={"status": "ready", "mode": "cli", "transport": "cli_resume"}), \
+                mock.patch.object(diagnostics.shutil, "which", side_effect=lambda name: "/fixture/bin/" + name):
+            report = diagnostics.inspect(args)
+        self.assertEqual(report["callback"]["transport"], "cli_resume")
+        repair = report["repair_command"]
+        self.assertIsInstance(repair, list)
+        self.assertNotIn("--skill-target", repair)
+        self.assertEqual(repair[repair.index("--pi-bin") + 1], "/fixture/bin/pi")
+        recheck = report["recheck_command"]
+        self.assertEqual(recheck[recheck.index("--agent") + 1], "pi")
+        self.assertEqual(recheck[recheck.index("--session") + 1], session)
+
+    def fake_pi_callback(self):
+        script = self.directory / "fake Pi callback.py"
+        src_path = Path(cli.__file__).parents[1]
+        script.write_text(textwrap.dedent(f"""\
+            #!{sys.executable}
+            import json
+            import os
+            import subprocess
+            import sys
+            from pathlib import Path
+
+            payload = {{'argv': sys.argv[1:], 'cwd': os.getcwd(), 'prompt': sys.stdin.read()}}
+            Path(os.environ['LTC_TEST_PI_CALLBACK_CAPTURE']).write_text(
+                json.dumps(payload), encoding='utf-8')
+            os.environ['PYTHONPATH'] = {str(src_path)!r} + os.pathsep + os.environ.get('PYTHONPATH', '')
+            subprocess.run([sys.executable, '-m', 'long_task_callback', 'ack',
+                            '--queue-dir', os.environ['LTC_TEST_PI_CALLBACK_QUEUE'],
+                            '--id', os.environ['LTC_TEST_PI_CALLBACK_ID']], check=True)
+            raise SystemExit(0)
+            """), encoding="utf-8")
+        return executable_python_fixture(script)
+
+    def test_pi_callback_delivery_resumes_the_bound_session_file_with_the_prompt_on_stdin(self):
+        root = self.directory / "pi-callback-queue"
+        session = self.directory / "pi parent session.jsonl"
+        session.write_text('{"type":"session","version":3,"id":"1",'
+                           '"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}\n', encoding="utf-8")
+        capture = self.directory / "pi-callback-capture.json"
+        fake_pi = self.fake_pi_callback()
+        argv = ["ltc", "done", "--exit-code", "0", "--cwd", str(self.directory),
+                "--queue-dir", str(root), "--backend", "screen", "--callback-mode", "cli",
+                "--agent", "pi", "--session", str(session), "--task", "Pi callback fixture",
+                "--message", "Inspect the finished work."]
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(diagnostics, "emit_if_needed"), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            self.assertEqual(cli.main(), 0)
+        pending = list((root / "pending").glob("*.json"))
+        self.assertEqual(len(pending), 1)
+        request = cli.load_request(pending[0])
+        self.assertEqual(request["agent"], "pi")
+        self.assertEqual(request["target"], {"kind": "session", "value": str(session)})
+        self.assertIn("Bound session: " + str(session),
+                      Path(str(request["prompt_details_path"])).read_text(encoding="utf-8"))
+
+        environment = {
+            "LONG_TASK_WAKEUP_PI_BIN": str(fake_pi),
+            "LTC_TEST_PI_CALLBACK_CAPTURE": str(capture),
+            "LTC_TEST_PI_CALLBACK_QUEUE": str(root),
+            "LTC_TEST_PI_CALLBACK_ID": str(request["id"]),
+        }
+        args = argparse.Namespace(retries=3, retry_delay=0.0, retry_backoff=2.0, resume_timeout=15.0)
+        with mock.patch.dict(os.environ, environment), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertTrue(cli.process_one(root, args))
+
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            cli.reap_background_resumes()
+            if not cli._BACKGROUND_RESUMES:
+                break
+            time.sleep(0.05)
+        self.assertFalse(cli._BACKGROUND_RESUMES, "the delivery worker did not finish")
+        cli.recover_running(root)
+        self.assertTrue((root / "done" / f"{request['id']}.json").exists())
+        received = json.loads(capture.read_text(encoding="utf-8"))
+        self.assertEqual(received["argv"], ["--print", "--session", str(session)])
+        self.assertNotIn("--no-session", received["argv"])
+        self.assertEqual(received["cwd"], str(self.directory))
+        self.assertIn("[long-task-callback]", received["prompt"])
+        self.assertIn("Session: " + str(session) + " (only)", received["prompt"])
+        self.assertIn("Details: " + str(request["prompt_details_path"]) + " (read before acting)", received["prompt"])
+        self.assertIn("Inspect the finished work.",
+                      Path(str(request["prompt_details_path"])).read_text(encoding="utf-8"))
 
     def test_custom_pi_defaults_and_cli_overrides_do_not_leak_other_workers_settings(self):
         self.write_template("version: 3\nprompt: Review the published contract.\n"

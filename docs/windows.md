@@ -121,7 +121,7 @@ separate evidence.
 ## Submit and acknowledge
 
 Run from the original Agent conversation so the session can be detected, or pass
-its actual ID with `--agent codex|claude --session <original-session-id>`. Never
+its actual ID with `--agent codex|claude|pi --session <original-session-id>`. Never
 substitute `--last` or copy a Mac's session binding to Windows.
 
 ```powershell
@@ -136,7 +136,7 @@ These examples assume the invoking shell carries the original session binding.
 Use native executables with an argument list. Recognized npm and simple forwarding
 `.cmd` launchers are resolved without passing user arguments through `cmd.exe`.
 An unrecognized batch wrapper is rejected; configure its underlying executable
-with `--codex-bin` / `--claude-bin` or the corresponding Agent binary environment
+with `--codex-bin` / `--claude-bin` / `--pi-bin` or the corresponding Agent binary environment
 variable. For deliberate shell syntax, invoke the shell explicitly, for example
 `powershell.exe -NoProfile -Command <script>`.
 

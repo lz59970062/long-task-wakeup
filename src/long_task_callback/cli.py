@@ -52,6 +52,7 @@ from .agents.claude import (
     CLAUDE_BIN_ENV,
     CLAUDE_PERMISSION_MODE_ENV,
 )
+from .agents.pi import PI_BIN_ENV, PI_SESSION_FILE_ENV
 from .runtime import worker_command
 from .platforms import LaunchError, OwnerState, ScreenBackend, SystemdUserBackend, LaunchdBackend
 from .platforms import linux as linux_platform
@@ -300,6 +301,14 @@ def claude_bin_path(args: argparse.Namespace) -> str:
     return command or "claude"
 
 
+def pi_bin_path(args: argparse.Namespace) -> str:
+    pi_bin = getattr(args, "pi_bin", None)
+    if pi_bin:
+        return str(Path(pi_bin).expanduser())
+    command = shutil.which("pi")
+    return command or "pi"
+
+
 def report_claude_agent_readiness(args: argparse.Namespace) -> None:
     configured = claude_bin_path(args)
     command = shutil.which(configured)
@@ -340,6 +349,7 @@ def systemd_service_text(args: argparse.Namespace) -> str:
     exec_start = " ".join(systemd_quote(part) for part in command)
     codex_bin = codex_bin_path(args)
     claude_bin = claude_bin_path(args)
+    pi_bin = pi_bin_path(args)
     screen_bin = screen_binary() or "screen"
     path = args.path or os.environ.get("PATH", "")
     return "\n".join(
@@ -362,6 +372,7 @@ def systemd_service_text(args: argparse.Namespace) -> str:
             f"Environment={systemd_quote(f'PATH={path}')}",
             f"Environment={systemd_quote(f'CODEX_LONG_TASK_WAKEUP_CODEX_BIN={codex_bin}')}",
             f"Environment={systemd_quote(f'{CLAUDE_BIN_ENV}={claude_bin}')}",
+            f"Environment={systemd_quote(f'{PI_BIN_ENV}={pi_bin}')}",
             f"Environment={systemd_quote(f'{SCREEN_BIN_ENV}={screen_bin}')}",
             f"Environment={systemd_quote(f'{DESKTOP_APP_SERVER_ENV}=1')}",
             f"Environment={systemd_quote(f'{PROXY_ENV_FILE_ENV}={service_proxy_env_path()}')}",
@@ -880,6 +891,11 @@ def build_acknowledgement_text(command: str, agent: str = "codex") -> str:
         delivery_note = (
             "This resume runs Claude Code headless with automatic permission handling "
             "and grants the callback queue directory as an additional working directory."
+        )
+    elif agent == "pi":
+        delivery_note = (
+            "This resume runs PI Agent non-interactively in print mode against the bound "
+            "session file and supplies the callback prompt on stdin."
         )
     else:
         delivery_note = (
@@ -3832,12 +3848,12 @@ def add_common_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--agent",
         choices=AGENT_NAMES,
-        help="Agent to wake (default: auto-detect from $CLAUDECODE/$CLAUDE_CODE_SESSION_ID or $CODEX_THREAD_ID)",
+        help="Agent to wake (default: auto-detect from $PI_SESSION_FILE/$PI_SESSION_ID, $CLAUDECODE/$CLAUDE_CODE_SESSION_ID or $CODEX_THREAD_ID)",
     )
     target = parser.add_mutually_exclusive_group()
     target.add_argument(
         "--session",
-        help=f"Agent session id to resume (default: ${CLAUDE_THREAD_ID_ENV} or ${CODEX_THREAD_ID_ENV} from the launching agent thread)",
+        help=f"Agent session id to resume (default: ${PI_SESSION_FILE_ENV}, ${CLAUDE_THREAD_ID_ENV} or ${CODEX_THREAD_ID_ENV} from the launching agent thread)",
     )
     target.add_argument(
         "--last",
@@ -4305,6 +4321,7 @@ def daemon_environment(args: argparse.Namespace, *, include_proxy_values: bool =
         "PYTHONUNBUFFERED": "1",
         "CODEX_LONG_TASK_WAKEUP_CODEX_BIN": codex_bin_path(args),
         CLAUDE_BIN_ENV: claude_bin_path(args),
+        PI_BIN_ENV: pi_bin_path(args),
         SCREEN_BIN_ENV: screen_binary() or "screen",
         DESKTOP_APP_SERVER_ENV: os.environ.get(DESKTOP_APP_SERVER_ENV, "1"),
         "PATH": getattr(args, "path", None) or os.environ.get("PATH", ""),
@@ -4745,6 +4762,7 @@ def setup(args: argparse.Namespace) -> int:
         exec_start=args.exec_start,
         codex_bin=args.codex_bin,
         claude_bin=getattr(args, "claude_bin", None),
+        pi_bin=getattr(args, "pi_bin", None),
         path=args.path,
         proxy_env_file=getattr(args, "proxy_env_file", None),
         inherit_proxy=bool(getattr(args, "inherit_proxy", False)),
@@ -5417,6 +5435,7 @@ def main() -> int:
         service_parser.add_argument("--exec-start", help="Path to LTC executable")
         service_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
         service_parser.add_argument("--claude-bin", help="Path to claude executable used by the daemon")
+        service_parser.add_argument("--pi-bin", help="Path to the PI Agent executable used by the daemon")
         service_parser.add_argument("--path", help="PATH environment for the daemon service")
         add_proxy_environment_flags(service_parser)
         service_parser.add_argument("--force", action="store_true", help="Overwrite an existing service file")
@@ -5476,6 +5495,7 @@ def main() -> int:
     setup_parser.add_argument("--exec-start", help="Path to codex-long-task-wakeup executable")
     setup_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
     setup_parser.add_argument("--claude-bin", help="Path to claude executable used by the daemon")
+    setup_parser.add_argument("--pi-bin", help="Path to the PI Agent executable used by the daemon")
     setup_parser.add_argument("--path", help="PATH environment for the daemon service")
     add_proxy_environment_flags(setup_parser)
     setup_parser.add_argument("--force", action="store_true", help="Overwrite an existing skill and service file")

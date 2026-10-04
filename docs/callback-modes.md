@@ -14,6 +14,11 @@ an installed CLI, or an idle Agent turn does not prove that connection exists.
 | `--callback-mode desktop` | Requires an explicit shared Core; never falls back to an independent CLI writer | Desktop and LTC must access the same original conversation and its normal tools/approvals. |
 | `--callback-mode manual` | Runs the workload and saves a callback for later inspection; never automatically starts an Agent | User or original Agent reads results and ACKs receipt. A file by itself does not wake the Agent. |
 
+PI Agent callbacks always use CLI resume: PI has no shared-Core App Server, so
+`auto` never selects `desktop` for `--agent pi`, delivery runs
+`pi --print --session <session-file>`, and an explicit `desktop` mode is rejected
+before admission.
+
 For a new `run` or `agent`, a blocked Desktop preflight refuses admission before
 creating the task. The user can configure the bridge or explicitly choose
 `manual`. `done` reports work that already happened, so it preserves the callback

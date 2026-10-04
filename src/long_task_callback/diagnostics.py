@@ -357,12 +357,16 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
         issues.append({"code": "skill_missing", "action": "Install the bundled LTC skill for the selected Agent so it can inspect, acknowledge and continue callbacks."})
 
     repair = worker_command("setup", "--queue-dir", str(root), "--backend", choice,
-                            "--service", "auto", "--skill-target", callback_agent,
-                            "--keep-skill", "--force", "--now")
+                            "--service", "auto")
+    # PI Agent parents do not consume the bundled Codex/Claude skill; keep the
+    # setup default instead of emitting an unsupported --skill-target value.
+    if callback_agent in {"codex", "claude"}:
+        repair.extend(["--skill-target", callback_agent])
+    repair.extend(["--keep-skill", "--force", "--now"])
     if operation == "done":
         repair.append("--callback-only")
     for agent, executable in executables.items():
-        if agent in {"codex", "claude"}:
+        if agent in {"codex", "claude", "pi"}:
             repair.extend([f"--{agent}-bin", executable])
     recheck = worker_command("doctor", "--queue-dir", str(root), "--backend", choice,
                              "--agent", callback_agent, "--operation", operation)

@@ -1,6 +1,6 @@
 ---
 name: long-task-callback
-description: Submit durable Codex, Claude or Pi child agents using registered task templates, or arrange callbacks for long-running commands, training, benchmarks, tests, builds and data jobs. Use when independent task ownership or a return to the original Codex/Claude session is needed. Repair LTC configuration status blocks; inspect results, ACK callbacks and continue the original goal.
+description: Submit durable Codex, Claude or Pi child agents using registered task templates, or arrange callbacks for long-running commands, training, benchmarks, tests, builds and data jobs. Use when independent task ownership or a return to the original Codex, Claude Code or PI Agent session is needed. Repair LTC configuration status blocks; inspect results, ACK callbacks and continue the original goal.
 ---
 
 # Long Task Callback
@@ -14,7 +14,8 @@ There are three public workflows:
 
 - `ltc run -- <command>` submits a new long-running task. The daemon launches it through an independent task owner (systemd on Linux, launchd on macOS, Task Scheduler on Windows; screen fallback on Linux/macOS).
 - `ltc agent codex|claude|pi -- <prompt>` submits a fresh child agent through the same durable
-  lifecycle. Codex/Claude are available since `0.6.5`; Pi is a child worker in the current preview.
+  lifecycle. Codex/Claude are available since `0.6.5`; Pi is a child worker and callback
+  parent in the current preview.
 - `ltc done ...` queues a completion callback for work already owned by screen, tmux,
   Slurm, another scheduler, or an existing script.
 
@@ -131,8 +132,8 @@ After submission, record the task ID, execution backend and artifact paths, then
 return control. For long work, avoid polling processes or logs on a timer. Live
 monitoring is appropriate when requested or diagnosing callback infrastructure.
 Do not change a running task's owner or automatically retry an unknown native
-launch. Stable 0.7.0 does not include Pi/DSH; the current preview supports Pi children
-with callbacks to Codex or Claude. DSH remains unsupported.
+launch. Stable 0.7.0 does not include Pi/DSH; the current preview supports Pi both
+as a child worker and as a callback parent session. DSH remains unsupported.
 
 ## Duration policy
 
@@ -413,16 +414,24 @@ and other custom values must be available in the submission environment; never p
 For Pi, use `ltc doctor --operation agent --agent-worker pi` to check child readiness.
 `LONG_TASK_WAKEUP_PI_BIN` overrides the executable. LTC runs
 `pi --print --mode text --no-session` with prompt stdin and captures assistant text
-in the managed private result artifact. Pi is a child only: callback `--agent` remains
-`codex|claude`. Keep the submission-time Pi profile, authentication, API, proxy and
-extension configuration; remove Codex/Claude parent markers plus `PI_SESSION_ID`
-and `PI_SESSION_FILE`. Do not put credentials in prompts or persist a child session.
+in the managed private result artifact. Keep the submission-time Pi profile,
+authentication, API, proxy and extension configuration; remove Codex/Claude parent
+markers plus `PI_SESSION_ID`, `PI_SESSION_FILE` and `PI_CODING_AGENT`. Do not put
+credentials in prompts or persist a child session.
 `--model` accepts Pi's model notation, including `provider/model`; `--reasoning-effort`
 maps to `--thinking` and accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh`,
 and `max`, but rejects `ultra`. Tool permissions and project extension trust follow
 Pi's noninteractive configuration; do not add `--approve`. LTC's `--sandbox-mode`
 is Codex-only and `--permission-mode` is Claude-only. Pi 0.87.1's CLI contract was
 checked; native Windows/macOS Pi launch has not been verified in this session.
+
+Pi is also a callback parent (`--agent pi`). Inside Pi's shell tool, bind
+`PI_SESSION_FILE` (the absolute session JSONL), falling back to `PI_SESSION_ID` or
+the `PI_CODING_AGENT`/`AI_AGENT` markers. Callback delivery runs
+`pi --print --session <session-file>` in the task working directory and appends one
+callback turn from stdin to that exact persisted session; `--last` maps to
+`--continue`. An ephemeral `--no-session` session cannot be resumed, so ask for
+explicit `--session <file|id>`. `ltc setup --pi-bin` pins the daemon executable.
 
 Pi accepts `--system-prompt-file ./prompts/pi-system.md` before `--`. Keep this
 separate from `--template`/`--template-file`, which build the stdin task prompt.
@@ -478,9 +487,10 @@ finally:
 ## Session binding
 
 Run from the agent-owned environment and omit target flags by default. LTC detects
-`CODEX_THREAD_ID` or `CLAUDE_CODE_SESSION_ID`.
+`CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`, or Pi's `PI_SESSION_FILE`/`PI_SESSION_ID`.
 
-Use `--agent codex|claude --session <id>` when explicit binding is necessary. Use `--last` only as
+Use `--agent codex|claude|pi --session <id>` when explicit binding is necessary. For Pi,
+prefer the absolute session file from `PI_SESSION_FILE`. Use `--last` only as
 an unsafe manual fallback; it always warns. If the target cannot be determined, fail instead of
 guessing.
 
