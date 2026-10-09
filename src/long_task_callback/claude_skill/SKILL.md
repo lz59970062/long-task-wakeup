@@ -11,7 +11,8 @@ callback **in this live session** by running `ltc wait` as a background Bash com
 wakes you when a background command exits, and `ltc wait` exits as soon as the callback is ready.
 
 The full reference (all flags, platforms, recovery and goals) is in [REFERENCE.md](REFERENCE.md).
-Read it only when you need details beyond this page.
+Read it only when you need details beyond this page. It is shared with other agents; where it
+differs from this page about callback delivery, this page applies to Claude Code.
 
 ## When to use it
 
@@ -77,21 +78,22 @@ Read it only when you need details beyond this page.
   exit "$status"
   ```
 
-  The callback id is not known in advance, so start a background `ltc wait` with no filter: it
-  delivers the next callback bound to this session.
+  The callback id is not known in advance, so start a background `ltc wait` with no `--task`: it
+  delivers the next unacknowledged callback bound to this session.
 
 ## Rules
 
 - **Session binding is automatic** from `CLAUDE_CODE_SESSION_ID`. Never use `--last` or invent a
   session id. `ltc wait` refuses to run without a session.
-- **One callback per wait.** A wait exits after printing what it found. Start a new one for the next
-  task. A wait with `--task`/`--id` re-shows that callback if it was not ACKed yet; an unfiltered wait
-  skips callbacks already shown to a waiter.
+- **One wait, one wake-up.** A wait exits after printing what it found; start a new one for the next
+  task. Every unacknowledged callback of this session keeps coming back until you ACK it.
 - **If the session closes**, nothing is lost: when no waiter is alive, the LTC daemon falls back to a
   headless `claude -p --resume <session>` from the session's original directory. That fallback needs
   a signed-in standalone CLI; otherwise the callback stays queued and the next `ltc wait` from this
   session (or `ltc status`) picks it up. After a live delivery, the daemon waits 30 minutes for the
   ACK before it falls back.
+- `ltc wait` exists only for Claude Code. It refuses to run without `CLAUDE_CODE_SESSION_ID` and
+  never touches callbacks bound to other agents.
 - **Do not** call `claude -p --resume` yourself, add `--via-daemon`, or invent launch flags. Callback
   problems never change the task's own exit code unless the user asks for `--strict`.
 - **Long objectives with several stages**: use `ltc goal start|check|ack` with a YAML plan file, see

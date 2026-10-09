@@ -9,15 +9,20 @@ read the filesystem; they never launch Claude or change its configuration.
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
+import sys
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-from .agents.claude import CLAUDE_BIN_ENV
+from .agents.claude import CLAUDE_BIN_ENV, CLAUDE_THREAD_ID_ENV as SESSION_ENV
 
 EXECPATH_ENV = "CLAUDE_CODE_EXECPATH"
 ENTRYPOINT_ENV = "CLAUDE_CODE_ENTRYPOINT"
@@ -167,3 +172,195 @@ def resume_cwd(request: Mapping[str, object], environment: Mapping[str, str]) ->
         return None
     value = target.get("value")
     return session_project_cwd(value, environment) if isinstance(value, str) else None
+
+
+# Live delivery: `ltc wait` ---------------------------------------------------
+#
+# Claude Code wakes a live session when a background shell command exits. A
+# Claude session runs `ltc wait` in the background; it prints the session's
+# callback when one is queued and exits, which wakes that session. While a
+# waiter is alive the daemon leaves the session's callbacks alone. Only Claude
+# callbacks are ever touched here; other agents keep the normal daemon route.
+
+LIVE_ACK_GRACE_SECONDS = 30 * 60.0
+LIVE_WATCHER_DIR_NAME = "live-watchers"
+
+
+def _session_of(request: Mapping[str, object]) -> str | None:
+    target = request.get("target")
+    if request.get("agent") != "claude" or not isinstance(target, dict) or target.get("kind") != "session":
+        return None
+    value = target.get("value")
+    return value if isinstance(value, str) and value else None
+
+
+def live_watcher_dir(session: str) -> Path:
+    from . import cli
+
+    digest = hashlib.sha256(f"session:{session}".encode("utf-8")).hexdigest()
+    return cli.target_lock_dir() / LIVE_WATCHER_DIR_NAME / digest
+
+
+def register_live_watcher(session: str) -> tuple[object, Path]:
+    """Lock a uniquely named file; the OS releases it if the waiter dies.
+
+    The lock is taken under a staging name and renamed into place, so the
+    daemon never observes an unlocked live file.
+    """
+    from . import cli
+
+    directory = live_watcher_dir(session)
+    directory.mkdir(parents=True, exist_ok=True)
+    name = f"{os.getpid()}-{secrets.token_hex(6)}"
+    lock = cli.acquire_path_lock(directory / f".{name}.staging", blocking=False)
+    if lock is None:
+        raise RuntimeError("could not lock a fresh live waiter file")
+    handle, staging = lock
+    final = directory / f"{name}.lock"
+    os.replace(staging, final)
+    return handle, final
+
+
+def release_live_watcher(lock: tuple[object, Path]) -> None:
+    from . import cli
+
+    try:
+        lock[1].unlink()
+    except FileNotFoundError:
+        pass
+    cli.release_owner_lock(lock, remove=False)
+
+
+def live_watcher_is_held(request: Mapping[str, object]) -> bool:
+    """Daemon hook: whether a live waiter owns delivery for this Claude callback."""
+    from . import cli
+
+    session = _session_of(request)
+    if session is None:
+        return False
+    directory = live_watcher_dir(session)
+    if not directory.is_dir():
+        return False
+    held = False
+    for path in directory.glob("*.lock"):
+        lock = cli.acquire_path_lock(path, blocking=False)
+        if lock is None:
+            held = True
+        else:
+            release_live_watcher(lock)  # Its waiter exited; names are never reused.
+    return held
+
+
+def _claim(root: Path, path: Path) -> str | None:
+    """Move one callback through running/ and return the prompt to print."""
+    from . import cli
+
+    request_id = path.stem
+    delivery_lock = cli.acquire_owner_lock(root, cli.delivery_lock_id(request_id), blocking=False)
+    if delivery_lock is None:
+        return None
+    target_lock = None
+    running: Path | None = None
+    try:
+        try:
+            request = cli.load_request(path)
+        except FileNotFoundError:
+            return None
+        target_lock = cli.acquire_target_lock(request, blocking=False)
+        if target_lock is None:
+            return None  # The daemon is delivering to this session right now.
+        try:
+            running = cli.move_request(path, root / "running")
+        except FileNotFoundError:
+            return None
+        request = cli.load_request(running)
+        if cli.ack_path(root, request_id).exists() or cli.is_canceled(root, request_id):
+            return None  # The finally block returns it; the daemon finalizes it.
+        payload = {"prompt": str(request["prompt"]), "callback_hook_path": str(cli.callback_hook_path()),
+                   "request": request, "queue_dir": str(root)}
+        prompt = cli.select_delivery_prompt(payload)
+        now = time.time()
+        request["live_delivered_at"] = now
+        request["next_attempt_at"] = now + LIVE_ACK_GRACE_SECONDS
+        request["last_deferred_reason"] = "delivered to the live session by ltc wait; awaiting ACK"
+        cli.write_request(running, request)
+        return prompt
+    finally:
+        if running is not None and running.exists():
+            try:
+                cli.move_request(running, root / "pending")
+            except OSError as exc:
+                print(f"ltc: warning: could not return callback {request_id} to pending: {exc}", file=sys.stderr)
+        cli.release_owner_lock(target_lock, remove=False)
+        cli.release_owner_lock(delivery_lock, remove=False)
+
+
+def _matches(request: Mapping[str, object], session: str, task: str | None) -> bool:
+    return (_session_of(request) == session
+            and (task is None or request.get("managed_task_id") == task)
+            and request.get("retain_target_lease") is not True)
+
+
+def _task_already_acknowledged(root: Path, session: str, task: str) -> bool:
+    for path in (root / "done").glob("*.json"):
+        try:
+            request = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(request, dict) and _matches(request, session, task):
+            return True
+    return False
+
+
+def wait(args: argparse.Namespace) -> int:
+    """`ltc wait`: print this Claude session's unacknowledged callback(s), waiting if none yet.
+
+    A callback keeps being returned until it is ACKed. If the session closes,
+    the OS releases the waiter's lock and the daemon delivers as usual.
+    """
+    from . import cli
+
+    session = args.session or os.environ.get(SESSION_ENV, "").strip()
+    if not session:
+        print(f"ltc wait is only for Claude Code sessions: {SESSION_ENV} is unset. "
+              "Other agents receive callbacks from the daemon and should not run it.", file=sys.stderr)
+        return 2
+    root = cli.queue_dir(args).expanduser().absolute()
+    cli.ensure_daemon_dirs(root)
+    try:
+        if args.task and not cli.managed_task_path(root, args.task).exists():
+            raise ValueError(f"unknown task {args.task} in {root}")
+    except ValueError as exc:
+        print(f"ltc wait: {exc}", file=sys.stderr)
+        return 2
+    deadline = time.monotonic() + args.timeout if args.timeout else None
+    watcher = register_live_watcher(session)
+    print(f"ltc wait: watching Claude Code session {session}", file=sys.stderr)
+    try:
+        while True:
+            prompts = []
+            for state in ("pending", "failed"):
+                for path in sorted((root / state).glob("*.json")):
+                    try:
+                        request = json.loads(path.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        continue
+                    if (isinstance(request, dict) and _matches(request, session, args.task)
+                            and not cli.ack_path(root, path.stem).exists()):
+                        prompt = _claim(root, path)
+                        if prompt is not None:
+                            prompts.append(prompt)
+            if prompts:
+                print("\n\n".join(prompts), flush=True)
+                return 0
+            if args.task and _task_already_acknowledged(root, session, args.task):
+                print(f"ltc wait: task {args.task}'s callback is already acknowledged", file=sys.stderr)
+                return 0
+            if deadline is not None and time.monotonic() >= deadline:
+                print("ltc wait: timed out; the callback will still be delivered when it arrives", file=sys.stderr)
+                return 3
+            time.sleep(max(0.05, args.poll_interval))
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        release_live_watcher(watcher)

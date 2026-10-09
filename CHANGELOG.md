@@ -4,18 +4,19 @@
 
 ### Claude Code
 
-- Add `ltc wait [--task ID | --id ID]`. Run in the background from Claude Code, it registers a live
-  waiter for the bound session, claims that session's callback when it is queued, prints it and
-  exits, so Claude Code wakes the conversation that is actually open. The daemon skips headless
-  delivery while a waiter is alive and, after a live delivery, waits `--ack-grace` (default 30 min)
-  for the ACK before its normal retries. `ltc ack` finishes a live-delivered callback immediately.
+- Add `ltc wait [--task ID]` for Claude Code only. Run in the background from a Claude Code session,
+  it prints that session's unacknowledged callback when it is queued and exits, so Claude Code wakes
+  the conversation that is actually open. While a waiter is alive the daemon leaves that session's
+  Claude callbacks alone; after a live delivery it waits 30 minutes for the ACK before its normal
+  retries. It refuses to run outside Claude Code and never touches other agents' callbacks. All
+  Claude-specific logic lives in `claude_code.py`.
 - Find Claude Code when `claude` is not on PATH (Claude desktop app, launchd/systemd services):
   standalone install locations, `CLAUDE_CODE_EXECPATH`, and the newest desktop-app bundle. A
   configured desktop-bundle path that disappears after an app update is rediscovered.
 - Start headless `claude -p --resume` in the session's original directory, read from the session
   transcript, instead of the task's `--cwd`.
-- Install a focused Claude skill (`SKILL.md`, built around `ltc wait`) with the full skill as
-  `REFERENCE.md`. Codex keeps the existing skill.
+- Install a separate skill per agent: Claude gets a focused `SKILL.md` built around `ltc wait` plus
+  the shared full skill as `REFERENCE.md`; the Codex skill does not mention `ltc wait`.
 - `doctor`/health checks no longer report Claude as unavailable when only discovery finds it; the
   report gains a `claude_code` block describing the live and headless routes, and a Claude child
   backed only by the desktop bundle is reported as `child_agent_desktop_only`.

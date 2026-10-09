@@ -66,9 +66,6 @@ DEFAULT_RETRIES = 3
 DEFAULT_RETRY_DELAY = 30.0
 DEFAULT_RETRY_BACKOFF = 2.0
 DEFAULT_RESUME_TIMEOUT = 3600.0
-DEFAULT_LIVE_ACK_GRACE = 30 * 60.0
-DEFAULT_WAIT_POLL_INTERVAL = 1.0
-LIVE_WATCHER_DIR_NAME = "live-watchers"
 MANAGED_WORKER_TOKEN_PREFIX = "ltc_"
 MANAGED_WORKER_HANDSHAKE_SECONDS = 1.0
 MANAGED_LAUNCH_MAX_ATTEMPTS = 3
@@ -1195,7 +1192,7 @@ def select_pending(root: Path, now: float) -> Path | None:
             return path
         if isinstance(request, dict) and (request.get("callback_mode") == "manual"
                                          or target_has_live_resume(root, request)
-                                         or live_watcher_is_held(request)):
+                                         or claude_code.live_watcher_is_held(request)):
             continue
         return path
     return None
@@ -4765,228 +4762,6 @@ def ack(args: argparse.Namespace) -> int:
     return 0
 
 
-def live_watcher_dir(request: dict[str, object]) -> Path | None:
-    key = callback_target_key(request)
-    if key is None or not key.startswith("session:"):
-        return None
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-    return target_lock_dir() / LIVE_WATCHER_DIR_NAME / digest
-
-
-def register_live_watcher(request: dict[str, object]) -> tuple[object, Path]:
-    """Announce a session-owned waiter so the daemon leaves delivery to it.
-
-    The lock is taken under a private name and renamed into place, so a
-    daemon probing the directory can never observe an unlocked live file.
-    """
-    directory = live_watcher_dir(request)
-    if directory is None:
-        raise ValueError("a live waiter requires a session target")
-    directory.mkdir(parents=True, exist_ok=True)
-    name = f"{os.getpid()}-{secrets.token_hex(6)}"
-    staging = directory / f".{name}.staging"
-    lock = acquire_path_lock(staging, blocking=False)
-    if lock is None:
-        raise RuntimeError("could not lock a fresh live waiter file")
-    handle, _ = lock
-    final = directory / f"{name}.lock"
-    os.replace(staging, final)
-    return handle, final
-
-
-def release_live_watcher(lock: tuple[object, Path] | None) -> None:
-    if lock is None:
-        return
-    _, path = lock
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
-    release_owner_lock(lock, remove=False)
-
-
-def live_watcher_is_held(request: dict[str, object]) -> bool:
-    directory = live_watcher_dir(request)
-    if directory is None or not directory.is_dir():
-        return False
-    held = False
-    for path in directory.glob("*.lock"):
-        lock = acquire_path_lock(path, blocking=False)
-        if lock is None:
-            held = True
-            continue
-        # The owner exited without cleanup. Each waiter uses a unique name, so
-        # removing its file cannot split a lock that another process relies on.
-        release_live_watcher(lock)
-    return held
-
-
-def live_candidate(request: dict[str, object], session: str, args: argparse.Namespace) -> bool:
-    if callback_target_key(request) != f"session:{session}":
-        return False
-    if args.id and request.get("id") != args.id:
-        return False
-    if args.task and request.get("managed_task_id") != args.task:
-        return False
-    if request.get("retain_target_lease") is True:
-        return False  # An unknown earlier submission must be inspected first.
-    if not (args.id or args.task) and request.get("live_delivered_at"):
-        return False  # Already shown to a waiter; only an explicit filter repeats it.
-    return True
-
-
-def claim_live_callback(root: Path, path: Path, grace: float) -> str | None:
-    """Move one callback through running/ and return its prompt for this session."""
-    request_id = path.stem
-    delivery_lock = acquire_owner_lock(root, delivery_lock_id(request_id), blocking=False)
-    if delivery_lock is None:
-        return None
-    target_lock: tuple[object, Path] | None = None
-    running: Path | None = None
-    try:
-        try:
-            request = load_request(path)
-        except FileNotFoundError:
-            return None
-        target_lock = acquire_target_lock(request, blocking=False)
-        if target_lock is None or retained_target_lease_is_held(request):
-            return None  # The daemon is delivering to this session right now.
-        try:
-            running = move_request(path, root / "running")
-        except FileNotFoundError:
-            return None
-        request = load_request(running)
-        if ack_path(root, request_id).exists():
-            move_request(running, root / "done")
-            running = None
-            return None
-        if is_canceled(root, request_id):
-            remove_live_request_copies(root, request_id)
-            running = None
-            return None
-        payload = {
-            "prompt": str(request["prompt"]),
-            "callback_hook_path": str(callback_hook_path()),
-            "request": request,
-            "queue_dir": str(root),
-        }
-        prompt = select_delivery_prompt(payload)
-        now = time.time()
-        history = request.get("live_deliveries")
-        history = history if isinstance(history, list) else []
-        history.append({"at": now, "pid": os.getpid()})
-        request["live_deliveries"] = history[-10:]
-        request["live_delivered_at"] = now
-        request["next_attempt_at"] = now + grace
-        request["last_deferred_reason"] = "delivered to the live session by ltc wait; awaiting ACK"
-        write_request(running, request)
-        move_request(running, root / "pending")
-        running = None
-        return prompt
-    finally:
-        if running is not None and running.exists():
-            try:
-                move_request(running, root / "pending")
-            except (OSError, FileExistsError) as exc:
-                print(f"ltc: warning: could not return callback {request_id} to pending: {exc}", file=sys.stderr)
-        release_owner_lock(target_lock, remove=False)
-        release_owner_lock(delivery_lock, remove=False)
-
-
-def finished_live_target(root: Path, session: str, args: argparse.Namespace) -> str | None:
-    """Report an explicitly requested callback that no waiter can still deliver."""
-    if not (args.id or args.task):
-        return None
-    for state in ("done", "canceled"):
-        for path in (root / state).glob("*.json"):
-            try:
-                request = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if isinstance(request, dict) and callback_target_key(request) == f"session:{session}" and (
-                request.get("id") == args.id or (args.task and request.get("managed_task_id") == args.task)
-            ):
-                return f"callback {request.get('id')} is already {'acknowledged' if state == 'done' else 'canceled'}"
-    return None
-
-
-def wait_session(args: argparse.Namespace) -> str:
-    if args.session:
-        return args.session
-    agent = resolve_agent(args)
-    session = os.environ.get(get_agent(agent).session_id_env, "").strip()
-    if not session:
-        raise SystemExit(
-            f"ltc wait: cannot determine the session: {get_agent(agent).session_id_env} is unset. "
-            "Run it from the agent session that submitted the task, or pass --session <id>."
-        )
-    return session
-
-
-def wait_for_callback(args: argparse.Namespace) -> int:
-    """Block until a callback for this session is queued, then print it.
-
-    Claude Code wakes a live session when a background shell command exits.
-    Running this command in the background therefore delivers the callback to
-    the conversation the user is looking at, instead of a headless resume the
-    open session never displays. The daemon stays the fallback: once the
-    waiter exits without an ACK, the normal retry policy resumes after
-    ``--ack-grace`` seconds.
-    """
-    root = queue_dir(args).expanduser().absolute()
-    ensure_daemon_dirs(root)
-    session = wait_session(args)
-    try:
-        if args.task and not managed_task_path(root, args.task).exists():
-            raise ValueError(f"unknown task {args.task} in {root}")
-        if args.id and not re.fullmatch(r"[A-Za-z0-9_-]+", args.id):
-            raise ValueError("invalid callback id")
-    except ValueError as exc:
-        print(f"ltc wait: {exc}", file=sys.stderr)
-        return 2
-    grace = max(0.0, float(args.ack_grace))
-    interval = max(0.05, float(args.poll_interval))
-    deadline = time.monotonic() + float(args.timeout) if args.timeout else None
-    target = {"kind": "session", "value": session}
-    watcher = register_live_watcher({"target": target})
-    print(f"ltc wait: watching session {session} for callbacks in {root}", file=sys.stderr)
-    next_finished_check = 0.0
-    try:
-        while True:
-            prompts: list[str] = []
-            for state in ("pending", "failed"):
-                for path in sorted((root / state).glob("*.json")):
-                    try:
-                        request = json.loads(path.read_text(encoding="utf-8"))
-                    except Exception:
-                        continue
-                    if not isinstance(request, dict) or not live_candidate(request, session, args):
-                        continue
-                    if ack_path(root, str(request.get("id", path.stem))).exists():
-                        continue
-                    prompt = claim_live_callback(root, path, grace)
-                    if prompt is not None:
-                        prompts.append(prompt)
-            if prompts:
-                print("\n\n".join(prompts), flush=True)
-                return 0
-            finished = None
-            if time.monotonic() >= next_finished_check:
-                next_finished_check = time.monotonic() + 15.0
-                finished = finished_live_target(root, session, args)
-            if finished:
-                print(f"ltc wait: {finished}; nothing to wait for", file=sys.stderr)
-                return 0
-            if deadline is not None and time.monotonic() >= deadline:
-                print("ltc wait: timed out; the daemon will deliver the callback if it arrives later", file=sys.stderr)
-                return 3
-            time.sleep(interval)
-    except KeyboardInterrupt:
-        return 130
-    finally:
-        release_live_watcher(watcher)
-
-
 def retry_callback(args: argparse.Namespace) -> int:
     """Requeue a known callback; never resubmit its completed workload."""
     root = queue_dir(args).expanduser().absolute()
@@ -5642,20 +5417,13 @@ def main() -> int:
 
     wait_parser = sub.add_parser(
         "wait",
-        help="Block until this session's callback is queued, then print it (run in the background from Claude Code)",
+        help="Claude Code only: block until this session's callback is ready, then print it (run in the background)",
     )
     wait_parser.add_argument("--queue-dir", help="Wakeup queue directory")
-    wait_parser.add_argument("--agent", choices=AGENT_NAMES, help="Agent whose session id to detect (default: auto-detect)")
-    wait_parser.add_argument("--session", help="Session id to watch (default: the launching agent session)")
-    wait_target = wait_parser.add_mutually_exclusive_group()
-    wait_target.add_argument("--task", help="Only wait for this managed task's callback")
-    wait_target.add_argument("--id", help="Only wait for this callback id")
-    wait_parser.add_argument("--timeout", type=float, help="Give up after this many seconds (exit 3; default: wait indefinitely)")
-    wait_parser.add_argument("--poll-interval", type=float, default=DEFAULT_WAIT_POLL_INTERVAL, help=argparse.SUPPRESS)
-    wait_parser.add_argument(
-        "--ack-grace", type=float, default=DEFAULT_LIVE_ACK_GRACE,
-        help="Seconds the daemon waits for an ACK before falling back to headless delivery (default: 1800)",
-    )
+    wait_parser.add_argument("--task", help="Only wait for this managed task's callback")
+    wait_parser.add_argument("--session", help="Claude Code session id (default: $CLAUDE_CODE_SESSION_ID)")
+    wait_parser.add_argument("--timeout", type=float, help="Give up after this many seconds (exit 3)")
+    wait_parser.add_argument("--poll-interval", type=float, default=1.0, help=argparse.SUPPRESS)
 
     ack_parser = sub.add_parser("ack", help="Mark a daemon callback as successfully received")
     ack_parser.add_argument("--queue-dir", help="Wakeup queue directory")
@@ -5774,7 +5542,7 @@ def main() -> int:
     if args.mode == "ack":
         return ack(args)
     if args.mode == "wait":
-        return wait_for_callback(args)
+        return claude_code.wait(args)
     if args.mode == "goal":
         if args.goal_mode == "start":
             return goal_start(args)

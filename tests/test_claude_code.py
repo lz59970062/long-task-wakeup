@@ -153,9 +153,9 @@ class LiveWaiterTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         cli.ensure_daemon_dirs(self.root)
 
-    def enqueue(self, ident: str, *, session: str = SESSION, **extra: object) -> Path:
+    def enqueue(self, ident: str, *, session: str = SESSION, agent: str = "claude", **extra: object) -> Path:
         args = argparse.Namespace(
-            agent="claude", session=session, last=False, task="train model", cwd=str(self.directory),
+            agent=agent, session=session, last=False, task="train model", cwd=str(self.directory),
             command="python train.py", exit_code=0, message=None, queue_dir=str(self.root), _callback_id=ident,
         )
         prompt = cli.build_prompt(args, duration=12.0)
@@ -165,42 +165,53 @@ class LiveWaiterTests(unittest.TestCase):
             self.assertEqual(cli.enqueue_existing_request(self.root, request, prompt), 0)
         return cli.request_path(self.root, "pending", ident)
 
-    def wait_args(self, **overrides: object) -> argparse.Namespace:
-        values = dict(queue_dir=str(self.root), agent="claude", session=SESSION, task=None, id=None,
-                      timeout=None, poll_interval=0.05, ack_grace=600.0)
-        values.update(overrides)
-        return argparse.Namespace(**values)
-
     def run_wait(self, **overrides: object) -> tuple[int, str, str]:
+        values = dict(queue_dir=str(self.root), session=SESSION, task=None, timeout=None, poll_interval=0.05)
+        values.update(overrides)
         stdout, stderr = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            status = cli.wait_for_callback(self.wait_args(**overrides))
+            status = claude_code.wait(argparse.Namespace(**values))
         return status, stdout.getvalue(), stderr.getvalue()
 
-    def test_watcher_registration_is_visible_and_stale_files_are_cleaned(self) -> None:
-        request = {"target": {"kind": "session", "value": SESSION}}
-        self.assertFalse(cli.live_watcher_is_held(request))
-        watcher = cli.register_live_watcher(request)
-        self.assertTrue(cli.live_watcher_is_held(request))
-        self.assertFalse(cli.live_watcher_is_held({"target": {"kind": "session", "value": "other"}}))
-        cli.release_live_watcher(watcher)
-        self.assertFalse(cli.live_watcher_is_held(request))
-        stale = cli.live_watcher_dir(request) / "999-dead.lock"
-        stale.write_text("", encoding="utf-8")
-        self.assertFalse(cli.live_watcher_is_held(request))
-        self.assertFalse(stale.exists())
-        with self.assertRaises(ValueError):
-            cli.register_live_watcher({"target": {"kind": "last"}})
+    def ack(self, ident: str) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            cli.ack(argparse.Namespace(queue_dir=str(self.root), id=ident, message=None))
 
-    def test_daemon_leaves_callbacks_to_a_live_waiter(self) -> None:
-        pending = self.enqueue("cb-live")
-        self.assertEqual(cli.select_pending(self.root, time.time()), pending)
-        watcher = cli.register_live_watcher({"target": {"kind": "session", "value": SESSION}})
+    def test_watcher_registration_is_visible_only_for_claude_and_stale_files_are_cleaned(self) -> None:
+        claude = {"agent": "claude", "target": {"kind": "session", "value": SESSION}}
+        codex = dict(claude, agent="codex")
+        self.assertFalse(claude_code.live_watcher_is_held(claude))
+        watcher = claude_code.register_live_watcher(SESSION)
+        self.assertTrue(claude_code.live_watcher_is_held(claude))
+        self.assertFalse(claude_code.live_watcher_is_held(codex))
+        claude_code.release_live_watcher(watcher)
+        self.assertFalse(claude_code.live_watcher_is_held(claude))
+        stale = claude_code.live_watcher_dir(SESSION) / "999-dead.lock"
+        stale.write_text("", encoding="utf-8")
+        self.assertFalse(claude_code.live_watcher_is_held(claude))
+        self.assertFalse(stale.exists())
+
+    def test_daemon_leaves_only_claude_callbacks_to_a_live_waiter(self) -> None:
+        claude = self.enqueue("cb-claude")
+        codex = self.enqueue("cb-codex", agent="codex")
+        watcher = claude_code.register_live_watcher(SESSION)
         try:
+            self.assertEqual(cli.select_pending(self.root, time.time()), codex)
+            codex.unlink()
             self.assertIsNone(cli.select_pending(self.root, time.time()))
         finally:
-            cli.release_live_watcher(watcher)
-        self.assertEqual(cli.select_pending(self.root, time.time()), pending)
+            claude_code.release_live_watcher(watcher)
+        self.assertEqual(cli.select_pending(self.root, time.time()), claude)
+
+    def test_wait_refuses_outside_claude_code_and_never_claims_other_agents(self) -> None:
+        self.enqueue("cb-codex", agent="codex")
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": SESSION}):
+            os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+            status, output, errors = self.run_wait(session=None)
+        self.assertEqual((status, output), (2, ""))
+        self.assertIn("only for Claude Code", errors)
+        self.assertEqual(self.run_wait(timeout=0.2)[0], 3)
+        self.assertTrue(cli.request_path(self.root, "pending", "cb-codex").exists())
 
     def test_wait_prints_callback_defers_daemon_and_ack_finishes_it(self) -> None:
         self.enqueue("cb-other", session="another-session")
@@ -213,27 +224,25 @@ class LiveWaiterTests(unittest.TestCase):
 
         pending = cli.request_path(self.root, "pending", "cb-1")
         request = json.loads(pending.read_text(encoding="utf-8"))
-        self.assertGreater(request["next_attempt_at"], time.time() + 500)
-        self.assertEqual(len(request["live_deliveries"]), 1)
+        self.assertGreater(request["next_attempt_at"], time.time() + 1000)
         self.assertEqual(cli.select_pending(self.root, time.time()).stem, "cb-other")
         self.assertFalse(any((self.root / "running").glob("*.json")))
 
-        with contextlib.redirect_stderr(io.StringIO()):
-            cli.ack(argparse.Namespace(queue_dir=str(self.root), id="cb-1", message=None))
+        self.ack("cb-1")
         self.assertTrue(cli.request_path(self.root, "done", "cb-1").exists())
         self.assertFalse(pending.exists())
 
-    def test_unfiltered_wait_does_not_repeat_a_delivered_callback(self) -> None:
+    def test_unacknowledged_callback_comes_back_until_acked(self) -> None:
         self.enqueue("cb-1")
         self.assertEqual(self.run_wait()[0], 0)
-        self.assertEqual(self.run_wait(timeout=0.2)[0], 3)
-        status, output, _ = self.run_wait(id="cb-1")
+        status, output, _ = self.run_wait()
         self.assertEqual(status, 0)
         self.assertIn("cb-1", output)
+        self.ack("cb-1")
+        self.assertEqual(self.run_wait(timeout=0.2)[0], 3)
 
-    def test_wait_filters_by_task_and_reports_finished_targets(self) -> None:
-        task_dir = cli.managed_task_dir(self.root, "abcd1234")
-        task_dir.mkdir(parents=True)
+    def test_wait_filters_by_task_and_reports_acknowledged_task(self) -> None:
+        cli.managed_task_dir(self.root, "abcd1234").mkdir(parents=True)
         cli.managed_task_path(self.root, "abcd1234").write_text("{}", encoding="utf-8")
         self.enqueue("cb-unrelated", managed_task_id="ffff0000")
         self.enqueue("cb-task", managed_task_id="abcd1234")
@@ -242,18 +251,14 @@ class LiveWaiterTests(unittest.TestCase):
         self.assertIn("cb-task", output)
         self.assertNotIn("cb-unrelated", output)
 
-        with contextlib.redirect_stderr(io.StringIO()):
-            cli.ack(argparse.Namespace(queue_dir=str(self.root), id="cb-task", message=None))
+        self.ack("cb-task")
         status, output, errors = self.run_wait(task="abcd1234")
         self.assertEqual((status, output), (0, ""))
         self.assertIn("already acknowledged", errors)
-
         self.assertEqual(self.run_wait(task="00000000")[0], 2)
-        self.assertEqual(self.run_wait(id="../bad")[0], 2)
 
     def test_wait_recovers_a_callback_whose_headless_retries_failed(self) -> None:
-        pending = self.enqueue("cb-failed")
-        cli.move_request(pending, self.root / "failed")
+        cli.move_request(self.enqueue("cb-failed"), self.root / "failed")
         status, output, _ = self.run_wait()
         self.assertEqual(status, 0)
         self.assertIn("cb-failed", output)
@@ -271,16 +276,15 @@ class LiveWaiterTests(unittest.TestCase):
     def test_background_waiter_process_wakes_when_callback_arrives(self) -> None:
         environment = dict(os.environ, PYTHONPATH=SRC + os.pathsep + os.environ.get("PYTHONPATH", ""),
                            CLAUDE_CODE_SESSION_ID=SESSION, CLAUDECODE="1")
-        environment.pop("CODEX_THREAD_ID", None)
         process = subprocess.Popen(
             [sys.executable, "-m", "long_task_callback", "wait", "--queue-dir", str(self.root),
              "--poll-interval", "0.05", "--timeout", "30"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
         )
+        request = {"agent": "claude", "target": {"kind": "session", "value": SESSION}}
         try:
-            request = {"target": {"kind": "session", "value": SESSION}}
             deadline = time.monotonic() + 10
-            while not cli.live_watcher_is_held(request):
+            while not claude_code.live_watcher_is_held(request):
                 if process.poll() is not None:
                     self.fail("waiter exited early: " + process.communicate()[1])
                 self.assertLess(time.monotonic(), deadline, "waiter never registered")
@@ -294,7 +298,7 @@ class LiveWaiterTests(unittest.TestCase):
                 process.communicate()
         self.assertEqual(process.returncode, 0, stderr)
         self.assertIn("[long-task-callback] cb-async", stdout)
-        self.assertFalse(cli.live_watcher_is_held({"target": {"kind": "session", "value": SESSION}}))
+        self.assertFalse(claude_code.live_watcher_is_held(request))
 
 
 class ControlCommandTests(unittest.TestCase):
