@@ -989,15 +989,16 @@ class CliTests(unittest.TestCase):
         self.assertEqual(request["permission_mode"], "auto")
 
     def test_claude_resume_command_shape(self) -> None:
-        command = cli.resume_command(
-            {
-                "agent": "claude",
-                "target": {"kind": "session", "value": "claude-session-1"},
-                "cwd": "/tmp",
-                "prompt": "hello",
-                "queue_dir": "/tmp/callback-queue",
-            }
-        )
+        with mock.patch.object(cli.claude_code, "discover_executable", return_value=None):
+            command = cli.resume_command(
+                {
+                    "agent": "claude",
+                    "target": {"kind": "session", "value": "claude-session-1"},
+                    "cwd": "/tmp",
+                    "prompt": "hello",
+                    "queue_dir": "/tmp/callback-queue",
+                }
+            )
 
         self.assertEqual(
             command,
@@ -1094,6 +1095,11 @@ class CliTests(unittest.TestCase):
             self.assertTrue((codex_skill / "agents" / "openai.yaml").exists())
             self.assertTrue((claude_skill / "SKILL.md").exists())
             self.assertFalse((claude_skill / "agents").exists())
+            self.assertIn("ltc wait", (claude_skill / "SKILL.md").read_text(encoding="utf-8"))
+            self.assertEqual(
+                (claude_skill / "REFERENCE.md").read_text(encoding="utf-8"),
+                (codex_skill / "SKILL.md").read_text(encoding="utf-8"),
+            )
 
     def test_install_skill_single_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

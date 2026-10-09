@@ -17,7 +17,7 @@ import sys
 import tempfile
 import time
 
-from . import __version__, callback_transport
+from . import __version__, callback_transport, claude_code
 from .agents import get_agent
 from .platforms import posix, windows_io
 from .platforms import OwnerState
@@ -315,7 +315,7 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
     callback_agent = cli.resolve_agent(args)
     adapter = get_agent(callback_agent)
     executables: dict[str, str] = {}
-    callback_executable = shutil.which(adapter.executable(os.environ))
+    callback_executable = shutil.which(adapter.executable(cli.agent_environment(callback_agent)))
     if callback_executable is None:
         issues.append({"code": "callback_agent_unavailable", "action": "Make the selected callback Agent CLI available in the coordinator's environment."})
     else:
@@ -324,9 +324,13 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
     if operation == "agent" and not child_agent:
         issues.append({"code": "child_agent_unspecified", "action": "Pass --agent-worker with the actual intended child Agent to check delegated-task readiness."})
     if operation == "agent" and child_agent:
-        child_executable = shutil.which(get_agent(child_agent).executable(os.environ))
+        child_executable = shutil.which(get_agent(child_agent).executable(cli.agent_environment(child_agent)))
         if child_executable is None:
             issues.append({"code": "child_agent_unavailable", "action": "Install or configure the selected child Agent CLI before executing this delegated task."})
+        elif child_agent == "claude" and claude_code.is_desktop_bundle(child_executable):
+            issues.append({"code": "child_agent_desktop_only", "action": (
+                "Only the Claude desktop app's bundled CLI was found; it cannot sign in outside the app. "
+                "Install the standalone Claude Code CLI and run `claude auth login` before delegating to a Claude child.")})
         else:
             executables[child_agent] = child_executable
 
@@ -387,7 +391,7 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
     bootstrap_codes = {"daemon_not_running", "daemon_version_mismatch", "skill_missing"}
     if issues and not any(issue["kind"] == "configuration" or issue["code"] in bootstrap_codes for issue in issues):
         repair = None
-    return {
+    report: dict[str, object] = {
         "schema": SCHEMA,
         "status": "needs_configuration" if issues else "ready",
         "scope": "local_prerequisites",
@@ -402,6 +406,24 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
         "repair_command": repair,
         "recheck_command": recheck,
         "instruction": INSTRUCTION,
+    }
+    if callback_agent == "claude":
+        report["claude_code"] = claude_code_profile(callback_executable)
+    return report
+
+
+def claude_code_profile(executable: str | None) -> dict[str, object]:
+    """Explain Claude's two callback routes; a live session needs no extra CLI."""
+    desktop_only = executable is not None and claude_code.is_desktop_bundle(executable)
+    return {
+        "executable": executable,
+        "desktop_session": claude_code.is_desktop_session(os.environ),
+        "live_callback": "Run `ltc wait --task <id>` with run_in_background; it wakes this session when the callback is queued.",
+        "headless_fallback": (
+            "unavailable: no Claude CLI found" if executable is None
+            else "needs a standalone Claude CLI signed in with `claude auth login`" if desktop_only
+            else "uses this CLI from the session's original directory; it must be signed in"
+        ),
     }
 
 

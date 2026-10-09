@@ -65,6 +65,7 @@ Session: <session-id> (only)
 | 🛌 **No polling** | The worker and daemon wait for you. No model turns are spent while the task runs. |
 | 🔁 **Same conversation** | Callbacks are bound to the original Codex (`CODEX_THREAD_ID`) or Claude Code (`CLAUDE_CODE_SESSION_ID`) session — never a guess. |
 | 🧱 **Survives the agent** | Tasks run under systemd, launchd or Task Scheduler — not as a child of the agent turn or even the daemon. |
+| ⚡ **Claude Code native** | In Claude Code (CLI or desktop app), a background `ltc wait` wakes the conversation you're looking at — no headless side session. → [Claude Code guide](docs/claude-code.md) |
 | 🤖 **Child agents** | `ltc agent codex\|claude` launches a fresh agent as a durable background job, with reusable prompt templates. |
 | 🎯 **Multi-stage goals** | Track an objective across many callbacks with a YAML plan that the agent must verify before declaring victory. |
 | 🛡️ **Never reruns blindly** | Ambiguous launches, reboots and failures are reported to the agent for inspection — LTC never silently replays work. |
@@ -173,6 +174,20 @@ Returns as soon as the task is durable, printing the task ID, backend and log fi
 tail -f ~/.codex/long-task-wakeup/tasks/<task-id>/attempt-1.log
 ```
 
+### Claude Code: wake the live session
+
+Claude Code wakes a session when a background shell command exits. After `ltc run`, it prints the
+exact command to run with `run_in_background`:
+
+```bash
+ltc wait --queue-dir ~/.codex/long-task-wakeup/queue --task <task-id>
+```
+
+`ltc wait` exits — and the session wakes up — as soon as the callback is queued. While a waiter is
+alive the daemon stays out of the way; if the session is gone, the daemon falls back to a headless
+`claude -p --resume` from the session's original directory. The installed Claude skill teaches
+Claude to do this on its own. → [Claude Code guide](docs/claude-code.md)
+
 ### `agent` — delegate to a background child agent
 
 ```bash
@@ -204,6 +219,7 @@ queues the callback — it doesn't make the preceding process durable.
 ### Acknowledge, inspect, cancel
 
 ```bash
+ltc wait --task <task-id>         # (Claude Code) block until the callback is ready, then print it
 ltc ack --id <callback-id>        # confirm a callback was received and inspected
 ltc status                        # list callbacks that still need handling
 ltc cancel --id <callback-id>     # cancel a queued callback
@@ -282,6 +298,7 @@ Use `--service standalone --now` where user systemd is unavailable (e.g. AutoDL)
 
 | Topic | |
 | --- | --- |
+| Claude Code: live callbacks, binary discovery, session directories | [docs/claude-code.md](docs/claude-code.md) |
 | Agent mode, templates, Claude Code config | [docs/agent-mode.md](docs/agent-mode.md) |
 | Goals and acknowledgement layers | [docs/goals.md](docs/goals.md) |
 | Callback format, reminder cadence, user hook | [docs/callback-reminders.md](docs/callback-reminders.md) |
@@ -298,6 +315,7 @@ Use `--service standalone --now` where user systemd is unavailable (e.g. AutoDL)
 - [x] Native task owners on Linux, macOS and Windows (0.7.0)
 - [x] Fresh child agents with templates (0.6.5)
 - [ ] Explicit callback modes and Desktop shared Core (0.7.1 preview)
+- [ ] Claude Code live callbacks via `ltc wait` (0.7.1 preview; verified on macOS, Linux pending)
 - [ ] PI / DSH agent adapters
 
 ## License

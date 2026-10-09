@@ -425,6 +425,23 @@ finally:
     ])
 ```
 
+## Claude Code: live callbacks with `ltc wait`
+
+Claude Code wakes a live session when a background Bash command exits. After `ltc run` or
+`ltc agent` from Claude Code, run the printed `ltc wait --queue-dir <queue> --task <id>` command
+with `run_in_background: true`, then end the turn or continue other work. The waiter registers
+itself for the bound session, so the daemon leaves delivery to it; when the callback is queued it
+prints the callback and exits, and Claude Code resumes this conversation with it. Inspect, then
+run the supplied `ltc ack` command as usual. Without a filter, `ltc wait` delivers the next callback
+bound to the session (use it for `ltc done`); `--task`/`--id` re-shows that callback until ACK.
+
+If no waiter is alive, the daemon falls back to headless `claude -p --resume <session>`, started
+from the session's original directory. After a live delivery it waits `--ack-grace` seconds
+(default 30 minutes) for the ACK first. Headless resume needs a standalone Claude CLI that is
+signed in; the Claude desktop app's bundled CLI cannot authenticate on its own, so in Desktop
+sessions `ltc wait` is the delivery route. LTC finds a Claude binary that is not on PATH
+(standalone installs and the desktop bundle). `ltc doctor --agent claude` reports both routes.
+
 ## Session binding
 
 Run from the agent-owned environment and omit target flags by default. LTC detects
