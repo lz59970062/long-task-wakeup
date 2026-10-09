@@ -34,28 +34,39 @@ workflow, so in practice you just ask Claude to run something long.
 
 ### `ltc wait` reference
 
+`ltc wait` exists only for Claude Code. It refuses to run without `CLAUDE_CODE_SESSION_ID` (or an
+explicit `--session`) and only ever touches callbacks bound to Claude Code; Codex and other agents
+keep receiving callbacks from the daemon and are never told about this command.
+
 | Option | Meaning |
 | --- | --- |
-| `--task <id>` | Only this managed task's callback. Re-shows it until ACK. |
-| `--id <callback-id>` | Only this callback. Re-shows it until ACK. |
-| *(no filter)* | The next callback bound to this session that no waiter has shown yet — use with `ltc done`. |
+| `--task <id>` | Only this managed task's callback. |
+| *(no `--task`)* | Any unacknowledged callback bound to this session — use with `ltc done`. |
 | `--session <id>` | Session to watch (default: `CLAUDE_CODE_SESSION_ID`). |
 | `--timeout <s>` | Give up after this many seconds (exit 3). Default: wait forever. |
-| `--ack-grace <s>` | After a live delivery, how long the daemon waits for the ACK before the headless fallback (default 1800). |
 
-Exit codes: `0` callback printed (or the requested callback is already acknowledged), `2` invalid
-task/id, `3` timeout.
+One rule: a callback keeps coming back until it is ACKed. Exit codes: `0` callback printed (or the
+task's callback is already acknowledged), `2` not a Claude session / unknown task, `3` timeout.
 
 ### How it coordinates with the daemon
 
 - A waiter holds a lock file under `<target-locks>/live-watchers/<session-hash>/`. While any waiter
-  for a session is alive, the daemon does not start a headless resume for that session.
+  for a session is alive, the daemon does not start a headless resume for that session's Claude
+  callbacks. Closing Claude Code kills the waiter, the OS drops the lock, and the daemon takes over.
 - The waiter claims a callback with the same atomic `pending → running` move the daemon uses, so a
   callback is never delivered by both at once.
-- After printing, the callback goes back to `pending` with `next_attempt_at = now + ack-grace`.
-  `ltc ack` moves it straight to `done`. Without an ACK, normal at-least-once retry resumes after
-  the grace period.
-- If the waiter dies, its lock is released by the OS and the daemon takes over.
+- After printing, the callback returns to `pending` and the daemon waits 30 minutes for the ACK
+  before resuming its normal retries. `ltc ack` moves it straight to `done`.
+- All of this lives in `src/long_task_callback/claude_code.py`; the shared CLI only calls into it.
+
+## Per-agent skills
+
+Each agent gets its own installed skill, so Claude-specific usage never reaches other agents:
+
+| Agent | Installed to | Contents |
+| --- | --- | --- |
+| Codex | `${CODEX_HOME:-~/.codex}/skills/long-task-callback/` | `SKILL.md` (full skill, no `ltc wait`) + `agents/openai.yaml` |
+| Claude Code | `${CLAUDE_CONFIG_DIR:-~/.claude}/skills/long-task-callback/` | `SKILL.md` (short, built around `ltc wait`) + `REFERENCE.md` (the shared full skill) |
 
 ## Finding the Claude binary
 
