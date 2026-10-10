@@ -23,6 +23,8 @@ class ClaudeAdapter:
     detection_priority = 10
     child_result_mode: Literal["file", "stdout"] = "stdout"
     supports_reasoning_effort = False
+    reasoning_efforts: tuple[str, ...] = ()
+    supports_system_prompt_file = False
 
     def matches_environment(self, environment: Mapping[str, str]) -> bool:
         marker = environment.get(CLAUDE_MARKER_ENV, "").strip().lower()

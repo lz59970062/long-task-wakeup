@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.1a2 — unreleased
+
+- Automatically deliver new live Pi callbacks through native steering, after
+  the current tool-call batch and before the next model request; idle Pi starts
+  a normal turn. Keep the existing CLI without delivery flags. Preserve older
+  follow-up records, same-process ownership, cancellation and ACK rules; require
+  a capable extension and use task v5/callback v4/mailbox v2 to prevent silent
+  downgrade by older coordinators. Test receipt during a continuing tool loop
+  using real Pi with a local provider, without paid model calls.
+- Include measured task runtime in compact callbacks, for example
+  `Duration: 2m 5.5s`, using recorded execution timestamps rather than callback
+  delivery time. Keep the duration in the callback record across retries.
+- Synchronize the MIT license and GitHub issue templates from `main`.
+
 ## 0.7.1a1 — unreleased
 
 ### Claude Code
@@ -37,6 +51,42 @@
   takeover from headless retries) and on Linux with the desktop app over SSH (`screen` task, live
   wakeup, daemon deferral while the waiter lives, daemon takeover without one, ACK). Windows not
   yet verified.
+
+### Pi Agent
+
+- Add Pi Agent as a child worker with `ltc agent pi`, fresh nonpersistent text
+  execution, submission-time environment/configuration and private result capture.
+  Support Pi model/thinking overrides, per-Pi template defaults, executable
+  selection via `LONG_TASK_WAKEUP_PI_BIN` and
+  `doctor --operation agent --agent-worker pi`. Pi permissions/extensions follow
+  its own noninteractive configuration; native Windows/macOS Pi launch remains
+  unverified in this session.
+- Deliver Pi callbacks to the original live process through a private mailbox and
+  native extension message API; busy Pi defers until idle. Add
+  `ltc install-pi-extension`, optional `setup --with-pi-extension`, and the managed
+  `ltc pi` launcher that leases an absolute session file before startup. Only
+  verified terminated managed owners permit print-mode recovery. Pin managed
+  sessions; restart the launcher to switch/fork/reload resources. Freeze profile
+  routes, reject ID/`--last` fallbacks, and retain unknown publication outcomes
+  without automatic replay. Keep the existing ACK protocol. Separate ordinary
+  online-only Pi from managed offline recovery and preserve personal settings.
+  Ship isolated real Pi/local-provider tests; native Windows/macOS Pi is unverified.
+- Add Pi-only `--system-prompt-file` and template `pi.system_prompt_file` defaults.
+  Pass the snapshot to Pi's `--system-prompt` to replace its built-in base prompt
+  while retaining normal project context, skills and appended instructions.
+  Snapshot nonempty UTF-8 contents privately at submission; retain the source
+  path for review and keep queued tasks independent of later source changes.
+  Resolve CLI paths from the submitting shell and template defaults from their
+  YAML directory; dry-run reports the source without creating task files.
+- Add `ltc template register|list|unregister` for reusable child-task discovery.
+  Accept optional YAML `worker`/`description` metadata and CLI overrides; copy
+  templates and system prompts into the user template directory, generate short
+  `ltc-NAME` routing skills and maintain an installed LTC skill's managed index.
+  Pin each route to its installed absolute template path and emit Codex UI
+  metadata. Preserve configuration/home overrides and unrelated skills/aliases;
+  use standard Codex aliases only for the default Unix profile. Keep
+  `setup --keep-skill` text unchanged. Unregister removes managed discovery files
+  while retaining templates, prompts and extra user files, and refuses edited routes.
 
 ### Callback modes and Desktop
 

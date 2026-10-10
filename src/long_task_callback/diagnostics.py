@@ -18,7 +18,7 @@ import tempfile
 import time
 
 from . import __version__, callback_transport, claude_code
-from .agents import get_agent
+from .agents import get_agent, get_child_agent
 from .platforms import posix, windows_io
 from .platforms import OwnerState
 from .platforms.screen import ScreenBackend
@@ -324,7 +324,7 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
     if operation == "agent" and not child_agent:
         issues.append({"code": "child_agent_unspecified", "action": "Pass --agent-worker with the actual intended child Agent to check delegated-task readiness."})
     if operation == "agent" and child_agent:
-        child_executable = shutil.which(get_agent(child_agent).executable(cli.agent_environment(child_agent)))
+        child_executable = shutil.which(get_child_agent(child_agent).executable(cli.agent_environment(child_agent)))
         if child_executable is None:
             issues.append({"code": "child_agent_unavailable", "action": "Install or configure the selected child Agent CLI before executing this delegated task."})
         elif child_agent == "claude" and claude_code.is_desktop_bundle(child_executable):
@@ -361,12 +361,16 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
         issues.append({"code": "skill_missing", "action": "Install the bundled LTC skill for the selected Agent so it can inspect, acknowledge and continue callbacks."})
 
     repair = worker_command("setup", "--queue-dir", str(root), "--backend", choice,
-                            "--service", "auto", "--skill-target", callback_agent,
-                            "--keep-skill", "--force", "--now")
+                            "--service", "auto")
+    # PI Agent parents do not consume the bundled Codex/Claude skill; keep the
+    # setup default instead of emitting an unsupported --skill-target value.
+    if callback_agent in {"codex", "claude"}:
+        repair.extend(["--skill-target", callback_agent])
+    repair.extend(["--keep-skill", "--force", "--now"])
     if operation == "done":
         repair.append("--callback-only")
     for agent, executable in executables.items():
-        if agent in {"codex", "claude"}:
+        if agent in {"codex", "claude", "pi"}:
             repair.extend([f"--{agent}-bin", executable])
     recheck = worker_command("doctor", "--queue-dir", str(root), "--backend", choice,
                              "--agent", callback_agent, "--operation", operation)

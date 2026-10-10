@@ -5,11 +5,30 @@ I/O. Old queue records retain their original rendering in the CLI compatibility
 path. User instructions are never silently discarded: the envelope requires
 reading the details whenever a message or custom handoff is present.
 """
+from __future__ import annotations
+
+import math
 from pathlib import Path
 from typing import Mapping
 
 FORMAT = "compact-v1"
 REMINDER = "Inspect results, ACK receipt, then continue the goal. Check existing work before relaunching. ACK is not goal completion."
+
+
+def format_duration(seconds: object) -> str | None:
+    """Render measured runtime without inventing a value for missing evidence."""
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+        return None
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    remaining = round(float(seconds), 1)
+    parts = []
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        count, remaining = divmod(remaining, size)
+        if count:
+            parts.append(f"{int(count)}{unit}")
+    parts.append(f"{remaining:.1f}s")
+    return " ".join(parts)
 
 
 def render(request: Mapping[str, object], details_path: Path, ack_command: str) -> str:
@@ -20,6 +39,9 @@ def render(request: Mapping[str, object], details_path: Path, ack_command: str) 
     outcome = str(request.get("outcome") or "finished")
     exit_code = request.get("exit_code")
     lines.append(f"Result: {outcome}" + (f"; exit={exit_code}" if exit_code is not None else ""))
+    duration = format_duration(request.get("duration_seconds"))
+    if duration is not None:
+        lines.append(f"Duration: {duration}")
     log = request.get("log_path")
     result = request.get("agent_result_path")
     if isinstance(log, str) and log:
