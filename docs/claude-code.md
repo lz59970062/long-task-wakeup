@@ -12,6 +12,9 @@ how a callback reaches a Claude Code session and what is needed for each route.
 | **Live (`ltc wait`)** — recommended | The session runs `ltc wait --task <id>` as a background Bash command. Claude Code wakes the session when a background command exits; `ltc wait` exits as soon as the callback is queued and prints it. | Nothing beyond LTC. Works in the desktop app and the terminal CLI. |
 | **Headless fallback** | When no waiter is alive, the daemon runs `claude -p --resume <session>` from the directory where the session started. | A standalone `claude` CLI that is signed in (`claude auth login`). |
 
+A third route, the **LTC channel** (`ltc claude`), pushes callbacks into a terminal session without
+any waiter; see [below](#ltc-channel-research-preview).
+
 Why live delivery matters: a headless resume appends a turn to the session's transcript, but a
 session that is already open in the app or terminal does not display it. `ltc wait` instead hands
 the callback to the session you are looking at.
@@ -58,6 +61,43 @@ task's callback is already acknowledged), `2` not a Claude session / unknown tas
 - After printing, the callback returns to `pending` and the daemon waits 30 minutes for the ACK
   before resuming its normal retries. `ltc ack` moves it straight to `done`.
 - All of this lives in `src/long_task_callback/claude_code.py`; the shared CLI only calls into it.
+
+## LTC channel (research preview)
+
+[Claude Code channels](https://code.claude.com/docs/en/channels) let a local MCP server push events
+into a running interactive session. `ltc claude` starts Claude Code with LTC's channel server:
+
+```bash
+ltc claude                       # new session
+ltc claude -- --resume <id>      # anything after -- goes to claude
+```
+
+It runs `claude --mcp-config <ltc server> --dangerously-load-development-channels server:ltc`.
+Claude Code asks you to confirm the development channel at every start (custom channels are not on
+the preview allowlist), then shows `server:ltc · no MCP server configured with that name` — that
+notice is cosmetic for servers passed with `--mcp-config`; delivery works.
+
+How it behaves:
+
+- The server is a child of that Claude window and lives exactly as long as it. It reads the
+  window's current session from `~/.claude/sessions/<claude-pid>.json`, so `/clear` and `/resume`
+  are followed.
+- While alive it holds the session's live-watcher lock (`channel-*.lock`), so the daemon never
+  starts a headless resume for that session — reopening a session with `ltc claude` cannot fork it.
+- Each queued callback for the session is pushed once as `<channel source="ltc" callback_id=…>`;
+  Claude handles it even when the window is idle. It still needs `ltc ack`.
+- `ltc run` prints "arrives through the ltc channel" instead of a `ltc wait` command, and a stray
+  `ltc wait` in that session exits instead of printing the callback a second time.
+- Claude Code never acknowledges channel events and drops them silently when a channel is not
+  registered. The server therefore only takes over when its parent `claude` carries the opt-in flag,
+  and if a pushed callback is still unacknowledged after the 30-minute ACK grace it releases the lock
+  so the daemon delivers it.
+
+Limits: terminal CLI only — the desktop app runs Claude Code through the Agent SDK, which ignores the
+development flag, so desktop sessions keep using `ltc wait`. claude.ai Team/Enterprise organizations
+must enable channels (`channelsEnabled`). The flags and protocol may change while channels are in
+preview. Verified on Linux with Claude Code 2.1.296 (idle window woke, handled and ACKed the
+callback; lock released when the window closed).
 
 ## Per-agent skills
 

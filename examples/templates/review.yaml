@@ -2,6 +2,11 @@ version: 1
 codex:
   model: gpt-5.6-luna
   reasoning_effort: max
+# Optional Pi defaults; use a model available in your Pi configuration:
+# pi:
+#   model: provider/id
+#   reasoning_effort: high
+#   system_prompt_file: ../prompts/pi-system.md  # Relative to this YAML directory.
 prompt: |
   Independently review the supplied requirements and referenced code.
   Do not edit files or run tests. Look for observable incorrect behavior,

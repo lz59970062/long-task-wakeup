@@ -23,6 +23,7 @@ def write_private_text(
     text: str,
     *,
     sync_directory: Callable[[Path], None] | None = None,
+    preserve_newlines: bool = False,
 ) -> None:
     """Replace a UTF-8 file with private permissions and flushed file data.
 
@@ -47,6 +48,8 @@ def write_private_text(
                 os.close(descriptor)
                 raise
         with handle:
+            if preserve_newlines:
+                handle.reconfigure(newline="")
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
