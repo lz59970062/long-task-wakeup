@@ -3517,8 +3517,13 @@ def submit_managed_run(args: argparse.Namespace) -> int:
     if agent_result_path is not None:
         print(f"ltc: agent result: {agent_result_path}", file=sys.stderr)
     if task["agent"] == "claude" and target.get("kind") == "session":
-        wait = control_command("wait", "--queue-dir", str(root), "--task", task_id)
-        print(f"ltc: Claude Code live callback: run in the background (run_in_background): {wait}", file=sys.stderr)
+        if claude_code.channel_is_held(str(target.get("value"))):
+            print("ltc: Claude Code live callback: arrives through the ltc channel; no `ltc wait` needed",
+                  file=sys.stderr)
+        else:
+            wait = control_command("wait", "--queue-dir", str(root), "--task", task_id)
+            print(f"ltc: Claude Code live callback: run in the background (run_in_background): {wait}",
+                  file=sys.stderr)
     return 0
 
 
@@ -5425,6 +5430,18 @@ def main() -> int:
     wait_parser.add_argument("--timeout", type=float, help="Give up after this many seconds (exit 3)")
     wait_parser.add_argument("--poll-interval", type=float, default=1.0, help=argparse.SUPPRESS)
 
+    claude_parser = sub.add_parser(
+        "claude",
+        help="Start interactive Claude Code with the LTC channel (research preview): callbacks are pushed "
+             "into the open session; pass Claude's own arguments after --",
+    )
+    claude_parser.add_argument("--queue-dir", help="Wakeup queue directory")
+    claude_parser.add_argument("claude_args", nargs=argparse.REMAINDER, help="Arguments for claude")
+    channel_parser = sub.add_parser("_claude-channel", help=argparse.SUPPRESS)
+    channel_parser.add_argument("--queue-dir", help=argparse.SUPPRESS)
+    channel_parser.add_argument("--parent-pid", type=int, help=argparse.SUPPRESS)
+    channel_parser.add_argument("--poll-interval", type=float, default=1.0, help=argparse.SUPPRESS)
+
     ack_parser = sub.add_parser("ack", help="Mark a daemon callback as successfully received")
     ack_parser.add_argument("--queue-dir", help="Wakeup queue directory")
     ack_parser.add_argument("--id", required=True, help="Callback request id to acknowledge")
@@ -5543,6 +5560,12 @@ def main() -> int:
         return ack(args)
     if args.mode == "wait":
         return claude_code.wait(args)
+    if args.mode == "claude":
+        from . import claude_channel
+        return claude_channel.launch(args)
+    if args.mode == "_claude-channel":
+        from . import claude_channel
+        return claude_channel.serve(args)
     if args.mode == "goal":
         if args.goal_mode == "start":
             return goal_start(args)
