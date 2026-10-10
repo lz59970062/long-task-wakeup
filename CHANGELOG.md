@@ -23,6 +23,12 @@
 - `ltc run`/`ltc agent` from Claude Code print the exact background `ltc wait` command.
 - Fix callback ACK commands when `ltc` is not on the worker's PATH: use the interpreter plus private
   entry point instead of a non-executable script path.
+- Add `ltc claude [-- claude args]` (research preview): starts interactive Claude Code with LTC as a
+  development channel. The channel server lives as long as the window, follows its current session,
+  holds the session's live-watcher lock so the daemon never forks it with a headless resume, and
+  pushes each callback into the session as a `<channel source="ltc">` event, even when it is idle.
+  `ltc run` then skips the `ltc wait` hint and a stray `ltc wait` exits instead of duplicating the
+  callback. Terminal CLI only; the desktop app keeps using `ltc wait`.
 - On Linux, also find the newest nvm install (`~/.nvm/versions/node/*/bin/claude`) and the Claude
   desktop app's SSH-session CLI (`~/.claude/remote/ccd-cli/<version>`, source `desktop-remote`).
   The SSH CLI shares the host's `~/.claude` sign-in, so it is not treated as desktop-only; a

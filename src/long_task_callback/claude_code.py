@@ -210,6 +210,8 @@ def resume_cwd(request: Mapping[str, object], environment: Mapping[str, str]) ->
 
 LIVE_ACK_GRACE_SECONDS = 30 * 60.0
 LIVE_WATCHER_DIR_NAME = "live-watchers"
+# A channel server (claude_channel.py) holds the same lock under this prefix.
+CHANNEL_WATCHER_PREFIX = "channel-"
 
 
 def _session_of(request: Mapping[str, object]) -> str | None:
@@ -227,7 +229,7 @@ def live_watcher_dir(session: str) -> Path:
     return cli.target_lock_dir() / LIVE_WATCHER_DIR_NAME / digest
 
 
-def register_live_watcher(session: str) -> tuple[object, Path]:
+def register_live_watcher(session: str, *, prefix: str = "") -> tuple[object, Path]:
     """Lock a uniquely named file; the OS releases it if the waiter dies.
 
     The lock is taken under a staging name and renamed into place, so the
@@ -237,7 +239,7 @@ def register_live_watcher(session: str) -> tuple[object, Path]:
 
     directory = live_watcher_dir(session)
     directory.mkdir(parents=True, exist_ok=True)
-    name = f"{os.getpid()}-{secrets.token_hex(6)}"
+    name = f"{prefix}{os.getpid()}-{secrets.token_hex(6)}"
     lock = cli.acquire_path_lock(directory / f".{name}.staging", blocking=False)
     if lock is None:
         raise RuntimeError("could not lock a fresh live waiter file")
@@ -259,16 +261,23 @@ def release_live_watcher(lock: tuple[object, Path]) -> None:
 
 def live_watcher_is_held(request: Mapping[str, object]) -> bool:
     """Daemon hook: whether a live waiter owns delivery for this Claude callback."""
+    session = _session_of(request)
+    return session is not None and _held(session, "")
+
+
+def channel_is_held(session: str) -> bool:
+    """Whether an `ltc claude` channel is delivering this session's callbacks."""
+    return _held(session, CHANNEL_WATCHER_PREFIX)
+
+
+def _held(session: str, prefix: str) -> bool:
     from . import cli
 
-    session = _session_of(request)
-    if session is None:
-        return False
     directory = live_watcher_dir(session)
     if not directory.is_dir():
         return False
     held = False
-    for path in directory.glob("*.lock"):
+    for path in directory.glob(f"{prefix}*.lock"):
         lock = cli.acquire_path_lock(path, blocking=False)
         if lock is None:
             held = True
@@ -359,6 +368,10 @@ def wait(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"ltc wait: {exc}", file=sys.stderr)
         return 2
+    if channel_is_held(session):
+        print("ltc wait: this session was started with `ltc claude`; its callbacks arrive through the "
+              "ltc channel, so no waiter is needed", file=sys.stderr)
+        return 0
     deadline = time.monotonic() + args.timeout if args.timeout else None
     watcher = register_live_watcher(session)
     print(f"ltc wait: watching Claude Code session {session}", file=sys.stderr)
