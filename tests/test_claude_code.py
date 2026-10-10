@@ -91,6 +91,32 @@ class ExecutableDiscoveryTests(unittest.TestCase):
         found = claude_code.discover_executable(environment, which=no_which)
         self.assertEqual(found, claude_code.Executable(str(current), "desktop-bundle"))
 
+    def test_newest_nvm_install_is_found_without_path(self) -> None:
+        old = make_executable(self.home / ".nvm/versions/node/v20.1.0/bin/claude")
+        new = make_executable(self.home / ".nvm/versions/node/v22.3.0/bin/claude")
+        os.utime(old, (1, 1))
+        found = claude_code.discover_executable(self.environment, which=no_which)
+        self.assertEqual(found, claude_code.Executable(str(new), "standalone"))
+
+    def test_linux_desktop_remote_cli_is_found_and_rediscovered(self) -> None:
+        # The desktop app's SSH sessions install a versioned CLI under ~/.claude/remote.
+        remote = self.home / ".claude/remote/ccd-cli"
+        old = make_executable(remote / "2.1.293-aaaa")
+        new = make_executable(remote / "2.1.295-bbbb")
+        os.utime(old, (1, 1))
+        found = claude_code.discover_executable(self.environment, which=no_which)
+        self.assertEqual(found, claude_code.Executable(str(new), "desktop-remote"))
+        self.assertFalse(claude_code.is_desktop_bundle(new))  # It shares ~/.claude sign-in.
+        session = dict(self.environment, CLAUDE_CODE_EXECPATH=str(new))
+        self.assertEqual(claude_code.discover_executable(session, which=no_which),
+                         claude_code.Executable(str(new), "desktop-remote"))
+        stale = dict(self.environment, **{claude_code.CLAUDE_BIN_ENV: str(remote / "2.1.200-gone")})
+        self.assertEqual(claude_code.discover_executable(stale, which=no_which),
+                         claude_code.Executable(str(new), "desktop-remote"))
+        standalone = make_executable(self.home / ".local/bin/claude")
+        self.assertEqual(claude_code.discover_executable(self.environment, which=no_which),
+                         claude_code.Executable(str(standalone), "standalone"))
+
     def test_resume_command_uses_discovered_binary(self) -> None:
         request = {"agent": "claude", "target": {"kind": "session", "value": SESSION}, "cwd": "/tmp", "prompt": "x"}
         with mock.patch.object(cli.claude_code, "discover_executable",

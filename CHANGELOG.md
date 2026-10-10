@@ -23,8 +23,14 @@
 - `ltc run`/`ltc agent` from Claude Code print the exact background `ltc wait` command.
 - Fix callback ACK commands when `ltc` is not on the worker's PATH: use the interpreter plus private
   entry point instead of a non-executable script path.
+- On Linux, also find the newest nvm install (`~/.nvm/versions/node/*/bin/claude`) and the Claude
+  desktop app's SSH-session CLI (`~/.claude/remote/ccd-cli/<version>`, source `desktop-remote`).
+  The SSH CLI shares the host's `~/.claude` sign-in, so it is not treated as desktop-only; a
+  configured path to it that disappears after an app update is rediscovered.
 - Verified end to end on macOS with the Claude desktop app (launchd task, live wakeup, late waiter
-  takeover from headless retries). Linux and Windows not yet verified.
+  takeover from headless retries) and on Linux with the desktop app over SSH (`screen` task, live
+  wakeup, daemon deferral while the waiter lives, daemon takeover without one, ACK). Windows not
+  yet verified.
 
 ### Callback modes and Desktop
 
