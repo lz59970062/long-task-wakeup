@@ -20,7 +20,7 @@ import time
 import unittest
 from unittest import mock
 
-from long_task_callback import cli, diagnostics
+from long_task_callback import cli, diagnostics, pi_callback
 from long_task_callback.agents import AGENTS, CHILD_AGENT_NAMES, ChildOptions, get_agent, get_child_agent
 from long_task_callback.runtime import worker_command
 from test_cli import assert_private_file, executable_python_fixture, patch_fixture_commands
@@ -99,7 +99,7 @@ class PiAdapterContractTests(unittest.TestCase):
         self.assertEqual(request["target_source"], "PI_SESSION_FILE")
         self.assertIn("called back into PI Agent", prompt)
         acknowledgement = cli.build_acknowledgement_text("ltc ack --queue-dir /q --id abc", agent="pi")
-        self.assertIn("PI Agent non-interactively in print mode", acknowledgement)
+        self.assertIn("original PI Agent process through its native message API", acknowledgement)
         self.assertIn("--queue-dir /q --id abc", acknowledgement)
 
     def test_pi_command_is_pure_fresh_print_text_mode_with_no_positional_prompt(self):
@@ -171,6 +171,7 @@ class PiAgentContractTests(unittest.TestCase):
             "CLAUDE_CONFIG_DIR": str(self.claude_home),
             cli.TARGET_LOCK_DIR_ENV: str(self.directory / "target-locks"),
             "PYTHONIOENCODING": "utf-8",
+            "PI_CODING_AGENT_DIR": str(self.directory / "pi-profile"),
         })
         environment.start()
         self.addCleanup(environment.stop)
@@ -455,7 +456,7 @@ class PiAgentContractTests(unittest.TestCase):
             """), encoding="utf-8")
         return executable_python_fixture(script)
 
-    def test_pi_callback_delivery_resumes_the_bound_session_file_with_the_prompt_on_stdin(self):
+    def test_dead_managed_pi_callback_resumes_the_bound_file_with_prompt_on_stdin(self):
         root = self.directory / "pi-callback-queue"
         session = self.directory / "pi parent session.jsonl"
         session.write_text('{"type":"session","version":3,"id":"1",'
@@ -479,6 +480,13 @@ class PiAgentContractTests(unittest.TestCase):
         self.assertIn("Bound session: " + str(session),
                       Path(str(request["prompt_details_path"])).read_text(encoding="utf-8"))
 
+        channel = pi_callback.channel_dir(str(session), Path(request["pi_channel_root"]))
+        pi_callback.ensure_private_directory(channel)
+        owner = {"version": 1, "session_file": str(session), "session_id": "1",
+                 "channel_dir": str(channel), "profile_dir": request["pi_profile_dir"],
+                 "owner_nonce": "fixture", "owner_pid": 99999999, "managed": True,
+                 "state": "closed", "owner_identity": cli.daemon_process_identity(os.getpid())}
+        cli.write_request(channel / "owner.json", owner)
         environment = {
             "LONG_TASK_WAKEUP_PI_BIN": str(fake_pi),
             "LTC_TEST_PI_CALLBACK_CAPTURE": str(capture),
@@ -500,7 +508,8 @@ class PiAgentContractTests(unittest.TestCase):
         cli.recover_running(root)
         self.assertTrue((root / "done" / f"{request['id']}.json").exists())
         received = json.loads(capture.read_text(encoding="utf-8"))
-        self.assertEqual(received["argv"], ["--print", "--session", str(session)])
+        self.assertEqual(received["argv"], ["--print", "--session", str(session),
+                                            "--extension", str(pi_callback.extension_path())])
         self.assertNotIn("--no-session", received["argv"])
         self.assertEqual(received["cwd"], str(self.directory))
         self.assertIn("[long-task-callback]", received["prompt"])

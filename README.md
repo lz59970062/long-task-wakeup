@@ -326,8 +326,11 @@ Retries and daemon restarts reuse the same stored number and decisions. Queuing,
 canceling before delivery, and dry-run do not consume numbers. Changing settings
 applies to new allocations; retrying an old callback retains its original schedule.
 
-New compact callbacks retain task/result identity, artifact references, bound session
-and the exact ACK command. Full command lines, messages and handoff instructions
+New compact callbacks retain task/result identity, measured execution duration
+(for example, `Duration: 2m 5.5s`), artifact references, bound session and the exact
+ACK command. Duration uses recorded task start/end times and excludes callback
+queueing and delivery delays; it is omitted when those times are unavailable.
+Full command lines, messages and handoff instructions
 are saved privately at the Details path; custom instructions and recovery guidance
 require reading it before acting. Standard reminders are short and periodic. The
 skill's core rules apply even when reminder prose is omitted.
@@ -525,35 +528,70 @@ has not been verified in this session.
 
 ### Pi Agent callbacks
 
-A long task submitted from a Pi shell tool binds the live Pi session and wakes it
-when the task finishes:
+Install the native callback extension once, then reload or restart ordinary Pi:
 
 ```bash
-command -v pi
+ltc install-pi-extension
+# Optional: ltc install-pi-extension --profile /absolute/pi/profile
+```
+
+A callback to a live Pi is delivered in that **same process**, using
+`pi.sendUserMessage(..., {deliverAs: "steer"})`. Pi automatically queues the
+result after the current tool-call batch and before the next model request when
+busy, or starts a normal turn when idle. There is no delivery flag and no need
+to end the current run merely to receive a callback. Steering does not abort a
+running tool; long foreground commands still need appropriate timeouts.
+Previously queued Pi callbacks retain their original follow-up timing.
+It continues the current branch without reopening the JSONL in another writer.
+Inside Pi's shell tool, LTC binds the absolute `PI_SESSION_FILE`; partial session
+IDs and `--last` are rejected. `PI_SESSION_ID` and Pi markers identify the agent,
+but cannot substitute for the session file.
+
+Upgrade the coordinator and run `ltc install-pi-extension --force` after reviewing
+any local extension edits, then reload/restart Pi. New automatic-steering intent
+uses task record v5, callback record v4 and mailbox envelope v2 so older
+coordinators/extensions cannot silently downgrade it to idle-only delivery.
+A live extension must advertise steering support before a new task is admitted.
+
+```bash
 ltc doctor --agent pi --session "$PI_SESSION_FILE"
 ltc done --agent pi --session "$PI_SESSION_FILE" --exit-code 0 \
   --cwd "$PWD" --task "external benchmark"
 ```
 
-Inside Pi's `bash`/`powershell` tool, LTC reads `PI_SESSION_FILE` (the absolute
-path to the current session JSONL) and stores it as the callback target. `PI_SESSION_ID`
-is used as a fallback identity, and `PI_CODING_AGENT`/`AI_AGENT` markers let LTC
-detect Pi when no session variable is bound. A bound Pi session takes precedence over
-inherited Codex/Claude markers; use `--agent` to override a deliberate choice.
+Ordinary Pi sessions support **online delivery only**. For automatic recovery
+after Pi exits, start it through the managed launcher:
 
-Delivery runs `pi --print --session <session-file>` in the task working directory and
-supplies the callback prompt on stdin, so it appends one turn to the exact
-persisted session and exits without opening the interactive UI. `--last` maps to
-`pi --continue`. `LONG_TASK_WAKEUP_PI_BIN` selects the executable for both child
-work and callback delivery; `ltc setup --pi-bin` pins it for the daemon.
+```bash
+ltc pi --cwd "$PWD"                    # new persistent managed session
+ltc pi --session /absolute/session.jsonl -- --model provider/model
+```
 
-Pi has no persistent callback channel analogous to the Codex Desktop App Server,
-so `ltc doctor --agent pi` reports `cli_resume` and never forces Desktop mode.
-The callback relies on the persisted session file recorded at submission: if the
-session is ephemeral (`--no-session`) there is nothing to resume, and LTC asks for
-explicit `--session <file|id>` instead. Because sessions are grouped by working
-directory, prefer the absolute `PI_SESSION_FILE`; an explicit session id is
-resolved by Pi itself.
+The launcher locks the selected file before Pi opens it and holds that lock for
+its entire lifetime. Managed sessions are pinned: restart `ltc pi` to switch,
+fork or reload resources. `/reload` ends a managed Pi cleanly to prevent a failed
+extension reload from removing its session pin. Ordinary Pi can reload normally.
+Only a verified managed owner that has fully exited permits the delivery worker
+to acquire the same lock and run `pi --print --session <file>`. A surviving Pi,
+missing ownership evidence or a contested lock blocks recovery. The advisory
+lock coordinates LTC-managed writers; independent Pi processes do not honor it.
+
+The callback freezes its Pi profile and private mailbox directory, regardless of
+the daemon's current directory/profile. `PI_CODING_AGENT_DIR` selects the profile;
+`LTC_PI_CHANNEL_ROOT` optionally selects a private channel root. `ltc doctor`
+reports mailbox registration or recovery eligibility, not verified receipt.
+`LONG_TASK_WAKEUP_PI_BIN` selects Pi; `ltc setup --pi-bin` pins the daemon executable.
+`ltc setup --with-pi-extension` optionally installs the extension too.
+
+Mailbox publication, admission and session observation are distinct from the
+existing LTC ACK. After publication, timeout/crash suppresses automatic replay
+and retains the target lease until ACK/cancel or manual recovery. Cancellation
+before native dispatch suppresses delivery; after dispatch it is best effort.
+Ephemeral `--no-session` children cannot receive persistent callbacks. Older Pi
+callback records require manual inspection or explicit route repair; older
+daemons reject the new route record version. Native Windows/macOS execution
+needs platform validation; real Pi 0.87.1 integration tests are opt-in under
+`tests/test_pi_live_integration.py` and use an isolated loopback model fixture.
 
 ### Pi system prompt files
 
@@ -728,7 +766,7 @@ Inside an agent conversation, LTC normally binds automatically:
 
 - Codex: `CODEX_THREAD_ID`
 - Claude Code: `CLAUDE_CODE_SESSION_ID`
-- PI Agent: `PI_SESSION_FILE` (absolute session file), else `PI_SESSION_ID`
+- PI Agent: `PI_SESSION_FILE` (absolute session file); IDs alone cannot bind a callback
 
 Explicit binding is also supported:
 
@@ -875,15 +913,24 @@ ltc agent pi --cwd "$PWD" --task "review parser" \
 `CODEX_THREAD_ID`、`CLAUDE_CODE_SESSION_ID` 和 `CLAUDECODE` 这些父会话标记；默认也不会
 启用 `--bare`。
 
-Pi 既可作子代理，也可作 callback 宿主：在 Pi 的 shell 工具里提交任务时，LTC 读取
-`PI_SESSION_FILE`（当前会话 JSONL 的绝对路径）作为休眠唤醒目标，必要时回退到 `PI_SESSION_ID` 或
-`PI_CODING_AGENT`/`AI_AGENT` 标记，因此 `--agent` 现在接受 `pi`。
-LTC 使用 `pi --print --mode text --no-session` 启动 Pi 子代理，从 stdin 传入任务并保存文本结果，不持久化 Pi 会话；
-callback 则执行 `pi --print --session <会话文件>`，在任务工作目录中把回调提示词从 stdin 追加到同一会话后退出。
-Pi 继承提交时的 profile、认证、API、代理与扩展配置，但移除 Codex/Claude 父会话标记及
-`PI_SESSION_ID`、`PI_SESSION_FILE`、`PI_CODING_AGENT`。可用 `LONG_TASK_WAKEUP_PI_BIN` 指定可执行文件，
-`ltc setup --pi-bin` 固定 daemon 使用的路径，用 `ltc doctor --operation agent --agent-worker pi` 检查本地条件。
-会话为临时（`--no-session`）时无法恢复，LTC 会要求显式传入 `--session <文件|ID>`；由于 Pi 会话按工作目录分组，建议使用绝对的 `PI_SESSION_FILE`。
+Pi 既可作子代理，也可作 callback 宿主。先执行 `ltc install-pi-extension`，再重载或重启普通 Pi。
+任务绑定 shell 工具提供的绝对 `PI_SESSION_FILE`；ID 和标记仅用于识别 Pi，不能替代会话文件，
+`--last` 不适用于 Pi 回调。在线回调通过 Pi 原生消息 API 投递给同一个进程；忙碌时保留在邮箱，
+空闲后沿当前分支继续，不另开进程并发写会话。
+
+普通 Pi 仅支持在线投递。用 `ltc pi --cwd "$PWD"` 或
+`ltc pi --session /绝对路径/session.jsonl -- --model provider/model` 启动受管会话，
+才能在原 Pi 完全退出、进程身份可核查且会话锁可取得后，自动用 print 模式恢复。
+受管 launcher 在 Pi 打开文件前持锁，固定会话；切换、fork 或重载资源需重新启动 launcher。
+受管 Pi 的 `/reload` 会退出，防止扩展重载失败后丢失会话保护；普通 Pi 可正常重载。
+该锁协调 LTC 受管进程，无法约束手动启动的其他 Pi。
+
+回调冻结 Pi profile 和私有邮箱位置。投递记录写入后，超时或崩溃会保留未知状态并停止自动重放；
+仍以原有 ACK 为收到结果的依据。`--callback-mode manual` 可只保存结果。
+子代理仍使用 `pi --print --mode text --no-session`，继承用户 profile、认证、API、代理与扩展配置，
+移除父会话标记和 LTC 的受管 reservation。个人论文模板与提示词保持在用户配置中。
+可用 `LONG_TASK_WAKEUP_PI_BIN` 指定 Pi，`ltc setup --pi-bin` 固定 daemon 使用的路径；
+`ltc setup --with-pi-extension` 可选安装回调扩展。
 `--model provider/model` 直接传给 Pi，`--reasoning-effort` 映射为 `--thinking`，支持
 `off|minimal|low|medium|high|xhigh|max`，不支持 `ultra`。内置 test 模板的 Codex 默认模型和推理级别不套用于 Pi。
 Pi 工具权限与项目扩展信任遵循其自身非交互配置；LTC 不添加 `--approve`。

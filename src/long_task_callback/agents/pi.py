@@ -1,10 +1,9 @@
 """PI Agent CLI argument construction for child work and callback resume.
 
 PI is both a child worker and a callback-session adapter. Child work runs a
-fresh ephemeral process; callback delivery resumes the persisted session file
-recorded at submission time (``PI_SESSION_FILE``), so a delivery working
-directory that differs from the original project cannot redirect the wakeup to
-another session or trigger PI's cross-project fork prompt.
+fresh ephemeral process. The adapter constructs only the managed offline
+print command; the callback worker owns online delivery and recovery policy.
+Callbacks bind the canonical absolute JSONL from PI_SESSION_FILE.
 """
 
 from __future__ import annotations
@@ -28,7 +27,9 @@ class PiAdapter:
     # ``PI_SESSION_FILE`` is an absolute path to the persisted session JSONL, so
     # a callback resumes the exact conversation even from another directory.
     session_id_env = PI_SESSION_FILE_ENV
-    parent_env_names = (PI_SESSION_ID_ENV, PI_SESSION_FILE_ENV, PI_CODING_AGENT_ENV)
+    parent_env_names = (PI_SESSION_ID_ENV, PI_SESSION_FILE_ENV, PI_CODING_AGENT_ENV,
+                        "LTC_PI_RESERVATION", "LTC_PI_RECOVERY",
+                        "LTC_PI_CALLBACK_ACK_PATH", "LTC_PI_CALLBACK_CANCEL_PATH")
     # The session variables are only injected into a live PI shell tool. An
     # explicit PI session therefore outranks the parent markers a nested shell
     # may still carry from an outer Codex or Claude Code session.

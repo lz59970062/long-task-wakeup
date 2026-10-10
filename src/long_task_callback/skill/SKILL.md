@@ -102,6 +102,9 @@ apply when not repeated. Since LTC 0.6.6, standard reminders appear on the first
 4 distinct callbacks thereafter; user-hook reminders on the first and every 3.
 A short callback omits repeated prose, not these responsibilities. Task results,
 routing and the ACK command remain present. In 0.7.0, full commands, timestamps and handoff text are saved at the supplied Details path. Read that file before acting when the envelope says so; otherwise inspect relevant result artifacts directly. An exit code is process status, not proof of test success.
+When reporting a callback to the user, include the recorded task runtime in one
+short phrase when available, such as `Finished in 2m 5.5s`. Use execution duration,
+not the time spent waiting for delivery; do not invent a duration when it is unknown.
 
 Configure with `ltc prompt-policy --system-every 4 --user-every 3`; no options shows
 the effective policy. `1` means every callback. The file is
@@ -129,7 +132,10 @@ native backend needs no screen. A screen process can remain inside its launching
 service's control group: do not assume it survives stopping that service.
 
 After submission, record the task ID, execution backend and artifact paths, then
-return control. For long work, avoid polling processes or logs on a timer. Live
+return control when no independent work remains. In a live Pi session, continue
+independent short work if useful: callbacks automatically steer at the next model
+decision, so ending the entire run is not required for receipt. For long work,
+avoid polling processes or logs on a timer. Live
 monitoring is appropriate when requested or diagnosing callback infrastructure.
 Do not change a running task's owner or automatically retry an unknown native
 launch. Stable 0.7.0 does not include Pi/DSH; the current preview supports Pi both
@@ -425,13 +431,35 @@ Pi's noninteractive configuration; do not add `--approve`. LTC's `--sandbox-mode
 is Codex-only and `--permission-mode` is Claude-only. Pi 0.87.1's CLI contract was
 checked; native Windows/macOS Pi launch has not been verified in this session.
 
-Pi is also a callback parent (`--agent pi`). Inside Pi's shell tool, bind
-`PI_SESSION_FILE` (the absolute session JSONL), falling back to `PI_SESSION_ID` or
-the `PI_CODING_AGENT`/`AI_AGENT` markers. Callback delivery runs
-`pi --print --session <session-file>` in the task working directory and appends one
-callback turn from stdin to that exact persisted session; `--last` maps to
-`--continue`. An ephemeral `--no-session` session cannot be resumed, so ask for
-explicit `--session <file|id>`. `ltc setup --pi-bin` pins the daemon executable.
+Pi is also a callback parent (`--agent pi`). Install the generic native extension
+with `ltc install-pi-extension`, then reload/restart ordinary Pi. Bind the absolute
+`PI_SESSION_FILE`; partial IDs and `--last` cannot identify the callback file.
+Live callbacks enter the original Pi process through its native `steer` API:
+when busy, the result is queued after the current tool-call batch and before the
+next model request; when idle, Pi starts a normal turn. No delivery option or
+forced run termination is needed. Steering does not abort an executing tool.
+Previously queued callbacks keep their old follow-up timing. Upgrade the
+coordinator and installed extension, then reload/restart Pi; an older live
+extension blocks new automatic-steering submissions rather than downgrading them.
+They continue the current branch. Ordinary Pi is online-only.
+
+Use `ltc pi --cwd "$PWD"` for a new managed session, or
+`ltc pi --session /absolute/session.jsonl -- --model provider/model` to reopen one.
+The launcher locks the file before Pi starts. Only after the verified original
+Pi fully exits may an offline worker hold that same lock and resume in print mode.
+Managed sessions are pinned: restart the launcher to switch/fork/reload resources;
+`/reload` exits managed Pi to preserve the pin if extension loading fails.
+The advisory lease does not constrain independently launched Pi processes.
+
+Pi profile/channel paths are frozen in callbacks. Inspect `ltc doctor --agent pi
+--session "$PI_SESSION_FILE"` for current registration/eligibility; that probe
+cannot prove end-to-end receipt. Publication/admission/session observation cannot
+replace ACK. A published callback with an unknown outcome retains its target
+lease and is never automatically replayed; inspect and ACK/cancel manually.
+Cancellation before dispatch suppresses it; cancellation after dispatch is best effort.
+`ltc setup --with-pi-extension` optionally installs the extension. Installer changes
+only its own extension, preserving personal templates and settings. Native
+Windows/macOS live integration remains unverified in this environment.
 
 Pi accepts `--system-prompt-file ./prompts/pi-system.md` before `--`. Keep this
 separate from `--template`/`--template-file`, which build the stdin task prompt.
@@ -487,7 +515,7 @@ finally:
 ## Session binding
 
 Run from the agent-owned environment and omit target flags by default. LTC detects
-`CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`, or Pi's `PI_SESSION_FILE`/`PI_SESSION_ID`.
+`CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`, or Pi's absolute `PI_SESSION_FILE` (an ID alone is insufficient).
 
 Use `--agent codex|claude|pi --session <id>` when explicit binding is necessary. For Pi,
 prefer the absolute session file from `PI_SESSION_FILE`. Use `--last` only as
