@@ -1,21 +1,31 @@
 """Native agent integrations and their public extension contract.
 
-To integrate another agent, implement ``AgentAdapter``, register an instance
-here, and verify its session routing and child-result contract. PI and DSH are
-not registered: their native integration still requires platform validation.
+To integrate another child, implement ``ChildAgentAdapter`` and verify its
+noninteractive result contract. Callback transports additionally implement
+``AgentAdapter`` with verified session routing; child support alone never makes
+an agent a callback target.
 """
 
-from .base import AgentAdapter, ChildOptions
+from .base import AgentAdapter, ChildAgentAdapter, ChildOptions
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
+from .pi import PiAdapter
 from .registry import AgentRegistry
 
-AGENTS = AgentRegistry((CodexAdapter(), ClaudeAdapter()))
+AGENTS = AgentRegistry((CodexAdapter(), ClaudeAdapter(), PiAdapter()))
 AGENT_NAMES = AGENTS.names
+CHILD_AGENT_NAMES = AGENTS.child_names
 
 
 def get_agent(name: str) -> AgentAdapter:
     return AGENTS.get(name)
 
 
-__all__ = ["AGENTS", "AGENT_NAMES", "AgentAdapter", "AgentRegistry", "ChildOptions", "get_agent"]
+def get_child_agent(name: str) -> ChildAgentAdapter:
+    return AGENTS.get_child(name)
+
+
+__all__ = [
+    "AGENTS", "AGENT_NAMES", "CHILD_AGENT_NAMES", "AgentAdapter", "ChildAgentAdapter",
+    "AgentRegistry", "ChildOptions", "get_agent", "get_child_agent",
+]

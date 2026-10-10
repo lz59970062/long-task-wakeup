@@ -33,8 +33,8 @@ class FixtureAdapter:
 
 class AgentRegistryTests(unittest.TestCase):
     def test_current_registry_rejects_unimplemented_agents_without_fallback(self) -> None:
-        self.assertEqual(set(AGENTS.names), {"codex", "claude"})
-        for name in ("pi", "dsh", "unknown", "", "Codex"):
+        self.assertEqual(set(AGENTS.names), {"codex", "claude", "pi"})
+        for name in ("dsh", "unknown", "", "Codex"):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 get_agent(name)
 
@@ -56,7 +56,9 @@ class AgentRegistryTests(unittest.TestCase):
         registry = AgentRegistry([get_agent(name) for name in AGENTS.names] + [FixtureAdapter()])
         environment = {
             "CODEX_THREAD_ID": "parent-codex", "CLAUDE_CODE_SESSION_ID": "parent-claude",
-            "CLAUDECODE": "1", "FIXTURE_SESSION_ID": "parent-future", "FIXTURE_PARENT_MODE": "1",
+            "CLAUDECODE": "1", "PI_SESSION_ID": "parent-pi",
+            "PI_SESSION_FILE": "/pi/parent-session.jsonl", "PI_CODING_AGENT": "true",
+            "FIXTURE_SESSION_ID": "parent-future", "FIXTURE_PARENT_MODE": "1",
             "OPENAI_API_KEY": "fixture-key", "ANTHROPIC_API_KEY": "another-fixture-key",
             "PATH": "/fixture/bin", "CUSTOM_WORKLOAD_SETTING": "preserve",
         }
@@ -73,6 +75,16 @@ class AgentRegistryTests(unittest.TestCase):
         self.assertEqual(AGENTS.detect({"CODEX_THREAD_ID": "codex-parent"}), "codex")
         self.assertEqual(AGENTS.detect({"CLAUDE_CODE_SESSION_ID": "claude-parent"}), "claude")
         self.assertEqual(AGENTS.detect({"CODEX_THREAD_ID": "codex-parent", "CLAUDECODE": "1"}), "claude")
+        self.assertEqual(AGENTS.detect({"PI_SESSION_ID": "pi-session"}), "pi")
+        self.assertEqual(AGENTS.detect({"PI_SESSION_FILE": "/pi/session.jsonl"}), "pi")
+        self.assertEqual(AGENTS.detect({"PI_CODING_AGENT": "true"}), "pi")
+        self.assertEqual(
+            AGENTS.detect({"CODEX_THREAD_ID": "codex-parent", "PI_SESSION_FILE": "/pi/session.jsonl"}), "pi"
+        )
+        self.assertEqual(
+            AGENTS.detect({"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "c", "PI_SESSION_FILE": "/pi/session.jsonl"}),
+            "pi",
+        )
 
     def test_native_resume_commands_preserve_bound_session_and_reject_malformed_targets(self) -> None:
         for name in AGENTS.names:

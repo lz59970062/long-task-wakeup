@@ -1,6 +1,6 @@
 ---
 name: long-task-callback
-description: Explicit callback workflow for long-running agent tasks. Use the daemon handoff whenever Codex or Claude Code launches or edits a long-running command, training run, benchmark, test suite, build, deployment, Slurm job, data job, or script and should arrange for that task to resume the same agent session when it finishes. On an LTC configuration status block, the agent repairs configuration and rechecks before continuing. On callback, inspect results, ACK receipt in the bound session, and continue the original goal; periodic reminder text may be omitted but these duties still apply.
+description: Submit durable Codex, Claude or Pi child agents using registered task templates, or arrange callbacks for long-running commands, training, benchmarks, tests, builds and data jobs. Use when independent task ownership or a return to the original Codex, Claude Code or PI Agent session is needed. Repair LTC configuration status blocks; inspect results, ACK callbacks and continue the original goal.
 ---
 
 # Long Task Callback
@@ -13,8 +13,9 @@ Code turn.
 There are three public workflows:
 
 - `ltc run -- <command>` submits a new long-running task. The daemon launches it through an independent task owner (systemd on Linux, launchd on macOS, Task Scheduler on Windows; screen fallback on Linux/macOS).
-- `ltc agent codex|claude -- <prompt>` submits a fresh child agent through the same durable
-  lifecycle. Available since `0.6.5`.
+- `ltc agent codex|claude|pi -- <prompt>` submits a fresh child agent through the same durable
+  lifecycle. Codex/Claude are available since `0.6.5`; Pi is a child worker and callback
+  parent in the current preview.
 - `ltc done ...` queues a completion callback for work already owned by screen, tmux,
   Slurm, another scheduler, or an existing script.
 
@@ -23,6 +24,26 @@ written commands; old scripts may still pass it as a hidden no-op compatibility 
 invent another public launch flag or a direct-mode flag. Do not use a direct recursive
 `codex exec resume` or `claude -p --resume` call from an agent tool sandbox. Do not let callback
 behavior change the task's original exit code unless the user explicitly requests `--strict`.
+
+## Registered task templates
+
+`ltc template register NAME --file /path/to/template.yaml` installs a user template,
+copies its system-prompt dependencies, and creates a short `ltc-NAME` discovery skill.
+The YAML's `worker` and `description` describe the capability; CLI options can supply
+or override them. `ltc template list --json` shows the registered capabilities.
+The generated entrypoint binds the installed template file so another workspace's
+`LTC_TEMPLATE_DIR` cannot select a different same-named template. Keep Agent profile
+settings and the current parent's callback binding.
+
+Read the matching entrypoint and pass actual task scope, target paths and evidence
+constraints. Check readiness with `ltc doctor --operation agent --agent-worker WORKER`
+and validate submission with `--dry-run` when needed. Routine local edits need not be
+delegated. On completion, inspect the real result and edits, ACK and continue.
+
+Registration maintains only the following index; preserve the surrounding instructions.
+
+<!-- ltc:registered-templates:begin -->
+<!-- ltc:registered-templates:end -->
 
 ## Callback rules that always apply
 
@@ -81,6 +102,9 @@ apply when not repeated. Since LTC 0.6.6, standard reminders appear on the first
 4 distinct callbacks thereafter; user-hook reminders on the first and every 3.
 A short callback omits repeated prose, not these responsibilities. Task results,
 routing and the ACK command remain present. In 0.7.0, full commands, timestamps and handoff text are saved at the supplied Details path. Read that file before acting when the envelope says so; otherwise inspect relevant result artifacts directly. An exit code is process status, not proof of test success.
+When reporting a callback to the user, include the recorded task runtime in one
+short phrase when available, such as `Finished in 2m 5.5s`. Use execution duration,
+not the time spent waiting for delivery; do not invent a duration when it is unknown.
 
 Configure with `ltc prompt-policy --system-every 4 --user-every 3`; no options shows
 the effective policy. `1` means every callback. The file is
@@ -108,10 +132,10 @@ native backend needs no screen. A screen process can remain inside its launching
 service's control group: do not assume it survives stopping that service.
 
 After submission, record the task ID, execution backend and artifact paths, then
-return control. For long work, avoid polling processes or logs on a timer. Live
-monitoring is appropriate when requested or diagnosing callback infrastructure.
-Do not change a running task's owner or automatically retry an unknown native
-launch. PI/DSH support is not implemented in 0.7.0.
+return control when no independent work remains. For long work, avoid polling
+processes or logs on a timer. Live monitoring is appropriate when requested or
+diagnosing callback infrastructure. Do not change a running task's owner or
+automatically retry an unknown native launch. DSH remains unsupported.
 
 ## Duration policy
 
@@ -352,7 +376,7 @@ Detaching with `Ctrl-a d` leaves the task running.
 
 ## Agent: submit a durable fresh child agent
 
-Use `ltc agent` when a fresh Codex or Claude Code process should perform an independent task and
+Use `ltc agent` when a fresh Codex, Claude Code or Pi process should perform an independent task and
 the work needs independent ownership, durable artifacts, or a completion callback. For short work that
 fits an in-turn native subagent, LTC is unnecessary.
 
@@ -366,9 +390,14 @@ ltc agent codex \
   --cwd "$PWD" \
   --task "implement parser fixes" \
   -- "Fix the confirmed parser defects and run the relevant tests."
+
+ltc agent pi \
+  --cwd "$PWD" \
+  --task "review parser edge cases" \
+  -- "Inspect parser.py and its tests. Report concrete defects and suggested fixes."
 ```
 
-The `codex|claude` subcommand selects the child process. The existing `--agent` option still
+The `codex|claude|pi` subcommand selects the child process. The existing `--agent` option still
 selects the parent agent to wake when explicit callback binding is needed. The text after `--` is
 the child's task, not a shell command. State the objective, relevant paths or context, expected
 deliverable, and real constraints; do not impose a fixed task template when they are unnecessary.
@@ -383,6 +412,33 @@ Before the first Claude child, confirm `command -v claude` and `claude auth stat
 `ANTHROPIC_API_KEY` specifically: OAuth/keychain and supported cloud providers are valid too. When
 used, `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_CONFIG_DIR`, proxy/certificate settings,
 and other custom values must be available in the submission environment; never print their values.
+
+For Pi, use `ltc doctor --operation agent --agent-worker pi` to check child readiness.
+`LONG_TASK_WAKEUP_PI_BIN` overrides the executable. LTC runs
+`pi --print --mode text --no-session` with prompt stdin and captures assistant text
+in the managed private result artifact. Keep the submission-time Pi profile,
+authentication, API, proxy and extension configuration; remove Codex/Claude parent
+markers plus `PI_SESSION_ID`, `PI_SESSION_FILE` and `PI_CODING_AGENT`. Do not put
+credentials in prompts or persist a child session.
+`--model` accepts Pi's model notation, including `provider/model`; `--reasoning-effort`
+maps to `--thinking` and accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh`,
+and `max`, but rejects `ultra`. Tool permissions and project extension trust follow
+Pi's noninteractive configuration; do not add `--approve`. LTC's `--sandbox-mode`
+is Codex-only and `--permission-mode` is Claude-only. Pi 0.87.1's CLI contract was
+checked; native Windows/macOS Pi launch has not been verified in this session.
+
+A Pi session can also be a callback parent (`--agent pi`). Pi gets its own installed
+skill for that workflow; from Codex or Claude Code only the `ltc agent pi` child applies.
+
+Pi accepts `--system-prompt-file ./prompts/pi-system.md` before `--`. Keep this
+separate from `--template`/`--template-file`, which build the stdin task prompt.
+Pi's `--system-prompt` receives the snapshot and replaces its built-in base system
+prompt while retaining normal project context, skills and appended instructions.
+A relative CLI file path uses the submitting shell directory, independently of
+child `--cwd`. Read a nonempty UTF-8 source at submission and snapshot it privately
+as `agent-system-prompt.md`; later edits/deletion must not change queued tasks.
+No interpolation or script evaluation occurs. `--dry-run` reports the resolved
+source without creating task files or starting the child. The flag is Pi-only.
 
 LTC owns the private prompt and result files in the managed task directory. The caller does not
 choose those paths. On callback, inspect the child result and relevant artifacts, acknowledge the
@@ -428,9 +484,10 @@ finally:
 ## Session binding
 
 Run from the agent-owned environment and omit target flags by default. LTC detects
-`CODEX_THREAD_ID` or `CLAUDE_CODE_SESSION_ID`.
+`CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`, or Pi's absolute `PI_SESSION_FILE` (an ID alone is insufficient).
 
-Use `--agent codex|claude --session <id>` when explicit binding is necessary. Use `--last` only as
+Use `--agent codex|claude|pi --session <id>` when explicit binding is necessary. For Pi,
+prefer the absolute session file from `PI_SESSION_FILE`. Use `--last` only as
 an unsafe manual fallback; it always warns. If the target cannot be determined, fail instead of
 guessing.
 
@@ -657,11 +714,13 @@ ltc cancel --queue-dir <queue-dir> --all --message "no longer needed"
 ## Independent test authoring preset
 
 Use `ltc agent codex --template test --task "write independent tests" -- "Requirements and specification paths"`
-when a separate agent should author tests for the parent to execute. The default child is
+when a separate agent should author tests for the parent to execute. The default Codex model is
 `gpt-5.6-luna` with `max` reasoning; override using `--model` and `--reasoning-effort`.
 These flags affect the child only; `--agent` continues to select the parent callback agent.
 Claude supports the template and `--model`, inherits its own model by default, and rejects
-`--reasoning-effort`. Put all flags before `--`; provide concrete requirements after it.
+`--reasoning-effort`. Pi supports the same prompt and handoff, inherits its own model/thinking
+configuration unless overridden, and accepts the thinking levels listed above. The built-in
+Codex model/effort defaults never apply to Pi. Put all flags before `--`; provide concrete requirements after it.
 
 The child writes requirement-derived tests and a handoff, without running tests or modifying
 production code. The parent reviews the changed files, requirements and commands, then runs
@@ -681,7 +740,11 @@ letters, digits, underscores and hyphens. No reinstall is needed when files chan
 
 YAML requires `version: 1` (positive integer revision) and non-empty `prompt: |` text.
 Optional `codex: {model: gpt-5.6-luna, reasoning_effort: max}` and
-`claude: {model: sonnet}` set worker-specific defaults; CLI options take precedence.
+`claude: {model: sonnet}` set worker-specific defaults; Pi also accepts
+`pi: {model: provider/id, reasoning_effort: high}`. CLI options take precedence.
+Optional `pi: {system_prompt_file: prompts/system.md}` loads a separate nonempty
+UTF-8 system prompt; its relative path uses the YAML directory. An explicit
+`--system-prompt-file` overrides it and resolves relative to the submitting shell.
 Optional `handoff: |` text instructs the parent on callback. No variable interpolation
 or code evaluation occurs. Unknown/duplicate fields or invalid values fail before
 submission. Use `--dry-run` to inspect source, prompt, defaults and handoff.

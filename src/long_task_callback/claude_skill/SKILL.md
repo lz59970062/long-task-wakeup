@@ -32,6 +32,10 @@ differs from this page about callback delivery, this page applies to Claude Code
    stderr prints the task id, backend, log path, and a ready-made line:
    `ltc: Claude Code live callback: run in the background (run_in_background): .../ltc wait --queue-dir ... --task <id>`
 
+   If it instead says the callback `arrives through the ltc channel`, this session was started with
+   `ltc claude`: skip step 2. The callback is pushed into this session as a
+   `<channel source="ltc">` event; handle it as in step 3.
+
 2. **Wait** — run exactly that `ltc wait ... --task <id>` command with the Bash tool's
    `run_in_background: true`. Do not run it in the foreground (it blocks until the job ends), and do
    not poll its output. Then tell the user what is running and end your turn, or carry on with other

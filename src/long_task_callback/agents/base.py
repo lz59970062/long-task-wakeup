@@ -15,6 +15,7 @@ DEFAULT_APPROVALS_REVIEWER = "auto_review"
 DEFAULT_APPROVAL_POLICY = "on-request"
 DEFAULT_SANDBOX_MODE = "workspace-write"
 DEFAULT_CLAUDE_PERMISSION_MODE = "auto"
+CODEX_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 
 @dataclass(frozen=True)
@@ -32,27 +33,37 @@ class ChildOptions:
     permission_mode: str
     model: str | None = None
     reasoning_effort: str | None = None
+    system_prompt_path: Path | None = None
 
 
-class AgentAdapter(Protocol):
+class ChildAgentAdapter(Protocol):
+    """A fresh child process, independent of callback session transport."""
+
     name: str
     display_name: str
-    session_id_env: str
     parent_env_names: tuple[str, ...]
-    detection_priority: int
     child_result_mode: Literal["file", "stdout"]
     supports_reasoning_effort: bool
-
-    def matches_environment(self, environment: Mapping[str, str]) -> bool: ...
+    reasoning_efforts: tuple[str, ...]
+    supports_system_prompt_file: bool
 
     def executable(self, environment: Mapping[str, str]) -> str: ...
 
-    def resume_command(
-        self, request: Mapping[str, object], environment: Mapping[str, str]
-    ) -> list[str]: ...
-
     def child_command(
         self, options: ChildOptions, environment: Mapping[str, str]
+    ) -> list[str]: ...
+
+
+class AgentAdapter(ChildAgentAdapter, Protocol):
+    """A child-capable agent with a separately verified callback transport."""
+
+    session_id_env: str
+    detection_priority: int
+
+    def matches_environment(self, environment: Mapping[str, str]) -> bool: ...
+
+    def resume_command(
+        self, request: Mapping[str, object], environment: Mapping[str, str]
     ) -> list[str]: ...
 
 

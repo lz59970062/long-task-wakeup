@@ -34,7 +34,7 @@ ltc done --task "external job" --exit-code 0
 ```
 
 Run from the original Agent conversation's shell so its session can be detected,
-or pass `--agent codex|claude --session <original-session-id>`. Setup installs the
+or pass `--agent codex|claude|pi --session <original-session-id>`. Setup installs the
 skill and creates the daemon; it does not authenticate an Agent CLI for you.
 
 ## Install the 0.7.1 preview branch

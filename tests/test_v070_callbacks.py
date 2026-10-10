@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from long_task_callback import cli
+from long_task_callback import callbacks, cli
 from test_cli import assert_private_file
 
 
@@ -39,7 +39,7 @@ class CompactCallbackTests(unittest.TestCase):
         arguments.update(overrides)
         args = argparse.Namespace(**arguments)
         prompt = cli.build_prompt(args, duration=125.5)
-        request = cli.make_request(args, prompt)
+        request = cli.make_request(args, prompt, duration=125.5)
         return request, prompt
 
     def prepare(self, ident: str, **overrides: object) -> dict[str, object]:
@@ -57,6 +57,7 @@ class CompactCallbackTests(unittest.TestCase):
         self.assertLess(len(prepared["prompt"]), 1500)
         self.assertNotIn(command, compact)
         self.assertNotIn(message, compact)
+        self.assertIn("Duration: 2m 5.5s", compact)
         for essential in ("compact-result", "bound-original-session", "ack", "--id", str(self.root)):
             self.assertIn(essential, compact)
         details = Path(prepared["prompt_details_path"])
@@ -66,6 +67,32 @@ class CompactCallbackTests(unittest.TestCase):
         self.assertIn(str(details), compact)
         self.assertIn("read", compact.lower())
         self.assertIn("details", compact.lower())
+
+    def test_duration_stays_fixed_across_delivery_cadence_and_retry(self) -> None:
+        for ident in ("runtime-first", "runtime-next"):
+            request = self.prepare(ident)
+            restored = json.loads(json.dumps(request))
+            payload = dict(prompt=restored["prompt"], request=restored,
+                           queue_dir=str(self.root))
+            with mock.patch.object(cli.time, "time", return_value=9999999999):
+                selected = cli.select_delivery_prompt(payload)
+                retried = cli.select_delivery_prompt(payload)
+            self.assertEqual(restored["duration_seconds"], 125.5)
+            self.assertIn("Duration: 2m 5.5s", selected)
+            self.assertEqual(selected, retried)
+
+    def test_duration_handles_long_runs_and_rounding_without_fabricating_values(self) -> None:
+        for seconds, expected in ((0, "0.0s"), (12.5, "12.5s"),
+                                  (59.96, "1m 0.0s"), (3600, "1h 0.0s"),
+                                  (90061.2, "1d 1h 1m 1.2s")):
+            with self.subTest(seconds=seconds):
+                self.assertEqual(callbacks.format_duration(seconds), expected)
+        for seconds in (None, True, -1, "12.5", float("nan"), float("inf")):
+            with self.subTest(seconds=seconds):
+                request, prompt = self.make_callback("runtime-unknown")
+                request["duration_seconds"] = seconds
+                prepared = cli.prepare_request_for_queue(self.root, request, prompt)
+                self.assertNotIn("Duration:", prepared["prompt_compact"])
 
     def test_ack_line_can_be_executed_with_spaces_and_quotes_without_wrong_queue(self) -> None:
         launcher = "/opt/LTC user's tools/ltc"

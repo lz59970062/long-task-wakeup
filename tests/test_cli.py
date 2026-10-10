@@ -90,11 +90,12 @@ class CliTests(unittest.TestCase):
 
     @staticmethod
     def _env_without_claude(**extra: str) -> "mock._patch_dict":
-        """Simulate a Codex-only environment even when tests run inside Claude Code."""
+        """Simulate a Codex-only environment even when tests run inside Claude Code or PI."""
         env = {
             key: value
             for key, value in os.environ.items()
-            if key not in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID")
+            if key not in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID",
+                           "PI_SESSION_ID", "PI_SESSION_FILE", "PI_CODING_AGENT")
         }
         env.update(extra)
         return mock.patch.dict(os.environ, env, clear=True)
@@ -952,7 +953,8 @@ class CliTests(unittest.TestCase):
         self.assertIn('sandbox_workspace_write.writable_roots=["/tmp/callback-queue"]', command)
 
     def test_resolve_agent_detects_claude_environment(self) -> None:
-        env = {key: value for key, value in os.environ.items() if key != "CODEX_THREAD_ID"}
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("CODEX_THREAD_ID", "PI_SESSION_ID", "PI_SESSION_FILE", "PI_CODING_AGENT")}
         env["CLAUDECODE"] = "1"
         env["CLAUDE_CODE_SESSION_ID"] = "claude-session-1"
         with mock.patch.dict(os.environ, env, clear=True):
@@ -977,7 +979,8 @@ class CliTests(unittest.TestCase):
             sandbox_mode="workspace-write",
             permission_mode="auto",
         )
-        env = {key: value for key, value in os.environ.items() if key != "CODEX_THREAD_ID"}
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("CODEX_THREAD_ID", "PI_SESSION_ID", "PI_SESSION_FILE", "PI_CODING_AGENT")}
         env["CLAUDECODE"] = "1"
         env["CLAUDE_CODE_SESSION_ID"] = "claude-session-1"
         with mock.patch.dict(os.environ, env, clear=True):
@@ -1115,6 +1118,25 @@ class CliTests(unittest.TestCase):
 
             self.assertFalse((codex_home / "skills").exists())
             self.assertTrue((claude_home / "skills" / "long-task-callback" / "SKILL.md").exists())
+
+    def test_install_skill_all_keeps_each_agents_delivery_to_itself(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            homes = {"CODEX_HOME": Path(tmp) / "codex", "CLAUDE_CONFIG_DIR": Path(tmp) / "claude",
+                     "PI_CODING_AGENT_DIR": Path(tmp) / "pi"}
+            with mock.patch.dict(os.environ, {name: str(path) for name, path in homes.items()}, clear=False):
+                self.assertEqual(cli.install_skill(argparse.Namespace(path=None, target="all", force=False)), 0)
+            skills = {name: (path / "skills" / "long-task-callback") for name, path in homes.items()}
+            codex = (skills["CODEX_HOME"] / "SKILL.md").read_text(encoding="utf-8")
+            claude = (skills["CLAUDE_CONFIG_DIR"] / "SKILL.md").read_text(encoding="utf-8")
+            pi = (skills["PI_CODING_AGENT_DIR"] / "SKILL.md").read_text(encoding="utf-8")
+            self.assertIn("steer", pi)
+            self.assertNotIn("ltc wait", pi)
+            self.assertNotIn("steer", claude)
+            for text in (codex,):
+                self.assertNotIn("ltc wait", text)
+                self.assertNotIn("install-pi-extension", text)
+            self.assertEqual((skills["PI_CODING_AGENT_DIR"] / "REFERENCE.md").read_text(encoding="utf-8"), codex)
+            self.assertFalse((skills["PI_CODING_AGENT_DIR"] / "agents").exists())
 
     def test_daemon_requeues_when_agent_does_not_ack(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
