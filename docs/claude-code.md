@@ -70,17 +70,20 @@ Each agent gets its own installed skill, so Claude-specific usage never reaches 
 
 ## Finding the Claude binary
 
-The desktop app does not put `claude` on PATH, and launchd/systemd services see a minimal PATH.
-LTC looks for Claude in this order:
+The desktop app does not put `claude` on PATH, nvm installs live under a per-Node-version
+directory, and launchd/systemd services see a minimal PATH. LTC looks for Claude in this order:
 
 1. `LONG_TASK_WAKEUP_CLAUDE_BIN` / `ltc setup --claude-bin` (an explicit path or name is always honored)
 2. `claude` on PATH
-3. Standalone installs: `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.npm-global/bin`, `~/.bun/bin`
+3. Standalone installs: `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.npm-global/bin`, `~/.bun/bin`, the newest `~/.nvm/versions/node/*/bin`
 4. `CLAUDE_CODE_EXECPATH` from the launching session
-5. The newest desktop-app bundle under `~/Library/Application Support/Claude/claude-code/`
+5. On a Linux host used by the desktop app over SSH: the newest CLI under `~/.claude/remote/ccd-cli/`
+6. On macOS: the newest desktop-app bundle under `~/Library/Application Support/Claude/claude-code/`
 
-The desktop bundle is found last because it authenticates through the app and cannot run headless
-on its own. A configured desktop-bundle path that disappears after an app update is rediscovered.
+The macOS bundle is found last because it authenticates through the app and cannot run headless on
+its own. The Linux SSH CLI is an ordinary binary that shares the host's `~/.claude` sign-in, so it
+can run the headless fallback once `claude auth login` has been done on that host. Both are
+versioned: a configured path to either that disappears after an app update is rediscovered.
 
 ## Resuming from the right directory
 
@@ -103,6 +106,19 @@ is not a configuration error — live delivery still works — but delegating to
 
 ## Platform status
 
-Live delivery and binary/session discovery were developed and verified on macOS with the Claude
-desktop app. The mechanism is POSIX-generic (flock-based waiter locks), so Linux is expected to
-work but has not been verified end to end yet. Windows is untested.
+| Platform | Status |
+| --- | --- |
+| macOS | Verified with the Claude desktop app (local sessions) and the CLI. |
+| Linux | Verified end to end with the desktop app's SSH sessions (`CLAUDE_CODE_ENTRYPOINT=claude-desktop`, `screen` backend): `ltc run` → background `ltc wait` wakes the live session → daemon defers while the waiter lives and takes over once it exits → `ltc ack`. The terminal CLI uses the same mechanism. |
+| Windows | Untested. |
+
+### Linux notes
+
+- Without a systemd user bus (SSH-only hosts, containers) tasks run under GNU `screen`; install it
+  with your package manager. Live delivery does not depend on the task backend.
+- Run `ltc setup` once on the Linux host so the Claude skill lands in that host's
+  `~/.claude/skills/` — the desktop app's SSH sessions read skills from the remote host.
+- The `ltc wait` command printed by `ltc run` uses the `ltc` found on PATH; make sure it is the
+  same install as the daemon (`ltc --version`), or older installs will reject `wait`.
+- If `claude` on PATH is a wrapper that cannot run outside your login shell, pin a working binary
+  with `ltc setup --claude-bin <path>` so the headless fallback can resume.

@@ -1,8 +1,9 @@
 """Claude Code installation and session discovery on the local host.
 
 Claude Code is often installed without a ``claude`` launcher on PATH: the
-desktop app bundles its own versioned binary, and launchd/systemd services see
-a minimal PATH. Session transcripts are stored per original project directory,
+desktop app bundles its own versioned binary (on macOS inside the app, on a
+Linux host reached over SSH under ``~/.claude/remote``), nvm installs live in a
+per-Node-version directory, and launchd/systemd services see a minimal PATH. Session transcripts are stored per original project directory,
 so a headless resume must start where the session started. These helpers only
 read the filesystem; they never launch Claude or change its configuration.
 """
@@ -36,9 +37,14 @@ STANDALONE_LOCATIONS = (
     "/usr/local/bin/claude",
     "~/.npm-global/bin/claude",
     "~/.bun/bin/claude",
+    "~/.nvm/versions/node/*/bin/claude",  # newest Node version first
 )
 # The macOS desktop app keeps one bundle per version/build.
 DESKTOP_BUNDLE_GLOB = "Library/Application Support/Claude/claude-code/*/*/claude.app/Contents/MacOS/claude"
+# The desktop app's SSH sessions install one plain CLI per version on the remote
+# host. It shares the host's ~/.claude sign-in, so unlike the macOS bundle it can
+# resume headless whenever a standalone CLI could; it is only versioned.
+DESKTOP_REMOTE_GLOB = ".claude/remote/ccd-cli/*"
 SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 # A session's first records carry its starting cwd; never scan a whole transcript.
 SESSION_CWD_SCAN_LINES = 200
@@ -46,7 +52,7 @@ SESSION_CWD_SCAN_LINES = 200
 
 class Executable(NamedTuple):
     path: str
-    source: str  # configured | path | standalone | session | desktop-bundle
+    source: str  # configured | path | standalone | session | desktop-remote | desktop-bundle
 
 
 Which = Callable[..., Optional[str]]
@@ -64,10 +70,29 @@ def is_desktop_bundle(path: str | os.PathLike[str]) -> bool:
     return "/claude-code/" in str(path) and "claude.app/Contents/MacOS/" in str(path)
 
 
+def is_desktop_remote(path: str | os.PathLike[str]) -> bool:
+    return "/.claude/remote/ccd-cli/" in str(path)
+
+
+def _source_of(path: str) -> str | None:
+    if is_desktop_bundle(path):
+        return "desktop-bundle"
+    return "desktop-remote" if is_desktop_remote(path) else None
+
+
+def _newest(home: Path, pattern: str) -> list[Path]:
+    candidates = [path for path in home.glob(pattern) if _is_executable(path)]
+    return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
 def desktop_bundles(environment: Mapping[str, str]) -> list[Path]:
     """Return bundled desktop binaries, newest first."""
-    candidates = [path for path in _home(environment).glob(DESKTOP_BUNDLE_GLOB) if _is_executable(path)]
-    return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)
+    return _newest(_home(environment), DESKTOP_BUNDLE_GLOB)
+
+
+def desktop_remote_binaries(environment: Mapping[str, str]) -> list[Path]:
+    """Return the desktop app's SSH-session CLIs on this host, newest first."""
+    return _newest(_home(environment), DESKTOP_REMOTE_GLOB)
 
 
 def discover_executable(environment: Mapping[str, str], *, which: Which = shutil.which) -> Executable | None:
@@ -84,9 +109,9 @@ def discover_executable(environment: Mapping[str, str], *, which: Which = shutil
         expanded = Path(configured).expanduser()
         if expanded.is_absolute() or os.sep in configured:
             # Honor an explicit path even when it is missing, so a broken
-            # configuration fails visibly. Only a versioned desktop bundle
+            # configuration fails visibly. Only a versioned desktop binary
             # replaced by an app update is rediscovered.
-            if _is_executable(expanded) or not is_desktop_bundle(expanded):
+            if _is_executable(expanded) or _source_of(configured) is None:
                 return Executable(str(expanded), "configured")
         else:
             found = which(configured)
@@ -98,17 +123,18 @@ def discover_executable(environment: Mapping[str, str], *, which: Which = shutil
                 return Executable(configured, "configured")
     found = which("claude")
     if found:
-        return Executable(found, "desktop-bundle" if is_desktop_bundle(found) else "path")
+        return Executable(found, _source_of(found) or "path")
     for location in STANDALONE_LOCATIONS:
-        path = Path(location.replace("~", str(home), 1))
-        if _is_executable(path):
-            return Executable(str(path), "standalone")
+        matches = _newest(home, location[2:]) if "*" in location else [Path(location.replace("~", str(home), 1))]
+        if matches and _is_executable(matches[0]):
+            return Executable(str(matches[0]), "standalone")
     session_binary = environment.get(EXECPATH_ENV, "").strip()
     if session_binary and _is_executable(Path(session_binary)):
-        return Executable(session_binary, "desktop-bundle" if is_desktop_bundle(session_binary) else "session")
-    bundles = desktop_bundles(environment)
-    if bundles:
-        return Executable(str(bundles[0]), "desktop-bundle")
+        return Executable(session_binary, _source_of(session_binary) or "session")
+    for source, binaries in (("desktop-remote", desktop_remote_binaries(environment)),
+                             ("desktop-bundle", desktop_bundles(environment))):
+        if binaries:
+            return Executable(str(binaries[0]), source)
     return None
 
 
