@@ -428,7 +428,7 @@ class PiAgentContractTests(unittest.TestCase):
         self.assertEqual(report["callback"]["transport"], "cli_resume")
         repair = report["repair_command"]
         self.assertIsInstance(repair, list)
-        self.assertNotIn("--skill-target", repair)
+        self.assertEqual(repair[repair.index("--skill-target") + 1], "pi")
         self.assertEqual(repair[repair.index("--pi-bin") + 1], "/fixture/bin/pi")
         recheck = report["recheck_command"]
         self.assertEqual(recheck[recheck.index("--agent") + 1], "pi")

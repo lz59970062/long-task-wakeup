@@ -132,14 +132,10 @@ native backend needs no screen. A screen process can remain inside its launching
 service's control group: do not assume it survives stopping that service.
 
 After submission, record the task ID, execution backend and artifact paths, then
-return control when no independent work remains. In a live Pi session, continue
-independent short work if useful: callbacks automatically steer at the next model
-decision, so ending the entire run is not required for receipt. For long work,
-avoid polling processes or logs on a timer. Live
-monitoring is appropriate when requested or diagnosing callback infrastructure.
-Do not change a running task's owner or automatically retry an unknown native
-launch. Stable 0.7.0 does not include Pi/DSH; the current preview supports Pi both
-as a child worker and as a callback parent session. DSH remains unsupported.
+return control when no independent work remains. For long work, avoid polling
+processes or logs on a timer. Live monitoring is appropriate when requested or
+diagnosing callback infrastructure. Do not change a running task's owner or
+automatically retry an unknown native launch. DSH remains unsupported.
 
 ## Duration policy
 
@@ -431,35 +427,8 @@ Pi's noninteractive configuration; do not add `--approve`. LTC's `--sandbox-mode
 is Codex-only and `--permission-mode` is Claude-only. Pi 0.87.1's CLI contract was
 checked; native Windows/macOS Pi launch has not been verified in this session.
 
-Pi is also a callback parent (`--agent pi`). Install the generic native extension
-with `ltc install-pi-extension`, then reload/restart ordinary Pi. Bind the absolute
-`PI_SESSION_FILE`; partial IDs and `--last` cannot identify the callback file.
-Live callbacks enter the original Pi process through its native `steer` API:
-when busy, the result is queued after the current tool-call batch and before the
-next model request; when idle, Pi starts a normal turn. No delivery option or
-forced run termination is needed. Steering does not abort an executing tool.
-Previously queued callbacks keep their old follow-up timing. Upgrade the
-coordinator and installed extension, then reload/restart Pi; an older live
-extension blocks new automatic-steering submissions rather than downgrading them.
-They continue the current branch. Ordinary Pi is online-only.
-
-Use `ltc pi --cwd "$PWD"` for a new managed session, or
-`ltc pi --session /absolute/session.jsonl -- --model provider/model` to reopen one.
-The launcher locks the file before Pi starts. Only after the verified original
-Pi fully exits may an offline worker hold that same lock and resume in print mode.
-Managed sessions are pinned: restart the launcher to switch/fork/reload resources;
-`/reload` exits managed Pi to preserve the pin if extension loading fails.
-The advisory lease does not constrain independently launched Pi processes.
-
-Pi profile/channel paths are frozen in callbacks. Inspect `ltc doctor --agent pi
---session "$PI_SESSION_FILE"` for current registration/eligibility; that probe
-cannot prove end-to-end receipt. Publication/admission/session observation cannot
-replace ACK. A published callback with an unknown outcome retains its target
-lease and is never automatically replayed; inspect and ACK/cancel manually.
-Cancellation before dispatch suppresses it; cancellation after dispatch is best effort.
-`ltc setup --with-pi-extension` optionally installs the extension. Installer changes
-only its own extension, preserving personal templates and settings. Native
-Windows/macOS live integration remains unverified in this environment.
+A Pi session can also be a callback parent (`--agent pi`). Pi gets its own installed
+skill for that workflow; from Codex or Claude Code only the `ltc agent pi` child applies.
 
 Pi accepts `--system-prompt-file ./prompts/pi-system.md` before `--`. Keep this
 separate from `--template`/`--template-file`, which build the stdin task prompt.

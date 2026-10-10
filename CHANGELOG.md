@@ -54,6 +54,21 @@
 
 ### Pi Agent
 
+- Publishing a callback to a live Pi no longer blocks the daemon until the ACK. The delivery worker
+  returns "published; awaiting ACK" (122) and the daemon keeps launching tasks and delivering other
+  sessions' callbacks; the session's retained lease still orders its own callbacks, and `ltc ack`
+  finalizes it. Each loop moves a published, unacknowledged callback to `failed` for manual
+  recovery (never replay) when its Pi exits or closes the mailbox, the session is reopened by
+  another process, or `--resume-timeout` passes; `last_error` says whether Pi had admitted it.
+  Previously a live delivery held the coordinator for up to the resume timeout, delaying unrelated
+  task starts.
+- Give Pi its own installed skill (`${PI_CODING_AGENT_DIR:-~/.pi/agent}/skills/long-task-callback`):
+  a focused `SKILL.md` about steered callbacks plus the shared reference as `REFERENCE.md`. The
+  shared Codex/Claude skill no longer carries Pi-session instructions. `install-skill --target`
+  and `setup --skill-target` accept `pi` and `all`; `setup --with-pi-extension` installs all three
+  and `install-pi-extension` installs the Pi skill too. `doctor` checks the Pi skill and its repair
+  command targets it.
+- Add `docs/pi.md`.
 - Add Pi Agent as a child worker with `ltc agent pi`, fresh nonpersistent text
   execution, submission-time environment/configuration and private result capture.
   Support Pi model/thinking overrides, per-Pi template defaults, executable

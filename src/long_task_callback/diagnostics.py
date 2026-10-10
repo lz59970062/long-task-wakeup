@@ -356,15 +356,14 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
         issues.append({"code": "callback_transport_blocked", "kind": "callback", "component": "callback_delivery",
                        "action": capability.get("action", "Configure the original session's shared Core; do not resubmit saved work.")})
 
-    skill_home = cli.codex_home() if callback_agent == "codex" else cli.claude_home() if callback_agent == "claude" else None
+    skill_home = {"codex": cli.codex_home, "claude": cli.claude_home,
+                  "pi": cli.pi_callback.profile_dir}.get(callback_agent or "", lambda: None)()
     if skill_home is not None and not (skill_home / "skills" / "long-task-callback" / "SKILL.md").is_file():
         issues.append({"code": "skill_missing", "action": "Install the bundled LTC skill for the selected Agent so it can inspect, acknowledge and continue callbacks."})
 
     repair = worker_command("setup", "--queue-dir", str(root), "--backend", choice,
                             "--service", "auto")
-    # PI Agent parents do not consume the bundled Codex/Claude skill; keep the
-    # setup default instead of emitting an unsupported --skill-target value.
-    if callback_agent in {"codex", "claude"}:
+    if callback_agent in {"codex", "claude", "pi"}:
         repair.extend(["--skill-target", callback_agent])
     repair.extend(["--keep-skill", "--force", "--now"])
     if operation == "done":

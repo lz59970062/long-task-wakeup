@@ -9,7 +9,7 @@
   <a href="./CHANGELOG.md"><img src="https://img.shields.io/badge/preview-0.7.1a1-a371f7" alt="Preview 0.7.1a1"></a>
   <img src="https://img.shields.io/badge/python-%E2%89%A53.9-3776ab" alt="Python ≥ 3.9">
   <img src="https://img.shields.io/badge/platforms-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-58a6ff" alt="Linux, macOS, Windows">
-  <img src="https://img.shields.io/badge/agents-Codex%20%C2%B7%20Claude%20Code-d29922" alt="Works with Codex and Claude Code">
+  <img src="https://img.shields.io/badge/agents-Codex%20%C2%B7%20Claude%20Code%20%C2%B7%20Pi-d29922" alt="Works with Codex, Claude Code and Pi">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT license"></a>
 </p>
 
@@ -66,7 +66,8 @@ Session: <session-id> (only)
 | 🔁 **Same conversation** | Callbacks are bound to the original Codex (`CODEX_THREAD_ID`) or Claude Code (`CLAUDE_CODE_SESSION_ID`) session — never a guess. |
 | 🧱 **Survives the agent** | Tasks run under systemd, launchd or Task Scheduler — not as a child of the agent turn or even the daemon. |
 | ⚡ **Claude Code native** | In Claude Code (CLI or desktop app), a background `ltc wait` wakes the conversation you're looking at — no headless side session. → [Claude Code guide](docs/claude-code.md) |
-| 🤖 **Child agents** | `ltc agent codex\|claude` launches a fresh agent as a durable background job, with reusable prompt templates. |
+| 🥧 **Pi native** | Pi's extension steers the result into the running Pi session — even mid-run, before its next model call. → [Pi guide](docs/pi.md) |
+| 🤖 **Child agents** | `ltc agent codex\|claude\|pi` launches a fresh agent as a durable background job, with reusable prompt templates. |
 | 🎯 **Multi-stage goals** | Track an objective across many callbacks with a YAML plan that the agent must verify before declaring victory. |
 | 🛡️ **Never reruns blindly** | Ambiguous launches, reboots and failures are reported to the agent for inspection — LTC never silently replays work. |
 | 🩺 **Self-repairing setup** | When something is misconfigured, the agent gets a machine-readable repair plan and fixes it itself. |
@@ -80,6 +81,7 @@ python3 -m pip install "git+https://github.com/lz59970062/long-task-wakeup.git@v
 
 # 2. Install the skill for Codex + Claude Code and start the background daemon
 ltc setup --force --enable --now
+#    Using Pi too? Add --with-pi-extension (Pi skill + live-callback extension)
 
 # 3. Check that everything is healthy
 ltc --version
@@ -156,7 +158,7 @@ LTC has three entry points:
 | Command | Use it when… |
 | --- | --- |
 | `ltc run -- <command>` | You want LTC to **launch and own** a new long task. |
-| `ltc agent codex\|claude -- <prompt>` | You want a **fresh child agent** to work in the background and report back. |
+| `ltc agent codex\|claude\|pi -- <prompt>` | You want a **fresh child agent** to work in the background and report back. |
 | `ltc done ...` | The task is **already owned** by screen, tmux, Slurm or another scheduler — just report completion. |
 
 ### `run` — submit a long task
@@ -299,7 +301,9 @@ Use `--service standalone --now` where user systemd is unavailable (e.g. AutoDL)
 | Topic | |
 | --- | --- |
 | Claude Code: live callbacks, binary discovery, session directories | [docs/claude-code.md](docs/claude-code.md) |
+| Pi: steered live callbacks, managed sessions, Pi child agents | [docs/pi.md](docs/pi.md) |
 | Agent mode, templates, Claude Code config | [docs/agent-mode.md](docs/agent-mode.md) |
+| Registering templates as discoverable skills | [docs/template-registration.md](docs/template-registration.md) |
 | Goals and acknowledgement layers | [docs/goals.md](docs/goals.md) |
 | Callback format, reminder cadence, user hook | [docs/callback-reminders.md](docs/callback-reminders.md) |
 | Callback modes (CLI / Desktop / manual) — 0.7.1 | [docs/callback-modes.md](docs/callback-modes.md) |
@@ -316,7 +320,8 @@ Use `--service standalone --now` where user systemd is unavailable (e.g. AutoDL)
 - [x] Fresh child agents with templates (0.6.5)
 - [ ] Explicit callback modes and Desktop shared Core (0.7.1 preview)
 - [ ] Claude Code live callbacks via `ltc wait` (0.7.1 preview; verified on macOS and Linux)
-- [ ] PI / DSH agent adapters
+- [ ] Pi agent adapter: child worker and steered live callbacks (0.7.1 preview; verified on Linux)
+- [ ] DSH agent adapter
 
 ## License
 
