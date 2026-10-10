@@ -29,4 +29,4 @@ ltc-desktop-core = "long_task_callback.desktop_core:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-long_task_callback = ["skill/SKILL.md", "claude_skill/SKILL.md", "skill/agents/openai.yaml", "templates/*.md", "platforms/*.ps1", "desktop_windows_assets/*.ps1", "desktop_windows_assets/*.py", "pi_extension/*.js"]
+long_task_callback = ["skill/SKILL.md", "claude_skill/SKILL.md", "pi_skill/SKILL.md", "skill/agents/openai.yaml", "templates/*.md", "platforms/*.ps1", "desktop_windows_assets/*.ps1", "desktop_windows_assets/*.py", "pi_extension/*.js"]

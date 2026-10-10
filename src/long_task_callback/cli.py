@@ -1898,7 +1898,9 @@ def delivery_worker_main() -> int:
                 release_retained_target_lease(*delivery_context)
                 result = {"returncode": 0, "delivery": pi_delivery.delivery_name, "skipped": "acknowledged_or_canceled"}
             elif pi_delivery is not None and pi_delivery.online:
-                result = wait_for_remote_delivery(payload, pi_delivery, timeout)
+                # The live Pi process owns it now; the daemon supervises the ACK
+                # without blocking other callbacks and task launches.
+                result = {"returncode": pi_callback.PUBLISHED_RETURN_CODE, "delivery": pi_delivery.delivery_name}
             else:
                 process = subprocess.Popen(
                     process_command([str(part) for part in command]),
@@ -2100,7 +2102,8 @@ def run_resume_until_exit_or_ack(
             if returncode is not None:
                 child_returncode = finish_delivery_worker(process)
                 acked = ack_path(root, request_id).exists()
-                if not acked and not is_canceled(root, request_id) and desktop_submission_pending(root, request):
+                if (not acked and child_returncode != pi_callback.PUBLISHED_RETURN_CODE
+                        and not is_canceled(root, request_id) and desktop_submission_pending(root, request)):
                     child_returncode = 125
                 return subprocess.CompletedProcess(command, child_returncode), acked, False
             if time.monotonic() >= deadline:
@@ -2542,6 +2545,18 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
             return True
         if result is None:
             return True
+        if result.returncode == pi_callback.PUBLISHED_RETURN_CODE and not acked:
+            # Not a failed attempt: the retained target lease keeps later
+            # callbacks for this session in order until ACK or recovery.
+            now = time.time()
+            request["attempts"] = max(0, attempts - 1)
+            request.setdefault("pi_published_at", now)
+            request.setdefault("live_delivered_at", now)
+            request["last_deferred_reason"] = pi_callback.PUBLISHED_REASON
+            if running.exists() and not is_canceled(root, request_id):
+                write_request(running, request)
+                move_request(running, root / "pending")
+            return True
         if result.returncode == 123 and not acked:
             request["attempts"] = max(0, attempts - 1)
             request["next_attempt_at"] = time.time() + 10
@@ -2831,6 +2846,7 @@ def daemon(args: argparse.Namespace) -> int:
             reap_background_resumes()
             recover_running(root)
             reconcile_acknowledged_retained_leases(root)
+            pi_callback.reconcile_publications(root, max(1.0, float(getattr(args, "resume_timeout", DEFAULT_RESUME_TIMEOUT))))
             managed_work = recover_managed_tasks(root)
             recover_active(root)
             if managed_work:
@@ -4017,9 +4033,16 @@ def claude_home() -> Path:
     return Path(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser()
 
 
+SKILL_TARGETS = ("codex", "claude", "pi", "both", "all")
+
+
 def install_skill_tree(target: Path, *, include_codex_plugin: bool, force: bool, keep_existing: bool = False,
-                       claude: bool = False) -> int:
-    """Install the bundled skill; Claude gets a focused SKILL.md plus the full text as REFERENCE.md."""
+                       focused: str | None = None) -> int:
+    """Install the bundled skill.
+
+    Claude (``claude_skill``) and Pi (``pi_skill``) get a focused SKILL.md for
+    their own callback delivery plus the shared full text as REFERENCE.md.
+    """
     if keep_existing and (target / "SKILL.md").is_file():
         print(f"Keeping existing long-task-callback skill at {target}")
         return 0
@@ -4045,9 +4068,9 @@ def install_skill_tree(target: Path, *, include_codex_plugin: bool, force: bool,
                     shutil.copytree(source, destination)
                 else:
                     shutil.copy2(source, destination)
-        if claude:
+        if focused:
             os.replace(target / "SKILL.md", target / "REFERENCE.md")
-            with resources.as_file(resources.files("long_task_callback").joinpath("claude_skill", "SKILL.md")) as source:
+            with resources.as_file(resources.files("long_task_callback").joinpath(focused, "SKILL.md")) as source:
                 shutil.copy2(source, target / "SKILL.md")
 
     print(f"Installed long-task-callback skill to {target}")
@@ -4063,13 +4086,17 @@ def install_skill(args: argparse.Namespace) -> int:
             keep_existing=bool(getattr(args, "keep_existing", False)),
         )
     target_name = getattr(args, "target", None) or "both"
+    keep = bool(getattr(args, "keep_existing", False))
     status = 0
-    if target_name in ("codex", "both"):
+    if target_name in ("codex", "both", "all"):
         status |= install_skill_tree(codex_home() / "skills" / "long-task-callback", include_codex_plugin=True, force=args.force,
-                                     keep_existing=bool(getattr(args, "keep_existing", False)))
-    if target_name in ("claude", "both"):
+                                     keep_existing=keep)
+    if target_name in ("claude", "both", "all"):
         status |= install_skill_tree(claude_home() / "skills" / "long-task-callback", include_codex_plugin=False, force=args.force,
-                                     keep_existing=bool(getattr(args, "keep_existing", False)), claude=True)
+                                     keep_existing=keep, focused="claude_skill")
+    if target_name in ("pi", "all"):
+        status |= install_skill_tree(pi_callback.profile_dir() / "skills" / "long-task-callback", include_codex_plugin=False,
+                                     force=args.force, keep_existing=keep, focused="pi_skill")
     return status
 
 
@@ -4847,7 +4874,7 @@ def setup(args: argparse.Namespace) -> int:
         path=args.skill_path,
         force=args.force,
         keep_existing=bool(getattr(args, "keep_skill", False)),
-        target=getattr(args, "skill_target", None) or "both",
+        target=getattr(args, "skill_target", None) or ("all" if getattr(args, "with_pi_extension", False) else "both"),
     )
     skill_status = install_skill(skill_args)
     if skill_status != 0:
@@ -5565,13 +5592,14 @@ def main() -> int:
         service_parser.add_argument("--now", action="store_true", help="Start the service or request a safe reload")
         service_parser.add_argument("--print", action="store_true", help="Print configuration without installing it")
 
-    install_parser = sub.add_parser("install-skill", help="Install the bundled skill for Codex and/or Claude Code")
+    install_parser = sub.add_parser("install-skill", help="Install the bundled skill for Codex, Claude Code and/or Pi")
     install_parser.add_argument("--path", help="Skills directory to install into (overrides --target)")
     install_parser.add_argument(
         "--target",
-        choices=["codex", "claude", "both"],
+        choices=SKILL_TARGETS,
         default="both",
-        help="Agent home to install into (default: both — ${CODEX_HOME:-~/.codex}/skills and ${CLAUDE_CONFIG_DIR:-~/.claude}/skills)",
+        help="Agent home to install into (default: both — ${CODEX_HOME:-~/.codex}/skills and ${CLAUDE_CONFIG_DIR:-~/.claude}/skills; "
+             "pi — ${PI_CODING_AGENT_DIR:-~/.pi/agent}/skills; all — the three)",
     )
     install_parser.add_argument("--force", action="store_true", help="Overwrite an existing long-task-callback skill")
 
@@ -5611,9 +5639,8 @@ def main() -> int:
     setup_parser.add_argument("--with-pi-extension", action="store_true", help="Also install Pi's native live callback extension")
     setup_parser.add_argument(
         "--skill-target",
-        choices=["codex", "claude", "both"],
-        default="both",
-        help="Agent home to install the skill into (default: both)",
+        choices=SKILL_TARGETS,
+        help="Agent home to install the skill into (default: both; all with --with-pi-extension)",
     )
     setup_parser.add_argument("--name", default="codex-long-task-wakeup", help="Service name / LaunchAgent label")
     setup_parser.add_argument("--queue-dir", help="Wakeup queue directory")

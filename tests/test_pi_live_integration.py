@@ -279,13 +279,16 @@ class NativePiCallbackTests(unittest.TestCase):
             # execute this deliberately invalid Pi binary.
             with mock.patch.dict(os.environ, {'LONG_TASK_WAKEUP_PI_BIN':str(directory/'must-not-launch-pi')}):
                 cli.write_request(root/'pending'/f"{request['id']}.json",request)
+                started=time.monotonic()
                 assert cli.process_one(root,argparse.Namespace(resume_timeout=20,retries=0,retry_delay=0,retry_backoff=1))
+            # Publication hands the callback to the live Pi; the daemon does not
+            # wait for the ACK, which then finalizes the pending record directly.
+            assert time.monotonic()-started < 10
             def reaped():
                 cli.reap_background_resumes()
                 return not cli._BACKGROUND_RESUMES
             wait_for(reaped)
-            cli.recover_running(root)
-            assert (root/'done'/f"{request['id']}.json").exists()
+            wait_for(lambda: (root/'done'/f"{request['id']}.json").exists())
             assert not cli.retained_target_lease_is_held(request)
             assert bridge.read_record(owner_path)['owner_pid']==owner_pid
             # Wait until native Pi itself completes its tool turn before starting busy.

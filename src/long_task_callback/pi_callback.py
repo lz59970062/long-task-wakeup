@@ -272,6 +272,83 @@ class PiDelivery:
         threading.Thread(target=monitor, daemon=True).start()
 
 
+PUBLISHED_RETURN_CODE = 122  # Delivery worker: envelope is in the live mailbox; ACK is pending.
+PUBLISHED_REASON = "published to the live Pi session; awaiting ACK"
+
+
+def envelope_path(directory: Path, queue: Path, request_id: str) -> Path:
+    key = hashlib.sha256((str(queue) + "\0" + request_id).encode("utf-8")).hexdigest()
+    return directory / "inbox" / f"{key}.json"
+
+
+def publication_outcome(root: Path, request: dict, timeout: float, now: float) -> str | None:
+    """Why a published callback can no longer be ACKed by its live Pi, if so.
+
+    Publication hands the callback to the live process; the daemon does not
+    wait for the ACK. The receiving owner must stay the one it was published
+    to: an exited, closed or replaced owner, or a missed deadline, leaves the
+    outcome unknown, which is never replayed automatically.
+    """
+    from . import cli
+    published = request.get("pi_published_at")
+    if not isinstance(published, (int, float)):
+        return None
+    if now - published >= timeout:
+        return "no ACK within the resume timeout"
+    try:
+        directory, owner = owner_record(request)
+        envelope = read_record(envelope_path(directory, root.resolve(), str(request["id"])), versions=(1, 2))
+    except (OSError, ValueError, KeyError):
+        return "the live Pi mailbox or its owner can no longer be verified"
+    if envelope.get("owner_nonce") != owner.get("owner_nonce"):
+        return "the Pi session was reopened by another process before ACK"
+    if owner.get("state") != "active" or not cli.pid_is_running(owner["owner_pid"]):
+        return "the live Pi session exited before ACK"
+    return None
+
+
+def reconcile_publications(root: Path, timeout: float) -> None:
+    """Daemon hook: settle Pi callbacks whose live owner can no longer ACK them."""
+    from . import cli
+    now = time.time()
+    for path in sorted((root / "pending").glob("*.json")):
+        try:
+            request = cli.load_request(path)
+        except (OSError, ValueError):
+            continue
+        request_id = str(request.get("id", path.stem))
+        if (cli.request_agent(request) != "pi" or "pi_published_at" not in request
+                or cli.ack_path(root, request_id).exists() or cli.is_canceled(root, request_id)):
+            continue
+        reason = publication_outcome(root, request, timeout, now)
+        if reason is None:
+            continue
+        received = None
+        try:
+            directory, _ = owner_record(request)
+            received = (directory / "receipts" / envelope_path(directory, root.resolve(), request_id).name).exists()
+        except (OSError, ValueError, KeyError):
+            pass
+        evidence = {True: "Pi admitted it into the session", False: "Pi had not admitted it yet",
+                    None: "admission is unknown"}[received]
+        request["retain_target_lease"] = True
+        request["last_error"] = (f"Pi callback outcome is unknown: {reason} ({evidence}); automatic retry "
+                                 f"suppressed to prevent duplicate delivery. Inspect the session, then ACK or use "
+                                 f"ltc retry --id {request_id}")
+        try:
+            cli.write_request(path, request)
+            failed = cli.move_request(path, root / "failed")
+        except FileNotFoundError:
+            continue  # ACKed or canceled meanwhile.
+        print(f"ltc: warning: Pi callback {request_id}: {reason}; manual recovery required", file=sys.stderr)
+        if cli.ack_path(root, request_id).exists():  # ack() raced the move.
+            try:
+                cli.move_request(failed, root / "done")
+                cli.release_retained_target_lease(root, request)
+            except FileNotFoundError:
+                pass
+
+
 def extension_path() -> Path:
     return Path(__file__).with_name("pi_extension") / "ltc-callback.js"
 
@@ -376,6 +453,11 @@ def install_extension(args: argparse.Namespace) -> int:
     # Windows children inherit the protected ACL initialized by the installer.
     ensure_private_directory(profile / "long-task-callback" / "channels")
     print(f"Installed Pi callback extension: {target}")
+    from . import cli
+    skill = profile / "skills" / "long-task-callback"
+    if cli.install_skill_tree(skill, include_codex_plugin=False, force=bool(getattr(args, "force", False)),
+                              keep_existing=not getattr(args, "force", False), focused="pi_skill") != 0:
+        raise ValueError(f"Could not install the Pi skill at {skill}")
     print("Existing Pi processes need /reload or a restart. Ordinary Pi receives online callbacks; use ltc pi for managed offline recovery.")
     return 0
 

@@ -7,6 +7,7 @@ import subprocess
 from unittest import mock
 
 import tempfile
+import time
 import unittest
 
 from long_task_callback import callback_transport, cli, pi_callback as bridge
@@ -157,6 +158,63 @@ class PiLiveCallbackTests(unittest.TestCase):
         assert not cli.retained_target_lease_is_held(request)
 
 
+
+    def queue_published(self):
+        request, owner, directory, queue, payload = self.bound
+        request = cli.prepare_request_for_queue(queue, request, payload['prompt'])
+        cli.write_request(queue / 'pending' / 'fixture.json', request)
+        args = argparse.Namespace(resume_timeout=3600, retries=3, retry_delay=0, retry_backoff=1)
+        started = time.monotonic()
+        assert cli.process_one(queue, args)
+        # The daemon returns as soon as the live mailbox has the callback.
+        assert time.monotonic() - started < 15
+        published = cli.load_request(queue / 'pending' / 'fixture.json')
+        assert published['attempts'] == 0 and published['last_deferred_reason'] == bridge.PUBLISHED_REASON
+        assert isinstance(published['pi_published_at'], float)
+        return published, owner, directory, queue
+
+    def test_publication_frees_the_daemon_and_ack_finishes_it(self):
+        request, _, _, queue = self.queue_published()
+        assert cli.retained_target_lease_is_held(request)
+        assert cli.select_pending(queue, time.time() + 7200) is None  # Held for this session only.
+        other = argparse.Namespace(agent='codex', session='other-thread', last=False, cwd=str(self.directory),
+                                   task='other', callback_mode='cli')
+        other_request = cli.make_request(other, 'Wake another session')
+        other_request['id'] = 'other'
+        cli.write_request(queue / 'pending' / 'other.json', other_request)
+        # Another session's callback is not stuck behind the unacknowledged Pi one.
+        assert cli.select_pending(queue, time.time() + 7200) == queue / 'pending' / 'other.json'
+        (queue / 'pending' / 'other.json').unlink()
+        bridge.reconcile_publications(queue, 3600)
+        assert (queue / 'pending' / 'fixture.json').exists()  # Live owner: keep waiting.
+        cli.ack(argparse.Namespace(queue_dir=str(queue), id='fixture', message=None))
+        assert (queue / 'done' / 'fixture.json').exists()
+        assert not cli.retained_target_lease_is_held(request)
+
+    def test_owner_loss_or_replacement_or_deadline_needs_manual_recovery(self):
+        for case in ('exited', 'replaced', 'deadline'):
+            with self.subTest(case):
+                request, owner, directory, queue = self.queue_published()
+                timeout = 3600
+                if case == 'exited':
+                    cli.write_request(directory / 'owner.json', dict(owner, state='closed'))
+                elif case == 'replaced':
+                    cli.write_request(directory / 'owner.json', dict(owner, owner_nonce='another-owner'))
+                else:
+                    timeout = 0.001
+                bridge.reconcile_publications(queue, timeout)
+                failed = cli.load_request(queue / 'failed' / 'fixture.json')
+                assert failed['retain_target_lease'] is True
+                assert 'had not admitted it yet' in failed['last_error'], failed['last_error']
+                assert cli.retained_target_lease_is_held(request)  # Never replayed automatically.
+                cli.ack(argparse.Namespace(queue_dir=str(queue), id='fixture', message=None))
+                assert (queue / 'done' / 'fixture.json').exists()
+                assert not cli.retained_target_lease_is_held(request)
+                for state in ('done', 'acks'):
+                    (queue / state / 'fixture.json').unlink()
+                for envelope in (directory / 'inbox').glob('*.json'):
+                    envelope.unlink()
+                cli.write_request(directory / 'owner.json', owner)
 
     def test_publication_failure_still_retains_unknown(self):
         bound = self.bound
