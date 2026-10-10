@@ -315,7 +315,7 @@ Use `--service standalone --now` where user systemd is unavailable (e.g. AutoDL)
 - [x] Native task owners on Linux, macOS and Windows (0.7.0)
 - [x] Fresh child agents with templates (0.6.5)
 - [ ] Explicit callback modes and Desktop shared Core (0.7.1 preview)
-- [ ] Claude Code live callbacks via `ltc wait` (0.7.1 preview; verified on macOS, Linux pending)
+- [ ] Claude Code live callbacks via `ltc wait` (0.7.1 preview; verified on macOS and Linux)
 - [ ] PI / DSH agent adapters
 
 ## License
