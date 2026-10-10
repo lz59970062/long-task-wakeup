@@ -138,6 +138,22 @@ class NativeTaskLifecycleTests(unittest.TestCase):
         self.assertEqual(callback["exit_code"], 7)
         self.assertEqual(callback["target"], {"kind": "session", "value": "bound-native-session"})
 
+    def test_callback_runtime_excludes_queue_and_delivery_delays(self) -> None:
+        path = self.submit()
+        task = self.mark_running(path)
+        task["started_at"] = 100.0
+        cli.write_managed_task(self.root, task)
+        cli.write_request(cli.managed_result_path(self.root, str(task["id"])), {
+            "version": 1, "id": task["id"], "exit_code": 0,
+            "completed_at": 225.5,
+        })
+        with mock.patch.object(cli.time, "time", return_value=10000.0):
+            cli.recover_managed_tasks(self.root)
+        callback = cli.load_request(cli.request_path(self.root, "pending", str(task["id"])))
+        self.assertEqual(callback["duration_seconds"], 125.5)
+        self.assertIn("Duration: 2m 5.5s", callback["prompt_compact"])
+        self.assertIn("Duration: 125.5s", Path(callback["prompt_details_path"]).read_text())
+
     def test_foreign_result_identity_cannot_mark_task_complete(self) -> None:
         path = self.submit()
         task = self.mark_running(path)

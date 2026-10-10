@@ -34,6 +34,7 @@ except ImportError:  # pragma: no cover - the durable run lifecycle is POSIX-onl
 from . import __version__
 from . import callbacks
 from . import callback_transport
+from . import pi_callback
 from . import diagnostics
 from . import storage
 from . import template_registration
@@ -456,14 +457,19 @@ def supervisor_config_text(args: argparse.Namespace) -> str:
 
 def resolve_target(args: argparse.Namespace) -> tuple[dict[str, str], str]:
     if args.session:
-        return {"kind": "session", "value": args.session}, "--session"
+        value = pi_callback.canonical_session(args.session) if resolve_agent(args) == "pi" else args.session
+        return {"kind": "session", "value": value}, "--session"
     if args.last:
+        if resolve_agent(args) == "pi":
+            raise ValueError("Pi callbacks require an absolute session file; --last is not supported")
         return {"kind": "last"}, "--last"
 
     agent = resolve_agent(args)
     env_name = get_agent(agent).session_id_env
     session = os.environ.get(env_name, "").strip()
     if session:
+        if agent == "pi":
+            session = pi_callback.canonical_session(session)
         return {"kind": "session", "value": session}, env_name
 
     raise SystemExit(
@@ -519,7 +525,9 @@ def attach_routing_text(prompt: str, request: dict[str, object]) -> str:
     return f"{prompt}\n\n{routing_text(request)}"
 
 
-def make_request(args: argparse.Namespace, prompt: str) -> dict[str, object]:
+def make_request(
+    args: argparse.Namespace, prompt: str, *, duration: float | None = None,
+) -> dict[str, object]:
     target, target_source = bind_target(args)
     agent = resolve_agent(args)
     request = {
@@ -539,9 +547,13 @@ def make_request(args: argparse.Namespace, prompt: str) -> dict[str, object]:
         "approval_policy": getattr(args, "approval_policy", None) or DEFAULT_APPROVAL_POLICY,
         "sandbox_mode": getattr(args, "sandbox_mode", None) or DEFAULT_SANDBOX_MODE,
     }
+    if duration is not None:
+        request["duration_seconds"] = duration
     request.update(callback_transport.selection(args))
     if request.get("callback_mode"):
-        request["version"] = 2  # Older daemons must not discard route/manual intent.
+        request["version"] = 3 if agent == "pi" else 2  # Older daemons must reject new route semantics.
+        if agent == "pi" and request.get("pi_delivery") == "steer":
+            request["version"] = 4
     if agent == "claude":
         request["permission_mode"] = getattr(args, "permission_mode", None) or os.environ.get(
             CLAUDE_PERMISSION_MODE_ENV, DEFAULT_CLAUDE_PERMISSION_MODE
@@ -872,9 +884,9 @@ def load_request(path: Path) -> dict[str, object]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("request must be a JSON object")
-    if data.get("version") not in (1, 2):
+    if data.get("version") not in (1, 2, 3, 4):
         raise ValueError("unsupported request version")
-    if data.get("version") == 2 and data.get("callback_mode") not in ("cli", "desktop", "manual"):
+    if data.get("version") in (2, 3, 4) and data.get("callback_mode") not in ("cli", "desktop", "manual"):
         raise ValueError("version 2 callback requires an explicit mode")
     if not isinstance(data.get("id"), str) or data["id"] != path.stem:
         raise ValueError("request id must match its filename")
@@ -882,6 +894,12 @@ def load_request(path: Path) -> dict[str, object]:
         raise ValueError("request cwd must be a string")
     if not isinstance(data.get("prompt"), str):
         raise ValueError("request prompt must be a string")
+    if data.get("version") in (3, 4):
+        if request_agent(data) != "pi":
+            raise ValueError("version 3 callback requires a frozen Pi route")
+        pi_callback.validate_route(data)
+    if data.get("version") == 4 and data.get("pi_delivery") != "steer":
+        raise ValueError("version 4 callback requires explicit Pi steer delivery")
     resume_command(data)
     return data
 
@@ -894,8 +912,8 @@ def build_acknowledgement_text(command: str, agent: str = "codex") -> str:
         )
     elif agent == "pi":
         delivery_note = (
-            "This resume runs PI Agent non-interactively in print mode against the bound "
-            "session file and supplies the callback prompt on stdin."
+            "This callback is delivered to the original PI Agent process through its native message API. "
+            "Only LTC-managed sessions can recover in print mode after the entire original process exits."
         )
     else:
         delivery_note = (
@@ -909,7 +927,8 @@ def build_acknowledgement_text(command: str, agent: str = "codex") -> str:
             "mark the callback as received by running this command:",
             command,
             delivery_note,
-            "The wakeup daemon will retry this callback until the acknowledgement marker exists or retries are exhausted.",
+            ("Once a Pi callback is published, an uncertain outcome requires manual inspection; automatic replay is suppressed."
+             if agent == "pi" else "The wakeup daemon will retry this callback until the acknowledgement marker exists or retries are exhausted."),
         ]
     )
 
@@ -930,6 +949,8 @@ def callback_target_key(request: dict[str, object]) -> str | None:
     kind = target.get("kind")
     value = target.get("value")
     if kind == "session" and isinstance(value, str) and value:
+        if request_agent(request) == "pi":
+            value = pi_callback.canonical_session(value)
         return f"session:{value}"
     if kind == "last":
         return "last"
@@ -1735,8 +1756,66 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
             connection.close()
 
 
+def wait_for_remote_delivery(payload: dict, delivery, timeout: float) -> dict:
+    """Wait for native delivery without starting or killing its owner."""
+    delivery_context = desktop_delivery_context(payload)
+    delivery_name = "pi_live_session" if isinstance(delivery, pi_callback.PiDelivery) else "desktop_app_server"
+    deadline = time.monotonic() + timeout
+    while True:
+        acknowledged = Path(str(payload["ack_path"])).exists()
+        canceled = Path(str(payload["canceled_path"])).exists()
+        if acknowledged:
+            if delivery_context is not None:
+                release_retained_target_lease(*delivery_context)
+            result = {
+                "returncode": 0,
+                "delivery": delivery_name,
+                "skipped": "acknowledged",
+            }
+            break
+        if canceled:
+            if delivery_context is not None:
+                release_retained_target_lease(*delivery_context)
+            result = {"returncode": 0, "delivery": delivery_name, "skipped": "canceled"}
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            request = payload.get("request")
+            queue_root = payload.get("queue_dir")
+            if isinstance(request, dict) and isinstance(queue_root, str):
+                retain_target_lease(Path(queue_root), request)
+                if Path(str(payload["ack_path"])).exists() or Path(str(payload["canceled_path"])).exists():
+                    release_retained_target_lease(Path(queue_root), request)
+                    result = {
+                        "returncode": 0,
+                        "delivery": delivery_name,
+                        "skipped": "acknowledged_or_canceled_after_timeout",
+                    }
+                    break
+            result = {
+                "returncode": 125,
+                "timed_out": True,
+                "delivery": delivery_name,
+                "manual_recovery_required": True,
+            }
+            break
+        if delivery.wait_for_completion(min(0.1, remaining)):
+            acknowledged = Path(str(payload["ack_path"])).exists()
+            if delivery_context is not None:
+                # A matching turn/completed is a known outcome. Missing
+                # ACK may use the normal at-least-once callback policy.
+                release_retained_target_lease(*delivery_context)
+            result = {
+                "returncode": 0 if acknowledged else 1,
+                "delivery": delivery_name,
+                "turn_completed": True,
+            }
+            break
+    return result
+
+
 def delivery_worker_main() -> int:
-    """Own one Codex resume and its locks without leaking them into Codex."""
+    """Own one callback delivery and keep its locks out of agent children."""
     encoded_fds = os.environ.get("CODEX_LONG_TASK_DELIVERY_LOCK_FDS")
     if os.name == "nt":
         lock_fds = windows_process.inherited_lock_fds()
@@ -1757,6 +1836,7 @@ def delivery_worker_main() -> int:
     result: dict[str, object] = {"returncode": 127}
     process: subprocess.Popen[str] | None = None
     desktop_delivery: DesktopAppServerDelivery | None = None
+    pi_delivery: pi_callback.PiDelivery | None = None
 
     class WorkerInterrupted(Exception):
         def __init__(self, signum: int) -> None:
@@ -1773,75 +1853,46 @@ def delivery_worker_main() -> int:
         elif Path(str(payload["canceled_path"])).exists():
             result = {"returncode": 0, "skipped": "canceled"}
         elif (desktop_delivery := start_desktop_app_server_turn(payload)) is not None:
-            deadline = time.monotonic() + timeout
-            while True:
-                acknowledged = Path(str(payload["ack_path"])).exists()
-                canceled = Path(str(payload["canceled_path"])).exists()
-                if acknowledged:
-                    if delivery_context is not None:
-                        release_retained_target_lease(*delivery_context)
-                    result = {
-                        "returncode": 0,
-                        "delivery": "desktop_app_server",
-                        "skipped": "acknowledged",
-                    }
-                    break
-                if canceled:
-                    if delivery_context is not None:
-                        release_retained_target_lease(*delivery_context)
-                    result = {"returncode": 0, "delivery": "desktop_app_server", "skipped": "canceled"}
-                    break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    request = payload.get("request")
-                    queue_root = payload.get("queue_dir")
-                    if isinstance(request, dict) and isinstance(queue_root, str):
-                        retain_target_lease(Path(queue_root), request)
-                        if Path(str(payload["ack_path"])).exists() or Path(str(payload["canceled_path"])).exists():
-                            release_retained_target_lease(Path(queue_root), request)
-                            result = {
-                                "returncode": 0,
-                                "delivery": "desktop_app_server",
-                                "skipped": "acknowledged_or_canceled_after_timeout",
-                            }
-                            break
-                    result = {
-                        "returncode": 125,
-                        "timed_out": True,
-                        "delivery": "desktop_app_server",
-                        "manual_recovery_required": True,
-                    }
-                    break
-                if desktop_delivery.wait_for_completion(min(0.1, remaining)):
-                    acknowledged = Path(str(payload["ack_path"])).exists()
-                    if delivery_context is not None:
-                        # A matching turn/completed is a known outcome. Missing
-                        # ACK may use the normal at-least-once callback policy.
-                        release_retained_target_lease(*delivery_context)
-                    result = {
-                        "returncode": 0 if acknowledged else 1,
-                        "delivery": "desktop_app_server",
-                        "turn_completed": True,
-                    }
-                    break
+            result = wait_for_remote_delivery(payload, desktop_delivery, timeout)
         else:
-            process = subprocess.Popen(
-                process_command([str(part) for part in command]),
-                stdin=subprocess.PIPE,
-                stdout=sys.stderr,
-                stderr=sys.stderr,
-                text=True,
-                encoding="utf-8",
-                cwd=str(payload["cwd"]),
-                close_fds=True,
-                **(windows_process.background_popen_kwargs() if os.name == "nt" else {"start_new_session": True}),
-            )
-            try:
-                process.communicate(input=prompt, timeout=timeout)
-                result = {"returncode": int(process.returncode)}
-            except subprocess.TimeoutExpired:
-                terminate_process_group(process)
-                result = {"returncode": 124, "timed_out": True}
+            request = payload.get("request")
+            if isinstance(request, dict) and request_agent(request) == "pi":
+                payload["prompt"] = prompt
+                pi_delivery = pi_callback.prepare_delivery(payload)
+                if not pi_delivery.online:
+                    command = pi_delivery.command
+            if pi_delivery is not None and (Path(str(payload["ack_path"])).exists() or Path(str(payload["canceled_path"])).exists()):
+                release_retained_target_lease(*delivery_context)
+                result = {"returncode": 0, "delivery": pi_delivery.delivery_name, "skipped": "acknowledged_or_canceled"}
+            elif pi_delivery is not None and pi_delivery.online:
+                result = wait_for_remote_delivery(payload, pi_delivery, timeout)
+            else:
+                process = subprocess.Popen(
+                    process_command([str(part) for part in command]),
+                    env=pi_delivery.environment if pi_delivery is not None else None,
+                    stdin=subprocess.PIPE,
+                    stdout=sys.stderr,
+                    stderr=sys.stderr,
+                    text=True,
+                    encoding="utf-8",
+                    cwd=str(payload["cwd"]),
+                    close_fds=True,
+                    **(windows_process.background_popen_kwargs() if os.name == "nt" else {"start_new_session": True}),
+                )
+                if pi_delivery is not None:
+                    pi_delivery.monitor_owner(process)
+                try:
+                    process.communicate(input=prompt, timeout=timeout)
+                    result = {"returncode": int(process.returncode)}
+                except subprocess.TimeoutExpired:
+                    terminate_process_group(process)
+                    result = {"returncode": 124, "timed_out": True}
+                if pi_delivery is not None:
+                    if Path(str(payload["ack_path"])).exists() or Path(str(payload["canceled_path"])).exists():
+                        release_retained_target_lease(*delivery_context)
+                        result = {"returncode": 0, "delivery": "pi_managed_resume"}
+                    else:
+                        result = {"returncode": 125, "delivery": "pi_managed_resume", "manual_recovery_required": True}
     except CallbackTargetBusy:
         result = {"returncode": 123, "delivery_state": "waiting_for_idle"}
     except CallbackTransportBlocked as exc:
@@ -1858,6 +1909,8 @@ def delivery_worker_main() -> int:
     finally:
         if desktop_delivery is not None:
             desktop_delivery.close()
+        if pi_delivery is not None:
+            pi_delivery.close()
         # A Windows worker's Job may still be collecting Agent descendants.
         # Keep its raw lease handles until OS process teardown, not before it.
         for lock_fd in ([] if os.name == "nt" else lock_fds):
@@ -2058,8 +2111,8 @@ def move_request(source: Path, destination_dir: Path) -> Path:
             not isinstance(source_id, str)
             or not isinstance(source_data, dict)
             or not isinstance(destination_data, dict)
-            or source_data.get("version") not in (1, 2)
-            or destination_data.get("version") not in (1, 2)
+            or source_data.get("version") not in (1, 2, 3, 4)
+            or destination_data.get("version") not in (1, 2, 3, 4)
             or source_id != destination_id
             or source_id != source.stem
             or source_data != destination_data
@@ -2474,11 +2527,12 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
             request["delivery_state"] = "blocked"
             request["last_error"] = "callback transport blocked; repair the original session connection, then use ltc retry --id " + request_id
         if result.returncode == 125 and not acked:
-            request["last_error"] = "Desktop callback outcome is unknown; automatic retry suppressed to prevent duplicate delivery"
+            delivery_name = "Pi" if request_agent(request) == "pi" else "Desktop"
+            request["last_error"] = delivery_name + " callback outcome is unknown; automatic retry suppressed to prevent duplicate delivery"
             request["retain_target_lease"] = True
             destination_dir = root / "failed"
             print(
-                f"ltc: warning: daemon callback {running.name} has an unknown Desktop outcome; "
+                f"ltc: warning: daemon callback {running.name} has an unknown {delivery_name} outcome; "
                 "manual recovery is required to avoid duplicate delivery",
                 file=sys.stderr,
             )
@@ -2827,7 +2881,7 @@ def write_managed_task(root: Path, task: dict[str, object]) -> None:
 
 def load_managed_task(path: Path) -> dict[str, object]:
     task = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(task, dict) or task.get("version") not in (1, 2, 3):
+    if not isinstance(task, dict) or task.get("version") not in (1, 2, 3, 4, 5):
         raise ValueError("invalid managed task record")
     if task.get("id") != path.parent.name:
         raise ValueError("managed task id must match its directory")
@@ -2835,10 +2889,16 @@ def load_managed_task(path: Path) -> dict[str, object]:
     if task.get("task_kind") == "agent":
         get_child_agent(str(task.get("agent_worker", "")))
     backend = task.get("execution_backend", "screen")
-    if task.get("version") in (2, 3) and "execution_backend" not in task:
+    if task.get("version") in (2, 3, 4, 5) and "execution_backend" not in task:
         raise ValueError("native task records require an execution backend")
-    if task.get("version") == 3 and task.get("callback_mode") not in ("cli", "desktop", "manual"):
+    if task.get("version") in (3, 4, 5) and task.get("callback_mode") not in ("cli", "desktop", "manual"):
         raise ValueError("version 3 task requires an explicit callback mode")
+    if task.get("version") in (4, 5):
+        if request_agent(task) != "pi":
+            raise ValueError("version 4 task requires a frozen Pi parent route")
+        pi_callback.validate_route(task)
+    if task.get("version") == 5 and task.get("pi_delivery") != "steer":
+        raise ValueError("version 5 task requires explicit Pi steer delivery")
     if backend not in ("screen", "systemd-user", "launchd", "windows-task"):
         raise ValueError(f"unsupported execution backend: {backend!r}")
     if not isinstance(task.get("queue_dir"), str):
@@ -2891,7 +2951,7 @@ def managed_task_namespace(task: dict[str, object]) -> argparse.Namespace:
         _callback_target_source=str(task.get("target_source", "managed-task")),
         _callback_agent=str(task.get("agent", "codex")),
         callback_format=str(task.get("callback_format", "compact")),
-        _callback_route={k: task[k] for k in ("callback_mode", "callback_origin", "callback_bridge_file") if k in task},
+        _callback_route={k: task[k] for k in callback_transport.ROUTE_FIELDS if k in task},
     )
 
 
@@ -2961,9 +3021,11 @@ def managed_task_prompt(
     return build_prompt(args, duration)
 
 
-def managed_callback_request(task: dict[str, object], prompt: str) -> dict[str, object]:
+def managed_callback_request(
+    task: dict[str, object], prompt: str, *, duration: float | None = None,
+) -> dict[str, object]:
     args = managed_task_namespace(task)
-    request = make_request(args, prompt)
+    request = make_request(args, prompt, duration=duration)
     request.update(
         {
             "managed_task_id": task["id"],
@@ -3005,7 +3067,7 @@ def queue_managed_task_callback(root: Path, task: dict[str, object]) -> bool:
         else None
     )
     prompt = managed_task_prompt(task, outcome=str(task.get("outcome", "unknown")), duration=duration)
-    request = managed_callback_request(task, prompt)
+    request = managed_callback_request(task, prompt, duration=duration)
     if enqueue_existing_request(root, request, prompt) != 0:
         return False
     task["callback_queued"] = True
@@ -3456,7 +3518,7 @@ def submit_managed_run(args: argparse.Namespace) -> int:
     task: dict[str, object] = {
         # Older daemons must reject new route intent, even for screen tasks,
         # instead of silently auto-delivering an explicit manual callback.
-        "version": 3,
+        "version": 4 if resolve_agent(args) == "pi" else 3,
         "id": task_id,
         "submitted_at": time.time(),
         "execution_backend": backend,
@@ -3486,6 +3548,8 @@ def submit_managed_run(args: argparse.Namespace) -> int:
         "token": MANAGED_WORKER_TOKEN_PREFIX + secrets.token_urlsafe(32),
     }
     task.update(callback_transport.selection(args))
+    if task.get("pi_delivery") == "steer":
+        task["version"] = 5  # Old coordinators must not downgrade steer to follow-up.
     if task_kind == "agent" and agent_prompt_path is not None and agent_result_path is not None:
         task.update(
             {
@@ -4741,6 +4805,12 @@ def setup(args: argparse.Namespace) -> int:
     skill_status = install_skill(skill_args)
     if skill_status != 0:
         return skill_status
+    if getattr(args, "with_pi_extension", False):
+        try:
+            pi_callback.install_extension(argparse.Namespace(profile=None, force=args.force))
+        except (OSError, ValueError) as exc:
+            print(f"ltc: could not install the Pi extension: {exc}", file=sys.stderr)
+            return 2
     ensure_callback_hook_file()
     report_claude_agent_readiness(args)
     try:
@@ -4854,10 +4924,14 @@ def retry_callback(args: argparse.Namespace) -> int:
             raise ValueError("the bound session has an active or unresolved delivery")
         if args.callback_mode:
             options = argparse.Namespace(callback_mode=args.callback_mode, agent=request_agent(request))
-            for key in ("callback_mode", "callback_origin", "callback_bridge_file"):
+            pi_route = {key: request[key] for key in pi_callback.ROUTE_FIELDS if key in request}
+            for key in callback_transport.ROUTE_FIELDS:
                 request.pop(key, None)
             request.update(callback_transport.selection(options))
-            request["version"] = 2
+            request.update(pi_route)
+            request["version"] = 3 if request_agent(request) == "pi" else 2
+            if request.get("pi_delivery") == "steer":
+                request["version"] = 4
         capability = callback_transport.inspect_route(request)
         if capability["status"] == "blocked":
             raise ValueError("callback route remains blocked: " + str(capability.get("reason")))
@@ -5453,6 +5527,14 @@ def main() -> int:
     )
     install_parser.add_argument("--force", action="store_true", help="Overwrite an existing long-task-callback skill")
 
+    pi_install = sub.add_parser("install-pi-extension", help="Install Pi's native live callback extension")
+    pi_install.add_argument("--profile", help="Pi profile directory (default: PI_CODING_AGENT_DIR or ~/.pi/agent)")
+    pi_install.add_argument("--force", action="store_true", help="Replace an edited LTC extension after review")
+    pi_launch = sub.add_parser("pi", help="Launch Pi with a session writer lease acquired before startup")
+    pi_launch.add_argument("--cwd", default=os.getcwd(), help="Working directory for Pi")
+    pi_launch.add_argument("--session", help="Absolute existing JSONL file (default: a new managed session)")
+    pi_launch.add_argument("pi_args", nargs=argparse.REMAINDER, help="Pi options after --")
+
     template_parser = sub.add_parser("template", help="Register named child templates and advertise their skills")
     template_actions = template_parser.add_subparsers(dest="template_action", required=True)
     register_parser = template_actions.add_parser("register", help="Install a YAML template and discoverable task skill")
@@ -5478,6 +5560,7 @@ def main() -> int:
     setup_parser.add_argument("--service", choices=("auto", "systemd", "launchd", "windows-task", "supervisor", "standalone"), default="auto",
                               help="Coordinator hosting: systemd on Linux, launchd on macOS, Task Scheduler on Windows")
     setup_parser.add_argument("--skill-path", help="Skills directory to install into (overrides --skill-target)")
+    setup_parser.add_argument("--with-pi-extension", action="store_true", help="Also install Pi's native live callback extension")
     setup_parser.add_argument(
         "--skill-target",
         choices=["codex", "claude", "both"],
@@ -5620,6 +5703,12 @@ def main() -> int:
         return windows_service.uninstall(args)
     if args.mode == "install-skill":
         return install_skill(args)
+    if args.mode in ("install-pi-extension", "pi"):
+        try:
+            return pi_callback.install_extension(args) if args.mode == "install-pi-extension" else pi_callback.managed_pi(args)
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"ltc: {exc}", file=sys.stderr)
+            return 2
     if args.mode == "template":
         return template_command(args)
     if args.mode == "setup":

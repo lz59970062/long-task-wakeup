@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.1a2 — unreleased
+
+- Automatically deliver new live Pi callbacks through native steering, after
+  the current tool-call batch and before the next model request; idle Pi starts
+  a normal turn. Keep the existing CLI without delivery flags. Preserve older
+  follow-up records, same-process ownership, cancellation and ACK rules; require
+  a capable extension and use task v5/callback v4/mailbox v2 to prevent silent
+  downgrade by older coordinators. Test receipt during a continuing tool loop
+  using real Pi with a local provider, without paid model calls.
+- Include measured task runtime in compact callbacks, for example
+  `Duration: 2m 5.5s`, using recorded execution timestamps rather than callback
+  delivery time. Keep the duration in the callback record across retries.
+- Synchronize the MIT license and GitHub issue templates from `main`.
+
 ## 0.7.1a1 — unreleased
 
 - Add Pi Agent as a child worker with `ltc agent pi`, fresh nonpersistent text
@@ -9,14 +23,16 @@
   `doctor --operation agent --agent-worker pi`. Pi permissions/extensions follow
   its own noninteractive configuration; native Windows/macOS Pi launch remains
   unverified in this session.
-- Add Pi Agent as a callback parent (`--agent pi`). Bind the persisted session
-  from `PI_SESSION_FILE` (falling back to `PI_SESSION_ID`), detect PI via
-  `PI_SESSION_FILE`/`PI_SESSION_ID`/`PI_CODING_AGENT`, and deliver with
-  `pi --print --session <file>` appending one stdin turn to the exact session;
-  `--last` maps to `--continue`. PI takes detection precedence over inherited
-  Codex/Claude markers, callbacks stay CLI-resume (no Desktop transport), and
-  ephemeral `--no-session` sessions require explicit `--session`. Add
-  `ltc setup --pi-bin` so the daemon pins the executable for resume.
+- Deliver Pi callbacks to the original live process through a private mailbox and
+  native extension message API; busy Pi defers until idle. Add
+  `ltc install-pi-extension`, optional `setup --with-pi-extension`, and the managed
+  `ltc pi` launcher that leases an absolute session file before startup. Only
+  verified terminated managed owners permit print-mode recovery. Pin managed
+  sessions; restart the launcher to switch/fork/reload resources. Freeze profile
+  routes, reject ID/`--last` fallbacks, and retain unknown publication outcomes
+  without automatic replay. Keep the existing ACK protocol. Separate ordinary
+  online-only Pi from managed offline recovery and preserve personal settings.
+  Ship isolated real Pi/local-provider tests; native Windows/macOS Pi is unverified.
 - Add Pi-only `--system-prompt-file` and template `pi.system_prompt_file` defaults.
   Pass the snapshot to Pi's `--system-prompt` to replace its built-in base prompt
   while retaining normal project context, skills and appended instructions.
