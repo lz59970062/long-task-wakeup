@@ -8,6 +8,7 @@ from typing import Literal
 
 from .base import (
     ChildOptions,
+    CODEX_REASONING_EFFORTS,
     DEFAULT_APPROVAL_POLICY,
     DEFAULT_APPROVALS_REVIEWER,
     DEFAULT_SANDBOX_MODE,
@@ -26,6 +27,8 @@ class CodexAdapter:
     detection_priority = 0
     child_result_mode: Literal["file", "stdout"] = "file"
     supports_reasoning_effort = True
+    reasoning_efforts = CODEX_REASONING_EFFORTS
+    supports_system_prompt_file = False
 
     def matches_environment(self, environment: Mapping[str, str]) -> bool:
         return bool(environment.get(self.session_id_env, "").strip())

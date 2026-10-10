@@ -12,6 +12,8 @@ from pathlib import Path
 import sys
 
 MODES = ("auto", "cli", "desktop", "manual")
+ROUTE_FIELDS = ("callback_mode", "callback_origin", "callback_bridge_file",
+                "pi_callback_protocol", "pi_profile_dir", "pi_channel_root", "pi_delivery")
 
 
 def configuration_path(profile: Path) -> Path:
@@ -54,6 +56,9 @@ def selection(args: argparse.Namespace) -> dict[str, str]:
     route = {"callback_mode": mode, "callback_origin": "desktop" if desktop else "other"}
     if mode == "desktop":
         route["callback_bridge_file"] = str(bridge_file(cli.codex_home()))
+    if cli.resolve_agent(args) == "pi":
+        from . import pi_callback
+        route.update(pi_callback.route_fields())
     return route
 
 
@@ -65,6 +70,9 @@ def inspect_route(request: dict[str, object], *, timeout: float = 2) -> dict[str
     if mode == "manual":
         return dict(report, status="manual", reason="automatic_delivery_disabled",
                     action="Inspect saved results in the bound session and ACK when received.")
+    if cli.request_agent(request) == "pi":
+        from . import pi_callback
+        return dict(report, **pi_callback.inspect_route(request))
     if cli.request_agent(request) != "codex":
         return dict(report, transport="cli_resume", reason="session_delivery_not_probed")
     connection = None
@@ -118,6 +126,6 @@ def preflight(args: argparse.Namespace) -> bool:
     args._callback_capability = report
     if report["status"] == "blocked":
         print("ltc: automatic callback unavailable before task submission: " + str(report["reason"]), file=sys.stderr)
-        print("ltc: configure the Desktop shared Core, or explicitly use --callback-mode manual to save results for later receipt.", file=sys.stderr)
+        print("ltc: " + str(report.get("action", "Repair the original session connection, or use --callback-mode manual to save results.")), file=sys.stderr)
         return False
     return True

@@ -90,11 +90,12 @@ class CliTests(unittest.TestCase):
 
     @staticmethod
     def _env_without_claude(**extra: str) -> "mock._patch_dict":
-        """Simulate a Codex-only environment even when tests run inside Claude Code."""
+        """Simulate a Codex-only environment even when tests run inside Claude Code or PI."""
         env = {
             key: value
             for key, value in os.environ.items()
-            if key not in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID")
+            if key not in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID",
+                           "PI_SESSION_ID", "PI_SESSION_FILE", "PI_CODING_AGENT")
         }
         env.update(extra)
         return mock.patch.dict(os.environ, env, clear=True)
@@ -952,7 +953,8 @@ class CliTests(unittest.TestCase):
         self.assertIn('sandbox_workspace_write.writable_roots=["/tmp/callback-queue"]', command)
 
     def test_resolve_agent_detects_claude_environment(self) -> None:
-        env = {key: value for key, value in os.environ.items() if key != "CODEX_THREAD_ID"}
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("CODEX_THREAD_ID", "PI_SESSION_ID", "PI_SESSION_FILE", "PI_CODING_AGENT")}
         env["CLAUDECODE"] = "1"
         env["CLAUDE_CODE_SESSION_ID"] = "claude-session-1"
         with mock.patch.dict(os.environ, env, clear=True):
@@ -977,7 +979,8 @@ class CliTests(unittest.TestCase):
             sandbox_mode="workspace-write",
             permission_mode="auto",
         )
-        env = {key: value for key, value in os.environ.items() if key != "CODEX_THREAD_ID"}
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("CODEX_THREAD_ID", "PI_SESSION_ID", "PI_SESSION_FILE", "PI_CODING_AGENT")}
         env["CLAUDECODE"] = "1"
         env["CLAUDE_CODE_SESSION_ID"] = "claude-session-1"
         with mock.patch.dict(os.environ, env, clear=True):

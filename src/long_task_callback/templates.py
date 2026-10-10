@@ -9,10 +9,11 @@ from pathlib import Path
 
 import yaml
 
-from .agents import AGENT_NAMES, get_agent
+from .agents import CHILD_AGENT_NAMES, get_child_agent
+from .agents.base import CODEX_REASONING_EFFORTS
 
 TEMPLATES = {"test": {"version": 1, "codex_model": "gpt-5.6-luna", "codex_effort": "max"}}
-REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+REASONING_EFFORTS = CODEX_REASONING_EFFORTS
 
 
 @dataclass(frozen=True)
@@ -26,21 +27,31 @@ class AgentTemplate:
     claude_model: str | None = None
     handoff: str | None = None
     agent_defaults: dict[str, dict[str, str]] = field(default_factory=dict)
+    worker: str | None = None
+    description: str | None = None
 
     def render(self, requirements: str) -> str:
         return self.prompt.rstrip() + "\n\n## Task requirements supplied by the parent\n\n" + requirements + "\n"
 
     def model_for(self, agent: str) -> str | None:
-        get_agent(agent)
+        get_child_agent(agent)
         # Keep the original fields for existing callers and built-in profiles.
         legacy = {"codex": self.codex_model, "claude": self.claude_model}
         return self.agent_defaults.get(agent, {}).get("model", legacy.get(agent))
 
     def reasoning_effort_for(self, agent: str) -> str | None:
-        if not get_agent(agent).supports_reasoning_effort:
+        if not get_child_agent(agent).supports_reasoning_effort:
             return None
         legacy = self.codex_effort if agent == "codex" else None
         return self.agent_defaults.get(agent, {}).get("reasoning_effort", legacy)
+
+    def system_prompt_file_for(self, agent: str) -> Path | None:
+        get_child_agent(agent)
+        value = self.agent_defaults.get(agent, {}).get("system_prompt_file")
+        if value is None:
+            return None
+        path = Path(value).expanduser()
+        return path if path.is_absolute() else Path(self.source).parent / path
 
 
 class _UniqueSafeLoader(yaml.SafeLoader):
@@ -94,29 +105,38 @@ def _load_user_template(path: Path, name: str) -> AgentTemplate:
         raise ValueError("custom template files must use .yaml or .yml")
     try:
         data = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueSafeLoader)
-        data = _mapping(data, {"version", "prompt", "handoff", *AGENT_NAMES}, "template")
+        data = _mapping(data, {"version", "prompt", "handoff", "worker", "description", *CHILD_AGENT_NAMES}, "template")
         version = data.get("version")
         if type(version) is not int or version < 1:
             raise ValueError("template version must be a positive integer")
         prompt = _text(data.get("prompt"), "template prompt")
         agent_defaults = {}
-        for agent in AGENT_NAMES:
+        for agent in CHILD_AGENT_NAMES:
+            adapter = get_child_agent(agent)
             allowed = {"model"}
-            if get_agent(agent).supports_reasoning_effort:
+            if adapter.supports_reasoning_effort:
                 allowed.add("reasoning_effort")
+            if adapter.supports_system_prompt_file:
+                allowed.add("system_prompt_file")
             settings = _mapping(data.get(agent, {}), allowed, agent)
             defaults = {key: _text(value, f"{agent} {key}") for key, value in settings.items()}
             effort = defaults.get("reasoning_effort")
-            if effort is not None and effort not in REASONING_EFFORTS:
+            if effort is not None and effort not in adapter.reasoning_efforts:
                 raise ValueError(f"unsupported {agent} reasoning_effort {effort!r}")
             agent_defaults[agent] = defaults
         codex = agent_defaults.get("codex", {})
         claude = agent_defaults.get("claude", {})
         handoff = _text(data["handoff"], "template handoff") if "handoff" in data else None
+        worker = _text(data["worker"], "template worker") if "worker" in data else None
+        if worker is not None:
+            get_child_agent(worker)
+        description = _text(data["description"], "template description") if "description" in data else None
         return AgentTemplate(
             name, version, prompt, str(path.resolve()),
             codex.get("model"), codex.get("reasoning_effort"), claude.get("model"), handoff,
             agent_defaults=agent_defaults,
+            worker=worker,
+            description=description,
         )
     except (OSError, ValueError, yaml.YAMLError) as exc:
         raise ValueError(f"cannot load template {path}: {exc}") from exc

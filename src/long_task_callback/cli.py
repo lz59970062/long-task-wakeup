@@ -34,11 +34,12 @@ except ImportError:  # pragma: no cover - the durable run lifecycle is POSIX-onl
 from . import __version__
 from . import callbacks
 from . import callback_transport
-from . import claude_code
+from . import claude_code, pi_callback
 from . import diagnostics
 from . import storage
+from . import template_registration
 from .desktop_connection import BridgeEndpoint, UnixBridgeEndpoint, load_bridge_endpoint, load_unix_bridge_endpoint
-from .agents import AGENTS, AGENT_NAMES, ChildOptions, get_agent
+from .agents import AGENTS, AGENT_NAMES, CHILD_AGENT_NAMES, ChildOptions, get_agent, get_child_agent
 from .agents.base import (
     DEFAULT_APPROVALS_REVIEWER,
     DEFAULT_APPROVAL_POLICY,
@@ -52,6 +53,7 @@ from .agents.claude import (
     CLAUDE_BIN_ENV,
     CLAUDE_PERMISSION_MODE_ENV,
 )
+from .agents.pi import PI_BIN_ENV, PI_SESSION_FILE_ENV
 from .runtime import worker_command
 from .platforms import LaunchError, OwnerState, ScreenBackend, SystemdUserBackend, LaunchdBackend
 from .platforms import linux as linux_platform
@@ -86,8 +88,9 @@ SCREEN_BIN_ENV = "LONG_TASK_WAKEUP_SCREEN_BIN"
 TASKS_DIR_NAME = "tasks"
 AGENT_PROMPT_FILE_NAME = "agent-prompt.txt"
 AGENT_RESULT_FILE_NAME = "agent-result.txt"
+AGENT_SYSTEM_PROMPT_FILE_NAME = "agent-system-prompt.md"
 CHILD_AGENT_PARENT_ENV_NAMES = tuple(
-    dict.fromkeys(env_name for name in AGENT_NAMES for env_name in get_agent(name).parent_env_names)
+    dict.fromkeys(env_name for name in CHILD_AGENT_NAMES for env_name in get_child_agent(name).parent_env_names)
 )
 TARGET_LOCK_DIR_ENV = "CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR"
 PROXY_ENV_FILE_ENV = "CODEX_LONG_TASK_WAKEUP_PROXY_ENV_FILE"
@@ -305,6 +308,14 @@ def claude_bin_path(args: argparse.Namespace) -> str:
     return found.path if found is not None else "claude"
 
 
+def pi_bin_path(args: argparse.Namespace) -> str:
+    pi_bin = getattr(args, "pi_bin", None)
+    if pi_bin:
+        return str(Path(pi_bin).expanduser())
+    command = shutil.which("pi")
+    return command or "pi"
+
+
 def report_claude_agent_readiness(args: argparse.Namespace) -> None:
     configured = claude_bin_path(args)
     command = shutil.which(configured)
@@ -354,6 +365,7 @@ def systemd_service_text(args: argparse.Namespace) -> str:
     exec_start = " ".join(systemd_quote(part) for part in command)
     codex_bin = codex_bin_path(args)
     claude_bin = claude_bin_path(args)
+    pi_bin = pi_bin_path(args)
     screen_bin = screen_binary() or "screen"
     path = args.path or os.environ.get("PATH", "")
     return "\n".join(
@@ -376,6 +388,7 @@ def systemd_service_text(args: argparse.Namespace) -> str:
             f"Environment={systemd_quote(f'PATH={path}')}",
             f"Environment={systemd_quote(f'CODEX_LONG_TASK_WAKEUP_CODEX_BIN={codex_bin}')}",
             f"Environment={systemd_quote(f'{CLAUDE_BIN_ENV}={claude_bin}')}",
+            f"Environment={systemd_quote(f'{PI_BIN_ENV}={pi_bin}')}",
             f"Environment={systemd_quote(f'{SCREEN_BIN_ENV}={screen_bin}')}",
             f"Environment={systemd_quote(f'{DESKTOP_APP_SERVER_ENV}=1')}",
             f"Environment={systemd_quote(f'{PROXY_ENV_FILE_ENV}={service_proxy_env_path()}')}",
@@ -459,14 +472,19 @@ def supervisor_config_text(args: argparse.Namespace) -> str:
 
 def resolve_target(args: argparse.Namespace) -> tuple[dict[str, str], str]:
     if args.session:
-        return {"kind": "session", "value": args.session}, "--session"
+        value = pi_callback.canonical_session(args.session) if resolve_agent(args) == "pi" else args.session
+        return {"kind": "session", "value": value}, "--session"
     if args.last:
+        if resolve_agent(args) == "pi":
+            raise ValueError("Pi callbacks require an absolute session file; --last is not supported")
         return {"kind": "last"}, "--last"
 
     agent = resolve_agent(args)
     env_name = get_agent(agent).session_id_env
     session = os.environ.get(env_name, "").strip()
     if session:
+        if agent == "pi":
+            session = pi_callback.canonical_session(session)
         return {"kind": "session", "value": session}, env_name
 
     raise SystemExit(
@@ -522,7 +540,9 @@ def attach_routing_text(prompt: str, request: dict[str, object]) -> str:
     return f"{prompt}\n\n{routing_text(request)}"
 
 
-def make_request(args: argparse.Namespace, prompt: str) -> dict[str, object]:
+def make_request(
+    args: argparse.Namespace, prompt: str, *, duration: float | None = None,
+) -> dict[str, object]:
     target, target_source = bind_target(args)
     agent = resolve_agent(args)
     request = {
@@ -542,9 +562,13 @@ def make_request(args: argparse.Namespace, prompt: str) -> dict[str, object]:
         "approval_policy": getattr(args, "approval_policy", None) or DEFAULT_APPROVAL_POLICY,
         "sandbox_mode": getattr(args, "sandbox_mode", None) or DEFAULT_SANDBOX_MODE,
     }
+    if duration is not None:
+        request["duration_seconds"] = duration
     request.update(callback_transport.selection(args))
     if request.get("callback_mode"):
-        request["version"] = 2  # Older daemons must not discard route/manual intent.
+        request["version"] = 3 if agent == "pi" else 2  # Older daemons must reject new route semantics.
+        if agent == "pi" and request.get("pi_delivery") == "steer":
+            request["version"] = 4
     if agent == "claude":
         request["permission_mode"] = getattr(args, "permission_mode", None) or os.environ.get(
             CLAUDE_PERMISSION_MODE_ENV, DEFAULT_CLAUDE_PERMISSION_MODE
@@ -892,9 +916,9 @@ def load_request(path: Path) -> dict[str, object]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("request must be a JSON object")
-    if data.get("version") not in (1, 2):
+    if data.get("version") not in (1, 2, 3, 4):
         raise ValueError("unsupported request version")
-    if data.get("version") == 2 and data.get("callback_mode") not in ("cli", "desktop", "manual"):
+    if data.get("version") in (2, 3, 4) and data.get("callback_mode") not in ("cli", "desktop", "manual"):
         raise ValueError("version 2 callback requires an explicit mode")
     if not isinstance(data.get("id"), str) or data["id"] != path.stem:
         raise ValueError("request id must match its filename")
@@ -902,6 +926,12 @@ def load_request(path: Path) -> dict[str, object]:
         raise ValueError("request cwd must be a string")
     if not isinstance(data.get("prompt"), str):
         raise ValueError("request prompt must be a string")
+    if data.get("version") in (3, 4):
+        if request_agent(data) != "pi":
+            raise ValueError("version 3 callback requires a frozen Pi route")
+        pi_callback.validate_route(data)
+    if data.get("version") == 4 and data.get("pi_delivery") != "steer":
+        raise ValueError("version 4 callback requires explicit Pi steer delivery")
     resume_command(data)
     return data
 
@@ -911,6 +941,11 @@ def build_acknowledgement_text(command: str, agent: str = "codex") -> str:
         delivery_note = (
             "This resume runs Claude Code headless with automatic permission handling "
             "and grants the callback queue directory as an additional working directory."
+        )
+    elif agent == "pi":
+        delivery_note = (
+            "This callback is delivered to the original PI Agent process through its native message API. "
+            "Only LTC-managed sessions can recover in print mode after the entire original process exits."
         )
     else:
         delivery_note = (
@@ -924,7 +959,8 @@ def build_acknowledgement_text(command: str, agent: str = "codex") -> str:
             "mark the callback as received by running this command:",
             command,
             delivery_note,
-            "The wakeup daemon will retry this callback until the acknowledgement marker exists or retries are exhausted.",
+            ("Once a Pi callback is published, an uncertain outcome requires manual inspection; automatic replay is suppressed."
+             if agent == "pi" else "The wakeup daemon will retry this callback until the acknowledgement marker exists or retries are exhausted."),
         ]
     )
 
@@ -945,6 +981,8 @@ def callback_target_key(request: dict[str, object]) -> str | None:
     kind = target.get("kind")
     value = target.get("value")
     if kind == "session" and isinstance(value, str) and value:
+        if request_agent(request) == "pi":
+            value = pi_callback.canonical_session(value)
         return f"session:{value}"
     if kind == "last":
         return "last"
@@ -1751,8 +1789,66 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
             connection.close()
 
 
+def wait_for_remote_delivery(payload: dict, delivery, timeout: float) -> dict:
+    """Wait for native delivery without starting or killing its owner."""
+    delivery_context = desktop_delivery_context(payload)
+    delivery_name = "pi_live_session" if isinstance(delivery, pi_callback.PiDelivery) else "desktop_app_server"
+    deadline = time.monotonic() + timeout
+    while True:
+        acknowledged = Path(str(payload["ack_path"])).exists()
+        canceled = Path(str(payload["canceled_path"])).exists()
+        if acknowledged:
+            if delivery_context is not None:
+                release_retained_target_lease(*delivery_context)
+            result = {
+                "returncode": 0,
+                "delivery": delivery_name,
+                "skipped": "acknowledged",
+            }
+            break
+        if canceled:
+            if delivery_context is not None:
+                release_retained_target_lease(*delivery_context)
+            result = {"returncode": 0, "delivery": delivery_name, "skipped": "canceled"}
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            request = payload.get("request")
+            queue_root = payload.get("queue_dir")
+            if isinstance(request, dict) and isinstance(queue_root, str):
+                retain_target_lease(Path(queue_root), request)
+                if Path(str(payload["ack_path"])).exists() or Path(str(payload["canceled_path"])).exists():
+                    release_retained_target_lease(Path(queue_root), request)
+                    result = {
+                        "returncode": 0,
+                        "delivery": delivery_name,
+                        "skipped": "acknowledged_or_canceled_after_timeout",
+                    }
+                    break
+            result = {
+                "returncode": 125,
+                "timed_out": True,
+                "delivery": delivery_name,
+                "manual_recovery_required": True,
+            }
+            break
+        if delivery.wait_for_completion(min(0.1, remaining)):
+            acknowledged = Path(str(payload["ack_path"])).exists()
+            if delivery_context is not None:
+                # A matching turn/completed is a known outcome. Missing
+                # ACK may use the normal at-least-once callback policy.
+                release_retained_target_lease(*delivery_context)
+            result = {
+                "returncode": 0 if acknowledged else 1,
+                "delivery": delivery_name,
+                "turn_completed": True,
+            }
+            break
+    return result
+
+
 def delivery_worker_main() -> int:
-    """Own one Codex resume and its locks without leaking them into Codex."""
+    """Own one callback delivery and keep its locks out of agent children."""
     encoded_fds = os.environ.get("CODEX_LONG_TASK_DELIVERY_LOCK_FDS")
     if os.name == "nt":
         lock_fds = windows_process.inherited_lock_fds()
@@ -1773,6 +1869,7 @@ def delivery_worker_main() -> int:
     result: dict[str, object] = {"returncode": 127}
     process: subprocess.Popen[str] | None = None
     desktop_delivery: DesktopAppServerDelivery | None = None
+    pi_delivery: pi_callback.PiDelivery | None = None
 
     class WorkerInterrupted(Exception):
         def __init__(self, signum: int) -> None:
@@ -1789,75 +1886,46 @@ def delivery_worker_main() -> int:
         elif Path(str(payload["canceled_path"])).exists():
             result = {"returncode": 0, "skipped": "canceled"}
         elif (desktop_delivery := start_desktop_app_server_turn(payload)) is not None:
-            deadline = time.monotonic() + timeout
-            while True:
-                acknowledged = Path(str(payload["ack_path"])).exists()
-                canceled = Path(str(payload["canceled_path"])).exists()
-                if acknowledged:
-                    if delivery_context is not None:
-                        release_retained_target_lease(*delivery_context)
-                    result = {
-                        "returncode": 0,
-                        "delivery": "desktop_app_server",
-                        "skipped": "acknowledged",
-                    }
-                    break
-                if canceled:
-                    if delivery_context is not None:
-                        release_retained_target_lease(*delivery_context)
-                    result = {"returncode": 0, "delivery": "desktop_app_server", "skipped": "canceled"}
-                    break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    request = payload.get("request")
-                    queue_root = payload.get("queue_dir")
-                    if isinstance(request, dict) and isinstance(queue_root, str):
-                        retain_target_lease(Path(queue_root), request)
-                        if Path(str(payload["ack_path"])).exists() or Path(str(payload["canceled_path"])).exists():
-                            release_retained_target_lease(Path(queue_root), request)
-                            result = {
-                                "returncode": 0,
-                                "delivery": "desktop_app_server",
-                                "skipped": "acknowledged_or_canceled_after_timeout",
-                            }
-                            break
-                    result = {
-                        "returncode": 125,
-                        "timed_out": True,
-                        "delivery": "desktop_app_server",
-                        "manual_recovery_required": True,
-                    }
-                    break
-                if desktop_delivery.wait_for_completion(min(0.1, remaining)):
-                    acknowledged = Path(str(payload["ack_path"])).exists()
-                    if delivery_context is not None:
-                        # A matching turn/completed is a known outcome. Missing
-                        # ACK may use the normal at-least-once callback policy.
-                        release_retained_target_lease(*delivery_context)
-                    result = {
-                        "returncode": 0 if acknowledged else 1,
-                        "delivery": "desktop_app_server",
-                        "turn_completed": True,
-                    }
-                    break
+            result = wait_for_remote_delivery(payload, desktop_delivery, timeout)
         else:
-            process = subprocess.Popen(
-                process_command([str(part) for part in command]),
-                stdin=subprocess.PIPE,
-                stdout=sys.stderr,
-                stderr=sys.stderr,
-                text=True,
-                encoding="utf-8",
-                cwd=str(payload["cwd"]),
-                close_fds=True,
-                **(windows_process.background_popen_kwargs() if os.name == "nt" else {"start_new_session": True}),
-            )
-            try:
-                process.communicate(input=prompt, timeout=timeout)
-                result = {"returncode": int(process.returncode)}
-            except subprocess.TimeoutExpired:
-                terminate_process_group(process)
-                result = {"returncode": 124, "timed_out": True}
+            request = payload.get("request")
+            if isinstance(request, dict) and request_agent(request) == "pi":
+                payload["prompt"] = prompt
+                pi_delivery = pi_callback.prepare_delivery(payload)
+                if not pi_delivery.online:
+                    command = pi_delivery.command
+            if pi_delivery is not None and (Path(str(payload["ack_path"])).exists() or Path(str(payload["canceled_path"])).exists()):
+                release_retained_target_lease(*delivery_context)
+                result = {"returncode": 0, "delivery": pi_delivery.delivery_name, "skipped": "acknowledged_or_canceled"}
+            elif pi_delivery is not None and pi_delivery.online:
+                result = wait_for_remote_delivery(payload, pi_delivery, timeout)
+            else:
+                process = subprocess.Popen(
+                    process_command([str(part) for part in command]),
+                    env=pi_delivery.environment if pi_delivery is not None else None,
+                    stdin=subprocess.PIPE,
+                    stdout=sys.stderr,
+                    stderr=sys.stderr,
+                    text=True,
+                    encoding="utf-8",
+                    cwd=str(payload["cwd"]),
+                    close_fds=True,
+                    **(windows_process.background_popen_kwargs() if os.name == "nt" else {"start_new_session": True}),
+                )
+                if pi_delivery is not None:
+                    pi_delivery.monitor_owner(process)
+                try:
+                    process.communicate(input=prompt, timeout=timeout)
+                    result = {"returncode": int(process.returncode)}
+                except subprocess.TimeoutExpired:
+                    terminate_process_group(process)
+                    result = {"returncode": 124, "timed_out": True}
+                if pi_delivery is not None:
+                    if Path(str(payload["ack_path"])).exists() or Path(str(payload["canceled_path"])).exists():
+                        release_retained_target_lease(*delivery_context)
+                        result = {"returncode": 0, "delivery": "pi_managed_resume"}
+                    else:
+                        result = {"returncode": 125, "delivery": "pi_managed_resume", "manual_recovery_required": True}
     except CallbackTargetBusy:
         result = {"returncode": 123, "delivery_state": "waiting_for_idle"}
     except CallbackTransportBlocked as exc:
@@ -1874,6 +1942,8 @@ def delivery_worker_main() -> int:
     finally:
         if desktop_delivery is not None:
             desktop_delivery.close()
+        if pi_delivery is not None:
+            pi_delivery.close()
         # A Windows worker's Job may still be collecting Agent descendants.
         # Keep its raw lease handles until OS process teardown, not before it.
         for lock_fd in ([] if os.name == "nt" else lock_fds):
@@ -2074,8 +2144,8 @@ def move_request(source: Path, destination_dir: Path) -> Path:
             not isinstance(source_id, str)
             or not isinstance(source_data, dict)
             or not isinstance(destination_data, dict)
-            or source_data.get("version") not in (1, 2)
-            or destination_data.get("version") not in (1, 2)
+            or source_data.get("version") not in (1, 2, 3, 4)
+            or destination_data.get("version") not in (1, 2, 3, 4)
             or source_id != destination_id
             or source_id != source.stem
             or source_data != destination_data
@@ -2490,11 +2560,12 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
             request["delivery_state"] = "blocked"
             request["last_error"] = "callback transport blocked; repair the original session connection, then use ltc retry --id " + request_id
         if result.returncode == 125 and not acked:
-            request["last_error"] = "Desktop callback outcome is unknown; automatic retry suppressed to prevent duplicate delivery"
+            delivery_name = "Pi" if request_agent(request) == "pi" else "Desktop"
+            request["last_error"] = delivery_name + " callback outcome is unknown; automatic retry suppressed to prevent duplicate delivery"
             request["retain_target_lease"] = True
             destination_dir = root / "failed"
             print(
-                f"ltc: warning: daemon callback {running.name} has an unknown Desktop outcome; "
+                f"ltc: warning: daemon callback {running.name} has an unknown {delivery_name} outcome; "
                 "manual recovery is required to avoid duplicate delivery",
                 file=sys.stderr,
             )
@@ -2843,18 +2914,24 @@ def write_managed_task(root: Path, task: dict[str, object]) -> None:
 
 def load_managed_task(path: Path) -> dict[str, object]:
     task = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(task, dict) or task.get("version") not in (1, 2, 3):
+    if not isinstance(task, dict) or task.get("version") not in (1, 2, 3, 4, 5):
         raise ValueError("invalid managed task record")
     if task.get("id") != path.parent.name:
         raise ValueError("managed task id must match its directory")
     get_agent(str(task.get("agent", "codex")))
     if task.get("task_kind") == "agent":
-        get_agent(str(task.get("agent_worker", "")))
+        get_child_agent(str(task.get("agent_worker", "")))
     backend = task.get("execution_backend", "screen")
-    if task.get("version") in (2, 3) and "execution_backend" not in task:
+    if task.get("version") in (2, 3, 4, 5) and "execution_backend" not in task:
         raise ValueError("native task records require an execution backend")
-    if task.get("version") == 3 and task.get("callback_mode") not in ("cli", "desktop", "manual"):
+    if task.get("version") in (3, 4, 5) and task.get("callback_mode") not in ("cli", "desktop", "manual"):
         raise ValueError("version 3 task requires an explicit callback mode")
+    if task.get("version") in (4, 5):
+        if request_agent(task) != "pi":
+            raise ValueError("version 4 task requires a frozen Pi parent route")
+        pi_callback.validate_route(task)
+    if task.get("version") == 5 and task.get("pi_delivery") != "steer":
+        raise ValueError("version 5 task requires explicit Pi steer delivery")
     if backend not in ("screen", "systemd-user", "launchd", "windows-task"):
         raise ValueError(f"unsupported execution backend: {backend!r}")
     if not isinstance(task.get("queue_dir"), str):
@@ -2907,7 +2984,7 @@ def managed_task_namespace(task: dict[str, object]) -> argparse.Namespace:
         _callback_target_source=str(task.get("target_source", "managed-task")),
         _callback_agent=str(task.get("agent", "codex")),
         callback_format=str(task.get("callback_format", "compact")),
-        _callback_route={k: task[k] for k in ("callback_mode", "callback_origin", "callback_bridge_file") if k in task},
+        _callback_route={k: task[k] for k in callback_transport.ROUTE_FIELDS if k in task},
     )
 
 
@@ -2929,10 +3006,15 @@ def managed_task_prompt(
         worker = str(task.get("agent_worker", "unknown"))
         details.extend(
             [
-                f"Child agent: {agent_display_name(worker)}",
+                f"Child agent: {get_child_agent(worker).display_name}",
                 f"Agent result: {task.get('agent_result_path')}",
             ]
         )
+        if task.get("agent_system_prompt_path"):
+            details.extend([
+                f"System prompt source: {task.get('agent_system_prompt_source')}",
+                f"System prompt snapshot: {task['agent_system_prompt_path']}",
+            ])
     if task.get("agent_template"):
         details.extend([
             f"Agent template: {task['agent_template']} v{task.get('agent_template_version')}",
@@ -2972,9 +3054,11 @@ def managed_task_prompt(
     return build_prompt(args, duration)
 
 
-def managed_callback_request(task: dict[str, object], prompt: str) -> dict[str, object]:
+def managed_callback_request(
+    task: dict[str, object], prompt: str, *, duration: float | None = None,
+) -> dict[str, object]:
     args = managed_task_namespace(task)
-    request = make_request(args, prompt)
+    request = make_request(args, prompt, duration=duration)
     request.update(
         {
             "managed_task_id": task["id"],
@@ -2993,7 +3077,8 @@ def managed_callback_request(task: dict[str, object], prompt: str) -> dict[str, 
         request["agent_worker"] = task.get("agent_worker")
         request["agent_result_path"] = task.get("agent_result_path")
         for key in ("agent_template", "agent_template_version", "agent_template_source",
-                    "agent_template_handoff", "child_model", "child_reasoning_effort"):
+                    "agent_template_handoff", "child_model", "child_reasoning_effort",
+                    "agent_system_prompt_path", "agent_system_prompt_source"):
             if key in task:
                 request[key] = task[key]
     return request
@@ -3015,7 +3100,7 @@ def queue_managed_task_callback(root: Path, task: dict[str, object]) -> bool:
         else None
     )
     prompt = managed_task_prompt(task, outcome=str(task.get("outcome", "unknown")), duration=duration)
-    request = managed_callback_request(task, prompt)
+    request = managed_callback_request(task, prompt, duration=duration)
     if enqueue_existing_request(root, request, prompt) != 0:
         return False
     task["callback_queued"] = True
@@ -3362,6 +3447,16 @@ def agent_prompt_text(parts: list[str]) -> str:
     return prompt_parts[0] if len(prompt_parts) == 1 else " ".join(prompt_parts)
 
 
+def read_agent_system_prompt(path: Path) -> str:
+    """Require an actual nonblank UTF-8 file, never Pi's inline-path fallback."""
+    if not path.is_file():
+        raise ValueError(f"system prompt must be a readable file: {path}")
+    text = path.read_bytes().decode("utf-8-sig")
+    if not text.strip():
+        raise ValueError(f"system prompt file must not be empty: {path}")
+    return text
+
+
 def agent_wrapped_command(
     worker: str,
     *,
@@ -3371,6 +3466,7 @@ def agent_wrapped_command(
     permission_mode: str,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    system_prompt_path: Path | None = None,
 ) -> list[str]:
     options = ChildOptions(
         cwd=cwd,
@@ -3379,8 +3475,9 @@ def agent_wrapped_command(
         permission_mode=permission_mode,
         model=model,
         reasoning_effort=reasoning_effort,
+        system_prompt_path=system_prompt_path,
     )
-    return get_agent(worker).child_command(options, agent_environment(worker))
+    return get_child_agent(worker).child_command(options, agent_environment(worker))
 
 
 def child_agent_environment(environment: dict[str, str]) -> dict[str, str]:
@@ -3429,9 +3526,12 @@ def submit_managed_run(args: argparse.Namespace) -> int:
     wrapped_command = list(getattr(args, "wrapped_command", []))
     agent_prompt_path: Path | None = None
     agent_result_path: Path | None = None
+    agent_system_prompt_path: Path | None = None
     if task_kind == "agent":
         agent_prompt_path = task_directory / AGENT_PROMPT_FILE_NAME
         agent_result_path = task_directory / AGENT_RESULT_FILE_NAME
+        if getattr(args, "agent_system_prompt_text", None) is not None:
+            agent_system_prompt_path = task_directory / AGENT_SYSTEM_PROMPT_FILE_NAME
         wrapped_command = agent_wrapped_command(
             str(args.agent_worker),
             cwd=os.path.abspath(args.cwd),
@@ -3440,6 +3540,7 @@ def submit_managed_run(args: argparse.Namespace) -> int:
             permission_mode=str(args.permission_mode),
             model=getattr(args, "child_model", None),
             reasoning_effort=getattr(args, "child_reasoning_effort", None),
+            system_prompt_path=agent_system_prompt_path,
         )
     environment = {
         name: value
@@ -3450,7 +3551,7 @@ def submit_managed_run(args: argparse.Namespace) -> int:
     task: dict[str, object] = {
         # Older daemons must reject new route intent, even for screen tasks,
         # instead of silently auto-delivering an explicit manual callback.
-        "version": 3,
+        "version": 4 if resolve_agent(args) == "pi" else 3,
         "id": task_id,
         "submitted_at": time.time(),
         "execution_backend": backend,
@@ -3480,6 +3581,8 @@ def submit_managed_run(args: argparse.Namespace) -> int:
         "token": MANAGED_WORKER_TOKEN_PREFIX + secrets.token_urlsafe(32),
     }
     task.update(callback_transport.selection(args))
+    if task.get("pi_delivery") == "steer":
+        task["version"] = 5  # Old coordinators must not downgrade steer to follow-up.
     if task_kind == "agent" and agent_prompt_path is not None and agent_result_path is not None:
         task.update(
             {
@@ -3495,10 +3598,17 @@ def submit_managed_run(args: argparse.Namespace) -> int:
                 "agent_result_path": str(agent_result_path),
             }
         )
+        if agent_system_prompt_path is not None:
+            task.update({
+                "agent_system_prompt_path": str(agent_system_prompt_path),
+                "agent_system_prompt_source": args.agent_system_prompt_source,
+            })
     try:
         private_directory(task_directory)
         if agent_prompt_path is not None:
             write_private_text(agent_prompt_path, str(args.agent_prompt_text))
+        if agent_system_prompt_path is not None:
+            write_private_text(agent_system_prompt_path, args.agent_system_prompt_text)
         write_request(environment_path, {"version": 1, "environment": environment})
         write_managed_task(root, task)
     except OSError as exc:
@@ -3516,6 +3626,8 @@ def submit_managed_run(args: argparse.Namespace) -> int:
     print(f"ltc: task log: {log_path}", file=sys.stderr)
     if agent_result_path is not None:
         print(f"ltc: agent result: {agent_result_path}", file=sys.stderr)
+    if agent_system_prompt_path is not None:
+        print(f"ltc: agent system prompt: {agent_system_prompt_path}", file=sys.stderr)
     if task["agent"] == "claude" and target.get("kind") == "session":
         if claude_code.channel_is_held(str(target.get("value"))):
             print("ltc: Claude Code live callback: arrives through the ltc channel; no `ltc wait` needed",
@@ -3666,6 +3778,14 @@ def run_managed_worker_locked(root: Path, task: dict[str, object]) -> int:
             prompt_path = Path(str(task["agent_prompt_path"]))
             result_path = Path(str(task["agent_result_path"]))
             prompt = prompt_path.read_text(encoding="utf-8")
+            system_prompt = task.get("agent_system_prompt_path")
+            if system_prompt is not None:
+                expected = prompt_path.parent / AGENT_SYSTEM_PROMPT_FILE_NAME
+                if not isinstance(system_prompt, str) or Path(system_prompt) != expected:
+                    raise ValueError("system prompt snapshot must be in its managed task directory")
+                # Pi otherwise treats a missing/unreadable filename as literal
+                # system text or silently falls back to its default prompt.
+                read_agent_system_prompt(expected)
             run_kwargs.update(
                 {
                     "input": prompt,
@@ -3674,7 +3794,7 @@ def run_managed_worker_locked(root: Path, task: dict[str, object]) -> int:
                     "env": child_agent_environment(environment),
                 }
             )
-            captures_stdout = get_agent(str(task["agent_worker"])).child_result_mode == "stdout"
+            captures_stdout = get_child_agent(str(task["agent_worker"])).child_result_mode == "stdout"
             if captures_stdout:
                 run_kwargs["stdout"] = subprocess.PIPE
             completed = subprocess.run(command, **run_kwargs)
@@ -3758,12 +3878,18 @@ def agent(args: argparse.Namespace) -> int:
     args.template_handoff = None
     args.child_model = getattr(args, "child_model", None)
     args.child_reasoning_effort = getattr(args, "child_reasoning_effort", None)
+    system_prompt_file = getattr(args, "system_prompt_file", None)
+    args.agent_system_prompt_source = None
+    args.agent_system_prompt_text = None
+    if system_prompt_file is not None and not str(system_prompt_file).strip():
+        raise SystemExit("--system-prompt-file must not be empty")
     if not args.agent_prompt_text.strip():
         raise SystemExit("agent mode requires non-empty task requirements")
     if args.child_model is not None and not args.child_model.strip():
         raise SystemExit("--model must not be empty")
-    if args.child_reasoning_effort and not get_agent(args.agent_worker).supports_reasoning_effort:
-        raise SystemExit("--reasoning-effort is supported only for Codex children")
+    child_adapter = get_child_agent(args.agent_worker)
+    if args.child_reasoning_effort and not child_adapter.supports_reasoning_effort:
+        raise SystemExit(f"{child_adapter.display_name} children do not support --reasoning-effort")
     if args.template is not None or args.template_file is not None:
         try:
             profile = load_template(args.template, template_file=args.template_file)
@@ -3775,7 +3901,19 @@ def agent(args: argparse.Namespace) -> int:
         args.template_handoff = profile.handoff
         args.child_model = args.child_model or profile.model_for(args.agent_worker)
         args.child_reasoning_effort = args.child_reasoning_effort or profile.reasoning_effort_for(args.agent_worker)
+        system_prompt_file = system_prompt_file or profile.system_prompt_file_for(args.agent_worker)
         args.agent_prompt_text = profile.render(args.agent_prompt_text)
+    if args.child_reasoning_effort and args.child_reasoning_effort not in child_adapter.reasoning_efforts:
+        raise SystemExit(f"unsupported {child_adapter.display_name} reasoning effort {args.child_reasoning_effort!r}")
+    if system_prompt_file is not None:
+        if not child_adapter.supports_system_prompt_file:
+            raise SystemExit(f"{child_adapter.display_name} children do not support --system-prompt-file")
+        try:
+            source = Path(system_prompt_file).expanduser().resolve()
+            args.agent_system_prompt_text = read_agent_system_prompt(source)
+        except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
+            raise SystemExit(f"ltc: could not load system prompt file: {exc}") from exc
+        args.agent_system_prompt_source = str(source)
     args.task_kind = "agent"
     args.command = args.command or f"ltc agent {args.agent_worker}"
     args.wrapped_command = []
@@ -3787,11 +3925,12 @@ def agent(args: argparse.Namespace) -> int:
                     "[long-task-agent-submission-dry-run]",
                     f"Task: {args.task}",
                     f"Working directory: {os.path.abspath(args.cwd)}",
-                    f"Child agent: {agent_display_name(args.agent_worker)}",
+                    f"Child agent: {child_adapter.display_name}",
                     f"Template: {args.template or 'none'} (version {getattr(args, 'template_version', None)})",
                     f"Template source: {args.template_source or 'none'}",
                     f"Child model: {args.child_model or 'CLI default'}",
                     f"Child reasoning effort: {args.child_reasoning_effort or 'CLI default'}",
+                    f"System prompt source: {args.agent_system_prompt_source or 'CLI default'}",
                     f"Expanded prompt:\n{args.agent_prompt_text}",
                     f"Template handoff: {args.template_handoff or 'none'}",
                     f"Execution: daemon -> {getattr(args, 'backend', 'auto')} backend -> independent worker -> child agent",
@@ -3814,12 +3953,12 @@ def add_common_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--agent",
         choices=AGENT_NAMES,
-        help="Agent to wake (default: auto-detect from $CLAUDECODE/$CLAUDE_CODE_SESSION_ID or $CODEX_THREAD_ID)",
+        help="Agent to wake (default: auto-detect from $PI_SESSION_FILE/$PI_SESSION_ID, $CLAUDECODE/$CLAUDE_CODE_SESSION_ID or $CODEX_THREAD_ID)",
     )
     target = parser.add_mutually_exclusive_group()
     target.add_argument(
         "--session",
-        help=f"Agent session id to resume (default: ${CLAUDE_THREAD_ID_ENV} or ${CODEX_THREAD_ID_ENV} from the launching agent thread)",
+        help=f"Agent session id to resume (default: ${PI_SESSION_FILE_ENV}, ${CLAUDE_THREAD_ID_ENV} or ${CODEX_THREAD_ID_ENV} from the launching agent thread)",
     )
     target.add_argument(
         "--last",
@@ -3892,23 +4031,24 @@ def install_skill_tree(target: Path, *, include_codex_plugin: bool, force: bool,
         return 1
 
     package_root = resources.files("long_task_callback").joinpath("skill")
-    if target.exists():
-        shutil.rmtree(target)
-    target.mkdir(parents=True, exist_ok=True)
+    with template_registration.preserve_installed_index(target):
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir(parents=True, exist_ok=True)
 
-    for item in package_root.iterdir():
-        if item.name == "agents" and not include_codex_plugin:
-            continue  # agents/openai.yaml is Codex plugin metadata; other agents ignore it.
-        destination = target / item.name
-        with resources.as_file(item) as source:
-            if item.is_dir():
-                shutil.copytree(source, destination)
-            else:
-                shutil.copy2(source, destination)
-    if claude:
-        os.replace(target / "SKILL.md", target / "REFERENCE.md")
-        with resources.as_file(resources.files("long_task_callback").joinpath("claude_skill", "SKILL.md")) as source:
-            shutil.copy2(source, target / "SKILL.md")
+        for item in package_root.iterdir():
+            if item.name == "agents" and not include_codex_plugin:
+                continue  # agents/openai.yaml is Codex plugin metadata; other agents ignore it.
+            destination = target / item.name
+            with resources.as_file(item) as source:
+                if item.is_dir():
+                    shutil.copytree(source, destination)
+                else:
+                    shutil.copy2(source, destination)
+        if claude:
+            os.replace(target / "SKILL.md", target / "REFERENCE.md")
+            with resources.as_file(resources.files("long_task_callback").joinpath("claude_skill", "SKILL.md")) as source:
+                shutil.copy2(source, target / "SKILL.md")
 
     print(f"Installed long-task-callback skill to {target}")
     return 0
@@ -3931,6 +4071,36 @@ def install_skill(args: argparse.Namespace) -> int:
         status |= install_skill_tree(claude_home() / "skills" / "long-task-callback", include_codex_plugin=False, force=args.force,
                                      keep_existing=bool(getattr(args, "keep_existing", False)), claude=True)
     return status
+
+
+def template_command(args: argparse.Namespace) -> int:
+    try:
+        if args.template_action == "register":
+            result = template_registration.register(args)
+        elif args.template_action == "unregister":
+            result = template_registration.unregister(args)
+        else:
+            result = template_registration.list_templates()
+            if not args.json:
+                for entry in result:
+                    print(f"{entry['name']} ({entry['worker']}, ${entry['skill']}): {entry['description']}")
+                if not result:
+                    print("No registered child-agent templates.")
+                return 0
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        if args.dry_run or args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        elif args.template_action == "register":
+            print(f"Registered {result['name']} for {result['worker']}.")
+            print(f"Skill: ${result['skill']}")
+            print(f"Template: {result['template_file']}")
+        else:
+            print(f"{result['name']} is unregistered; template and system prompt files retained.")
+        return 0
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"ltc: {exc}", file=sys.stderr)
+        return 1
 
 
 def run_systemctl(args: list[str]) -> int:
@@ -4262,6 +4432,7 @@ def daemon_environment(args: argparse.Namespace, *, include_proxy_values: bool =
         "PYTHONUNBUFFERED": "1",
         "CODEX_LONG_TASK_WAKEUP_CODEX_BIN": codex_bin_path(args),
         CLAUDE_BIN_ENV: claude_bin_path(args),
+        PI_BIN_ENV: pi_bin_path(args),
         SCREEN_BIN_ENV: screen_binary() or "screen",
         DESKTOP_APP_SERVER_ENV: os.environ.get(DESKTOP_APP_SERVER_ENV, "1"),
         "PATH": getattr(args, "path", None) or os.environ.get("PATH", ""),
@@ -4681,6 +4852,12 @@ def setup(args: argparse.Namespace) -> int:
     skill_status = install_skill(skill_args)
     if skill_status != 0:
         return skill_status
+    if getattr(args, "with_pi_extension", False):
+        try:
+            pi_callback.install_extension(argparse.Namespace(profile=None, force=args.force))
+        except (OSError, ValueError) as exc:
+            print(f"ltc: could not install the Pi extension: {exc}", file=sys.stderr)
+            return 2
     ensure_callback_hook_file()
     report_claude_agent_readiness(args)
     try:
@@ -4702,6 +4879,7 @@ def setup(args: argparse.Namespace) -> int:
         exec_start=args.exec_start,
         codex_bin=args.codex_bin,
         claude_bin=getattr(args, "claude_bin", None),
+        pi_bin=getattr(args, "pi_bin", None),
         path=args.path,
         proxy_env_file=getattr(args, "proxy_env_file", None),
         inherit_proxy=bool(getattr(args, "inherit_proxy", False)),
@@ -4794,10 +4972,14 @@ def retry_callback(args: argparse.Namespace) -> int:
             raise ValueError("the bound session has an active or unresolved delivery")
         if args.callback_mode:
             options = argparse.Namespace(callback_mode=args.callback_mode, agent=request_agent(request))
-            for key in ("callback_mode", "callback_origin", "callback_bridge_file"):
+            pi_route = {key: request[key] for key in pi_callback.ROUTE_FIELDS if key in request}
+            for key in callback_transport.ROUTE_FIELDS:
                 request.pop(key, None)
             request.update(callback_transport.selection(options))
-            request["version"] = 2
+            request.update(pi_route)
+            request["version"] = 3 if request_agent(request) == "pi" else 2
+            if request.get("pi_delivery") == "steer":
+                request["version"] = 4
         capability = callback_transport.inspect_route(request)
         if capability["status"] == "blocked":
             raise ValueError("callback route remains blocked: " + str(capability.get("reason")))
@@ -5282,7 +5464,7 @@ def main() -> int:
     doctor_parser.add_argument("--operation", choices=("run", "agent", "done"), default="run",
                                help="Workflow whose prerequisites are checked (default: run)")
     doctor_parser.add_argument("--agent", choices=AGENT_NAMES, help="Callback Agent (default: detect current Agent)")
-    doctor_parser.add_argument("--agent-worker", choices=AGENT_NAMES, help="Child Agent for --operation agent")
+    doctor_parser.add_argument("--agent-worker", choices=CHILD_AGENT_NAMES, help="Child Agent for --operation agent")
     doctor_parser.add_argument("--callback-mode", choices=callback_transport.MODES, default="auto")
     doctor_target = doctor_parser.add_mutually_exclusive_group()
     doctor_target.add_argument("--session", help="Original Agent session to preserve during repair")
@@ -5317,16 +5499,26 @@ def main() -> int:
     add_common_flags(run_parser)
     run_parser.add_argument("wrapped_command", nargs=argparse.REMAINDER)
 
-    agent_parser = sub.add_parser("agent", help="Run a durable fresh Codex or Claude Code child agent")
+    agent_parser = sub.add_parser("agent", help="Run a durable fresh Codex, Claude Code or PI Agent child")
     agent_sub = agent_parser.add_subparsers(dest="agent_worker", required=True)
-    for worker in AGENT_NAMES:
-        child_parser = agent_sub.add_parser(worker, help=f"Run a fresh {agent_display_name(worker)} child agent")
+    for worker in CHILD_AGENT_NAMES:
+        adapter = get_child_agent(worker)
+        child_parser = agent_sub.add_parser(worker, help=f"Run a fresh {adapter.display_name} child agent")
         add_common_flags(child_parser)
         template_source = child_parser.add_mutually_exclusive_group()
         template_source.add_argument("--template", help="User template name in ~/.config/ltc/templates, or built-in test")
         template_source.add_argument("--template-file", help="Custom YAML template file (relative to the submitting shell directory)")
         child_parser.add_argument("--model", dest="child_model", help="Child model only; overrides template default")
-        child_parser.add_argument("--reasoning-effort", dest="child_reasoning_effort", choices=REASONING_EFFORTS, help="Codex child reasoning effort; model must support it")
+        if adapter.supports_system_prompt_file:
+            child_parser.add_argument(
+                "--system-prompt-file",
+                help="UTF-8 system prompt file; overrides template default and freezes its text at submission",
+            )
+        child_parser.add_argument(
+            "--reasoning-effort", dest="child_reasoning_effort",
+            choices=adapter.reasoning_efforts or REASONING_EFFORTS,
+            help="Child reasoning effort; PI Agent maps this to --thinking; model must support it",
+        )
         child_parser.add_argument("agent_prompt", nargs=argparse.REMAINDER)
 
     screen_worker_parser = sub.add_parser("_screen-worker", help=argparse.SUPPRESS)
@@ -5365,6 +5557,7 @@ def main() -> int:
         service_parser.add_argument("--exec-start", help="Path to LTC executable")
         service_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
         service_parser.add_argument("--claude-bin", help="Path to claude executable used by the daemon")
+        service_parser.add_argument("--pi-bin", help="Path to the PI Agent executable used by the daemon")
         service_parser.add_argument("--path", help="PATH environment for the daemon service")
         add_proxy_environment_flags(service_parser)
         service_parser.add_argument("--force", action="store_true", help="Overwrite an existing service file")
@@ -5382,6 +5575,32 @@ def main() -> int:
     )
     install_parser.add_argument("--force", action="store_true", help="Overwrite an existing long-task-callback skill")
 
+    pi_install = sub.add_parser("install-pi-extension", help="Install Pi's native live callback extension")
+    pi_install.add_argument("--profile", help="Pi profile directory (default: PI_CODING_AGENT_DIR or ~/.pi/agent)")
+    pi_install.add_argument("--force", action="store_true", help="Replace an edited LTC extension after review")
+    pi_launch = sub.add_parser("pi", help="Launch Pi with a session writer lease acquired before startup")
+    pi_launch.add_argument("--cwd", default=os.getcwd(), help="Working directory for Pi")
+    pi_launch.add_argument("--session", help="Absolute existing JSONL file (default: a new managed session)")
+    pi_launch.add_argument("pi_args", nargs=argparse.REMAINDER, help="Pi options after --")
+
+    template_parser = sub.add_parser("template", help="Register named child templates and advertise their skills")
+    template_actions = template_parser.add_subparsers(dest="template_action", required=True)
+    register_parser = template_actions.add_parser("register", help="Install a YAML template and discoverable task skill")
+    register_parser.add_argument("name", help="Template name: lowercase letters, digits and hyphens")
+    register_parser.add_argument("--file", help="Source YAML (default: existing named user template); relative paths use the current shell directory")
+    register_parser.add_argument("--worker", choices=CHILD_AGENT_NAMES, help="Child worker (default: YAML worker)")
+    register_parser.add_argument("--description", help="Skill discovery description (default: YAML description)")
+    register_parser.add_argument("--target", choices=("codex", "claude", "both"), default="both", help="Parent Agent skill profiles to update")
+    register_parser.add_argument("--force", action="store_true", help="Replace existing template files or edited owned entrypoints")
+    register_parser.add_argument("--dry-run", action="store_true", help="Validate and show registration changes without writing files")
+    register_parser.add_argument("--json", action="store_true", help="Print structured registration results")
+    list_parser = template_actions.add_parser("list", help="List registered task capabilities")
+    list_parser.add_argument("--json", action="store_true", help="Print structured registration metadata")
+    unregister_parser = template_actions.add_parser("unregister", help="Remove discovery entrypoints; preserve template and prompt files")
+    unregister_parser.add_argument("name")
+    unregister_parser.add_argument("--dry-run", action="store_true")
+    unregister_parser.add_argument("--json", action="store_true")
+
     setup_parser = sub.add_parser("setup", help="Install the bundled skill and user-level wakeup daemon")
     setup_parser.add_argument("--backend", choices=("auto", "systemd", "launchd", "windows-task", "screen"), default=os.environ.get("LTC_EXECUTION_BACKEND", "auto"))
     setup_parser.add_argument("--callback-only", action="store_true",
@@ -5389,6 +5608,7 @@ def main() -> int:
     setup_parser.add_argument("--service", choices=("auto", "systemd", "launchd", "windows-task", "supervisor", "standalone"), default="auto",
                               help="Coordinator hosting: systemd on Linux, launchd on macOS, Task Scheduler on Windows")
     setup_parser.add_argument("--skill-path", help="Skills directory to install into (overrides --skill-target)")
+    setup_parser.add_argument("--with-pi-extension", action="store_true", help="Also install Pi's native live callback extension")
     setup_parser.add_argument(
         "--skill-target",
         choices=["codex", "claude", "both"],
@@ -5406,6 +5626,7 @@ def main() -> int:
     setup_parser.add_argument("--exec-start", help="Path to codex-long-task-wakeup executable")
     setup_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
     setup_parser.add_argument("--claude-bin", help="Path to claude executable used by the daemon")
+    setup_parser.add_argument("--pi-bin", help="Path to the PI Agent executable used by the daemon")
     setup_parser.add_argument("--path", help="PATH environment for the daemon service")
     add_proxy_environment_flags(setup_parser)
     setup_parser.add_argument("--force", action="store_true", help="Overwrite an existing skill and service file")
@@ -5552,6 +5773,14 @@ def main() -> int:
         return windows_service.uninstall(args)
     if args.mode == "install-skill":
         return install_skill(args)
+    if args.mode in ("install-pi-extension", "pi"):
+        try:
+            return pi_callback.install_extension(args) if args.mode == "install-pi-extension" else pi_callback.managed_pi(args)
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"ltc: {exc}", file=sys.stderr)
+            return 2
+    if args.mode == "template":
+        return template_command(args)
     if args.mode == "setup":
         return setup(args)
     if args.mode == "prompt-policy":
