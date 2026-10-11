@@ -27,6 +27,8 @@ LTC 返回任务 ID 和日志路径。任务结束后，原会话收到回调，
 
 ## 接入你的环境
 
+先看[典型使用场景](guides/use-cases.md)选择工作流程，再通过 [Harness 支持情况](integrations/support.md)确认接入方式和版本。
+
 LTC 支持 Linux、macOS 和 Windows。按[安装指南](installation.md)配置运行环境，再选择你使用的 Agent：[Codex CLI](integrations/codex.md)、[Claude Code](integrations/claude.md)、[Pi](integrations/pi.md)或 [Codex Desktop](integrations/desktop.md)。
 
 快速开始使用正式版 `0.7.0`。Claude 实时回调、Pi 和 Desktop 接入使用 `0.7.1` 预览版，各接入页给出对应步骤。

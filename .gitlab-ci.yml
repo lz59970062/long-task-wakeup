@@ -1,0 +1,12 @@
+image: python:3.12-slim
+
+documentation:
+  stage: deploy
+  script:
+    - python -m pip install -r docs/requirements.txt
+    - python scripts/docs_sync.py check
+    - python -m mkdocs build --strict
+  pages:
+    publish: site
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'

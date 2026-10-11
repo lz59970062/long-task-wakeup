@@ -5,6 +5,8 @@ repo_url: https://github.com/lz59970062/long-task-wakeup
 repo_name: lz59970062/long-task-wakeup
 edit_uri: edit/main/docs/
 strict: true
+hooks:
+  - scripts/docs_hooks.py
 validation:
   links:
     anchors: warn
@@ -38,6 +40,53 @@ theme:
     - content.action.edit
 plugins:
   - search
+  - i18n:
+      docs_structure: suffix
+      languages:
+        - locale: zh
+          default: true
+          name: 简体中文
+        - locale: en
+          name: English
+          site_description: Run long tasks and return the results to the same Agent session.
+          theme:
+            palette:
+              - scheme: default
+                primary: teal
+                accent: teal
+                toggle:
+                  icon: material/weather-night
+                  name: Switch to dark mode
+              - scheme: slate
+                primary: teal
+                accent: teal
+                toggle:
+                  icon: material/weather-sunny
+                  name: Switch to light mode
+          nav_translations:
+            首页: Home
+            入门: Getting started
+            安装: Installation
+            第一个任务: Your first task
+            架构概览: Architecture
+            典型使用场景: Use cases
+            使用指南: User guides
+            运行命令: Running commands
+            启动子 Agent: Running child agents
+            接入已有任务: External jobs
+            接收与确认回调: Callbacks and ACK
+            编写任务模板: Task templates
+            跟踪多阶段目标: Multi-stage goals
+            Agent 接入: Agent integrations
+            Harness 支持情况: Harness support
+            参考: Reference
+            命令速查: CLI reference
+            配置与文件位置: Configuration
+            常见问题: Troubleshooting
+            开发资料: Engineering notes
+            参与文档维护: Contributing to the docs
+            文档发布与同步: Publishing and synchronization
+            版本记录: Changelog
 markdown_extensions:
   - attr_list
   - tables
@@ -61,10 +110,15 @@ extra_css:
 exclude_docs: |
   /*.md
   !/index.md
+  !/index.en.md
   !/installation.md
+  !/installation.en.md
   !/quickstart.md
+  !/quickstart.en.md
   !/overview.md
+  !/overview.en.md
   !/troubleshooting.md
+  !/troubleshooting.en.md
   /requirements.txt
 nav:
   - 首页: index.md
@@ -72,6 +126,7 @@ nav:
       - 安装: installation.md
       - 第一个任务: quickstart.md
       - 架构概览: overview.md
+      - 典型使用场景: guides/use-cases.md
   - 使用指南:
       - 运行命令: guides/run.md
       - 启动子 Agent: guides/agents.md
@@ -80,6 +135,7 @@ nav:
       - 编写任务模板: guides/templates.md
       - 跟踪多阶段目标: guides/goals.md
   - Agent 接入:
+      - Harness 支持情况: integrations/support.md
       - Codex CLI: integrations/codex.md
       - Claude Code: integrations/claude.md
       - Pi: integrations/pi.md
@@ -90,4 +146,5 @@ nav:
       - 常见问题: troubleshooting.md
       - 开发资料: reference/engineering.md
       - 参与文档维护: reference/contributing.md
+      - 文档发布与同步: reference/publishing.md
       - 版本记录: https://github.com/lz59970062/long-task-wakeup/blob/main/CHANGELOG.md

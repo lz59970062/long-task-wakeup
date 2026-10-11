@@ -7,12 +7,18 @@ on:
       - 'mkdocs.yml'
       - '.readthedocs.yaml'
       - '.github/workflows/docs.yml'
+      - 'scripts/docs_*.py'
+      - '.gitlab-ci.yml'
+      - 'wrangler.toml'
   pull_request:
     paths:
       - 'docs/**'
       - 'mkdocs.yml'
       - '.readthedocs.yaml'
       - '.github/workflows/docs.yml'
+      - 'scripts/docs_*.py'
+      - '.gitlab-ci.yml'
+      - 'wrangler.toml'
   workflow_dispatch:
 
 permissions:
@@ -33,12 +39,21 @@ jobs:
           cache: pip
           cache-dependency-path: docs/requirements.txt
       - run: python -m pip install -r docs/requirements.txt
+      - run: python scripts/docs_sync.py check
       - run: mkdocs build --strict
+      - run: python scripts/docs_sync.py export
       - uses: actions/upload-artifact@v4
         if: github.event_name != 'pull_request'
         with:
           name: documentation-site
           path: site
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
+        with:
+          name: gitbook-source
+          path: build/gitbook
+          include-hidden-files: true
           retention-days: 7
   deploy:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -67,3 +82,48 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh api --method POST "repos/$GITHUB_REPOSITORY/pages/builds" --jq .status
+  sync-gitbook:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: gitbook-source
+          path: build/gitbook
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install ghp-import==2.1.0
+      - name: Update GitBook source branches
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git fetch origin 'refs/heads/*:refs/remotes/origin/*'
+          for locale in zh en; do
+            branch="gitbook-$locale"
+            if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+              git branch "$branch" "origin/$branch"
+            fi
+            python -m ghp_import --push --branch "$branch" --message "Sync docs from $GITHUB_SHA" "build/gitbook/$locale"
+          done
+  sync-gitlab:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.DOCS_GITLAB_REPOSITORY != ''
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Sync the source to GitLab
+        env:
+          DOCS_GITLAB_REPOSITORY: ${{ vars.DOCS_GITLAB_REPOSITORY }}
+          DOCS_GITLAB_TOKEN: ${{ secrets.DOCS_GITLAB_TOKEN }}
+        run: python scripts/docs_mirror_gitlab.py

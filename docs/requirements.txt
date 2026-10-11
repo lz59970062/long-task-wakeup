@@ -1,3 +1,5 @@
 mkdocs==1.6.1
-mkdocs-material==9.7.7
+# 9.6 keeps page-level alternate links compatible with static-i18n 1.3.1.
+mkdocs-material==9.6.23
+mkdocs-static-i18n==1.3.1
 jieba==0.42.1
