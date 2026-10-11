@@ -1,79 +1,311 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/installation/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/installation/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/installation/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/installation/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/overview/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/overview/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/overview/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/overview/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/quickstart/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/quickstart/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/quickstart/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/quickstart/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/troubleshooting/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/troubleshooting/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/troubleshooting/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/troubleshooting/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/guides/agents/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/guides/agents/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/guides/agents/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/guides/agents/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/guides/callbacks/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/guides/callbacks/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/guides/callbacks/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/guides/callbacks/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/guides/external-jobs/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/guides/external-jobs/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/guides/external-jobs/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/guides/external-jobs/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/guides/goals/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/guides/goals/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/guides/goals/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/guides/goals/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/guides/run/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/guides/run/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/guides/run/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/guides/run/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/guides/templates/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/guides/templates/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/guides/templates/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/guides/templates/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/integrations/claude/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/guides/use-cases/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/guides/use-cases/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/guides/use-cases/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/integrations/codex/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/integrations/claude/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/integrations/claude/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/integrations/claude/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/integrations/desktop/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/integrations/codex/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/integrations/codex/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/integrations/pi/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/integrations/desktop/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/integrations/desktop/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/integrations/desktop/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/reference/cli/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/integrations/pi/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/integrations/pi/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/integrations/pi/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/reference/configuration/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/integrations/support/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/integrations/support/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/integrations/support/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/reference/contributing/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/reference/cli/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/reference/cli/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/reference/cli/"/>
     </url>
     <url>
-         <loc>https://lz59970062.github.io/long-task-wakeup/reference/engineering/</loc>
-         <lastmod>2026-10-11</lastmod>
+        <loc>https://lz59970062.github.io/long-task-wakeup/reference/configuration/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/reference/configuration/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/reference/configuration/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/reference/contributing/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/reference/contributing/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/reference/contributing/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/reference/engineering/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/reference/engineering/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/reference/engineering/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/reference/publishing/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/reference/publishing/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/reference/publishing/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/installation/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/installation/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/installation/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/overview/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/overview/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/overview/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/quickstart/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/quickstart/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/quickstart/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/troubleshooting/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/troubleshooting/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/troubleshooting/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/guides/agents/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/guides/agents/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/guides/agents/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/guides/callbacks/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/guides/callbacks/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/guides/callbacks/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/guides/external-jobs/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/guides/external-jobs/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/guides/external-jobs/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/guides/goals/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/guides/goals/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/guides/goals/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/guides/run/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/guides/run/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/guides/run/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/guides/templates/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/guides/templates/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/guides/templates/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/guides/use-cases/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/guides/use-cases/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/guides/use-cases/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/integrations/claude/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/integrations/claude/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/integrations/claude/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/integrations/codex/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/integrations/codex/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/integrations/desktop/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/integrations/desktop/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/integrations/desktop/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/integrations/pi/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/integrations/pi/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/integrations/pi/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/integrations/support/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/integrations/support/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/integrations/support/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/reference/cli/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/reference/cli/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/reference/cli/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/reference/configuration/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/reference/configuration/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/reference/configuration/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/reference/contributing/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/reference/contributing/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/reference/contributing/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/reference/engineering/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/reference/engineering/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/reference/engineering/"/>
+    </url>
+    <url>
+        <loc>https://lz59970062.github.io/long-task-wakeup/en/reference/publishing/</loc>
+        <lastmod>2026-10-11</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://lz59970062.github.io/long-task-wakeup/en/reference/publishing/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://lz59970062.github.io/long-task-wakeup/reference/publishing/"/>
     </url>
 </urlset>
