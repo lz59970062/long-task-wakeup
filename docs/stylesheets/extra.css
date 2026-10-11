@@ -1,0 +1,12 @@
+:root {
+  --md-text-font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  --md-code-font: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+.md-typeset { font-size: .82rem; line-height: 1.85; }
+.md-typeset h1 { font-weight: 650; color: var(--md-default-fg-color); letter-spacing: -.025em; }
+.md-typeset h2 { font-weight: 600; margin-top: 1.8em; }
+.md-typeset code { font-size: .83em; }
+.md-typeset table:not([class]) { font-size: .76rem; }
+.md-typeset .md-button { border-radius: .3rem; padding: .5em 1.15em; }
+.md-header__title { font-weight: 600; }
+.md-nav__title { font-weight: 650; }

@@ -6,6 +6,8 @@ dist/
 .venv/
 .pytest_cache/
 .windows-dev/
+site/
+.venv-docs/
 
 # Local review discussions and reports
 .committee-reviews/

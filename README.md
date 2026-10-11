@@ -298,6 +298,8 @@ Use `--service standalone --now` where user systemd is unavailable (e.g. AutoDL)
 
 ## 📚 Documentation
 
+[中文文档站](https://lz59970062.github.io/long-task-wakeup/) · [文档源码](docs/index.md)
+
 | Topic | |
 | --- | --- |
 | Claude Code: live callbacks, binary discovery, session directories | [docs/claude-code.md](docs/claude-code.md) |

@@ -6,6 +6,8 @@
 
 [English](README.md) · 原名 `codex-long-task-wakeup`（旧命令仍可用）
 
+[文档站](https://lz59970062.github.io/long-task-wakeup/) · [快速开始](docs/quickstart.md) · [架构概览](docs/overview.md)
+
 **Long Task Callback (ltc)** 有三个入口：
 
 - **Run**：`ltc run -- <命令>`。提交新任务，Linux 默认使用独立的 systemd 用户服务，macOS 使用独立的一次性 launchd 作业，Windows 使用独立的按需计划任务与 Job Object。
