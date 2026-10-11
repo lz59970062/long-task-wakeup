@@ -1,0 +1,28 @@
+{
+  "source_commit": "2ae55377bc878c38a79288d901622892198ab6a8",
+  "language": "zh",
+  "pages": [
+    "index.md",
+    "installation.md",
+    "quickstart.md",
+    "overview.md",
+    "guides/use-cases.md",
+    "guides/run.md",
+    "guides/agents.md",
+    "guides/external-jobs.md",
+    "guides/callbacks.md",
+    "guides/templates.md",
+    "guides/goals.md",
+    "integrations/support.md",
+    "integrations/codex.md",
+    "integrations/claude.md",
+    "integrations/pi.md",
+    "integrations/desktop.md",
+    "reference/cli.md",
+    "reference/configuration.md",
+    "troubleshooting.md",
+    "reference/engineering.md",
+    "reference/contributing.md",
+    "reference/publishing.md"
+  ]
+}
