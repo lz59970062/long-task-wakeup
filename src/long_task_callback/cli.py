@@ -4132,7 +4132,7 @@ def template_command(args: argparse.Namespace) -> int:
 
 def run_systemctl(args: list[str]) -> int:
     command = ["systemctl", "--user", *args]
-    result = subprocess.run(command, check=False)
+    result = subprocess.run(command, check=False, env=linux_platform.user_manager_environment())
     if result.returncode != 0:
         print(f"ltc: warning: {' '.join(shlex.quote(part) for part in command)} exited with {result.returncode}", file=sys.stderr)
     return result.returncode
@@ -4142,6 +4142,7 @@ def systemd_service_is_active(name: str) -> bool:
     result = subprocess.run(
         ["systemctl", "--user", "is-active", "--quiet", name],
         check=False,
+        env=linux_platform.user_manager_environment(),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

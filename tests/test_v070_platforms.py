@@ -155,3 +155,41 @@ class SystemdOwnershipTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(hasattr(__import__("os"), "getuid"), "POSIX user runtime directories")
+class UserManagerEnvironmentTests(unittest.TestCase):
+    def test_agent_shell_without_runtime_dir_still_reaches_the_user_manager(self) -> None:
+        import os
+        import socket
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp)
+            server = socket.socket(socket.AF_UNIX)
+            self.addCleanup(server.close)
+            server.bind(str(runtime / "bus"))
+            real_path = Path
+
+            def fake_path(value, *rest):
+                return runtime if str(value) == f"/run/user/{os.getuid()}" else real_path(value, *rest)
+
+            with mock.patch.object(linux, "Path", side_effect=fake_path):
+                filled = linux.user_manager_environment({"PATH": "/bin"})
+            self.assertEqual(filled["XDG_RUNTIME_DIR"], str(runtime))
+            self.assertEqual(filled["DBUS_SESSION_BUS_ADDRESS"], f"unix:path={runtime / 'bus'}")
+            # Values the caller already has are never replaced.
+            kept = linux.user_manager_environment({"XDG_RUNTIME_DIR": "/custom", "DBUS_SESSION_BUS_ADDRESS": "x"})
+            self.assertEqual((kept["XDG_RUNTIME_DIR"], kept["DBUS_SESSION_BUS_ADDRESS"]), ("/custom", "x"))
+
+    def test_missing_or_foreign_runtime_dir_is_left_unset(self) -> None:
+        with mock.patch.object(linux, "Path", side_effect=lambda value, *rest: Path("/nonexistent-ltc-runtime")):
+            self.assertNotIn("XDG_RUNTIME_DIR", linux.user_manager_environment({"PATH": "/bin"}))
+
+    def test_systemd_control_commands_receive_the_filled_environment(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, "255\n", "")
+        with mock.patch.object(linux.sys, "platform", "linux"), \
+                mock.patch.object(linux.shutil, "which", side_effect=lambda name: "/usr/bin/" + name), \
+                mock.patch.object(linux, "user_manager_environment", return_value={"XDG_RUNTIME_DIR": "/run/user/7"}), \
+                mock.patch.object(linux.subprocess, "run", return_value=completed) as run:
+            self.assertTrue(SystemdUserBackend().available())
+        self.assertEqual(run.call_args.kwargs["env"], {"XDG_RUNTIME_DIR": "/run/user/7"})

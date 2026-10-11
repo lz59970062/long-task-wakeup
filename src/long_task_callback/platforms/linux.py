@@ -31,6 +31,32 @@ _OWNER = re.compile(r"ltc-[A-Za-z0-9_-]+\.service\Z")
 _LIVE_STATES = frozenset({"active", "activating", "reloading", "deactivating", "maintenance", "refreshing"})
 
 
+def user_manager_environment(environment: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment that reaches this user's systemd manager.
+
+    Agent sandboxes, cron and SSH command shells often start without
+    XDG_RUNTIME_DIR, so ``systemctl --user`` fails even though the manager is
+    running. Fill in only the standard per-user runtime directory and its bus
+    socket, and only when they exist and belong to this user.
+    """
+    resolved = dict(os.environ if environment is None else environment)
+    if not hasattr(os, "getuid"):
+        return resolved
+    runtime = resolved.get("XDG_RUNTIME_DIR", "").strip()
+    if not runtime:
+        candidate = Path(f"/run/user/{os.getuid()}")
+        try:
+            if candidate.is_dir() and candidate.stat().st_uid == os.getuid():
+                runtime = resolved["XDG_RUNTIME_DIR"] = str(candidate)
+        except OSError:
+            pass
+    if runtime and not resolved.get("DBUS_SESSION_BUS_ADDRESS", "").strip():
+        bus = Path(runtime) / "bus"
+        if bus.is_socket():
+            resolved["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
+    return resolved
+
+
 def current_boot_id() -> str | None:
     """Return Linux's boot identity; None means unknown, never 'same boot'."""
     if not sys.platform.startswith("linux"):
@@ -148,6 +174,7 @@ class SystemdUserBackend:
                 text=True,
                 check=False,
                 timeout=CONTROL_TIMEOUT_SECONDS,
+                env=user_manager_environment(),
             )
         except (OSError, subprocess.TimeoutExpired):
             return False
@@ -218,6 +245,7 @@ class SystemdUserBackend:
                 text=True,
                 check=False,
                 timeout=CONTROL_TIMEOUT_SECONDS,
+                env=user_manager_environment(),
             )
         except subprocess.TimeoutExpired as error:
             raise LaunchError("systemd worker submission timed out; its outcome is unknown", uncertain=True) from error
@@ -262,6 +290,7 @@ class SystemdUserBackend:
                 text=True,
                 check=False,
                 timeout=CONTROL_TIMEOUT_SECONDS,
+                env=user_manager_environment(),
             )
         except (OSError, subprocess.TimeoutExpired):
             return OwnerState.UNKNOWN
