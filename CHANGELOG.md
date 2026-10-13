@@ -2,6 +2,12 @@
 
 ## 0.7.1a2 — unreleased
 
+- Move LTC's own state (queue, tasks, logs, callback hook, reminder policy,
+  target locks) out of the Codex profile to `${LTC_HOME:-~/.ltc}`. On first run
+  without `LTC_HOME`, an existing `${CODEX_HOME:-~/.codex}/long-task-wakeup` is
+  moved there and replaced by a symlink, so installed services and queued
+  callbacks that name the old path keep working. Codex Desktop launcher and
+  bridge files stay in the Codex profile.
 - Automatically deliver new live Pi callbacks through native steering, after
   the current tool-call batch and before the next model request; idle Pi starts
   a normal turn. Keep the existing CLI without delivery flags. Preserve older

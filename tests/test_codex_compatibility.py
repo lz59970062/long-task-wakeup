@@ -77,6 +77,7 @@ class CodexCompatibilityTests(unittest.TestCase):
             profile = Path(tmp) / "codex-profile"
             profile.mkdir()
             environment["CODEX_HOME"] = str(profile)
+            environment["LTC_HOME"] = str(profile / "ltc-home")
             command = cli.process_command(command, environment)
             result = subprocess.run(command, input="", text=True, capture_output=True, timeout=20,
                                     cwd=tmp, env=environment)

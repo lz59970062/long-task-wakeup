@@ -251,7 +251,7 @@ def mcp_config(root: Path, environment: Mapping[str, str]) -> str:
 
     command = worker_command("_claude-channel", "--queue-dir", str(root))
     server: dict[str, object] = {"command": command[0], "args": command[1:]}
-    passed = {name: environment[name] for name in (cli.TARGET_LOCK_DIR_ENV, "CLAUDE_CONFIG_DIR", "CODEX_HOME")
+    passed = {name: environment[name] for name in (cli.TARGET_LOCK_DIR_ENV, cli.LTC_HOME_ENV, "CLAUDE_CONFIG_DIR", "CODEX_HOME")
               if environment.get(name)}
     if passed:
         server["env"] = passed  # MCP servers may not inherit Claude's whole environment.

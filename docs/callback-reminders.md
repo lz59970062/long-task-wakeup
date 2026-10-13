@@ -13,7 +13,7 @@ prose without truncating saved results or user instructions.
 ## User callback hook
 
 `ltc setup` also creates an empty, user-editable callback prompt hook at
-`${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-hook.md`. Existing hook content is never
+`${LTC_HOME:-~/.ltc}/callback-hook.md`. Existing hook content is never
 overwritten, including by `setup --force`. The file is read again before each due user-reminder
 attempt, so edits apply to the next due callback without restarting the daemon. Non-empty
 content is appended to the callback prompt under `[long-task-callback-user-hook]`; a missing,
@@ -30,7 +30,7 @@ ltc prompt-policy --user-every 1        # change just the user interval; keep th
 ```
 
 Both values must be positive integers; `1` restores reminders on every callback.
-Settings are saved in `${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-prompts.yaml`:
+Settings are saved in `${LTC_HOME:-~/.ltc}/callback-prompts.yaml`:
 
 ```yaml
 system_every: 4

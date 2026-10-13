@@ -199,7 +199,7 @@ class NativeCoreTests(unittest.TestCase):
         (self.root / "app-server").write_text(FAKE_CORE, encoding="utf-8")
         self.env = os.environ.copy()
         self.env.update({core.REAL_CODEX_ENV: sys.executable, core.BRIDGE_FILE_ENV: str(self.metadata),
-                         "CODEX_HOME": str(self.profile), "CODEX_APP_TOOLS_PIPE_PATH": "fresh-test-desktop-pipe",
+                         "CODEX_HOME": str(self.profile), "LTC_HOME": str(self.profile / "ltc-home"), "CODEX_APP_TOOLS_PIPE_PATH": "fresh-test-desktop-pipe",
                          "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")})
         self.command = [sys.executable, "-m", "long_task_callback.desktop_core"]
         self.process = None

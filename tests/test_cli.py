@@ -1889,12 +1889,53 @@ class CliTests(unittest.TestCase):
         self.assertIn("setup will continue", errors.getvalue())
         self.assertIn("ltc agent claude", errors.getvalue())
 
+    def test_state_home_is_independent_of_the_codex_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"LTC_HOME": str(Path(tmp) / "ltc"), "CODEX_HOME": str(Path(tmp) / "codex")}):
+                self.assertEqual(cli.daemon_state_dir(), Path(tmp) / "ltc")
+                self.assertEqual(cli.queue_dir(), Path(tmp) / "ltc" / "queue")
+                self.assertEqual(cli.callback_hook_path(), Path(tmp) / "ltc" / "callback-hook.md")
+            environment = {name: value for name, value in os.environ.items() if name != "LTC_HOME"}
+            environment.update(HOME=tmp, USERPROFILE=tmp)
+            with mock.patch.dict(os.environ, environment, clear=True):
+                self.assertEqual(cli.daemon_state_dir(), Path(tmp) / ".ltc")
+
+    def test_legacy_codex_profile_state_moves_and_leaves_a_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy = Path(tmp) / "codex" / "long-task-wakeup"
+            (legacy / "queue" / "pending").mkdir(parents=True)
+            (legacy / "callback-hook.md").write_text("Keep going.\n", encoding="utf-8")
+            new = Path(tmp) / "ltc"
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(Path(tmp) / "codex")}),
+                mock.patch.object(cli, "ltc_home", return_value=new),
+                mock.patch.dict(os.environ, {"LTC_HOME": ""}),
+                mock.patch("sys.stderr", new_callable=io.StringIO),
+            ):
+                cli.migrate_legacy_state_dir()
+                cli.migrate_legacy_state_dir()  # Idempotent once the link exists.
+
+            self.assertTrue(new.is_dir() and not new.is_symlink())
+            self.assertTrue(legacy.is_symlink())
+            self.assertEqual(legacy.resolve(), new.resolve())
+            self.assertEqual((legacy / "callback-hook.md").read_text(encoding="utf-8"), "Keep going.\n")
+            self.assertTrue((new / "queue" / "pending").is_dir())
+
+    def test_explicit_ltc_home_never_adopts_legacy_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy = Path(tmp) / "codex" / "long-task-wakeup"
+            legacy.mkdir(parents=True)
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(Path(tmp) / "codex"), "LTC_HOME": str(Path(tmp) / "ltc")}):
+                cli.migrate_legacy_state_dir()
+            self.assertFalse((Path(tmp) / "ltc").exists())
+            self.assertFalse(legacy.is_symlink())
+
     def test_callback_hook_file_is_created_once_and_preserves_user_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / "codex-home"
-            with mock.patch.object(cli, "codex_home", return_value=home):
+            home = Path(tmp) / "ltc-home"
+            with mock.patch.dict(os.environ, {"LTC_HOME": str(home)}):
                 path = cli.ensure_callback_hook_file()
-                self.assertEqual(path, home / "long-task-wakeup" / "callback-hook.md")
+                self.assertEqual(path, home / "callback-hook.md")
                 self.assertEqual(path.read_text(encoding="utf-8"), "")
 
                 path.write_text("Always summarize the final metrics.\n", encoding="utf-8")
@@ -1953,15 +1994,15 @@ class CliTests(unittest.TestCase):
                 now=False,
                 print=False,
             )
-            home = Path(tmp) / "codex-home"
+            home = Path(tmp) / "ltc-home"
             with (
-                mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}, clear=False),
+                mock.patch.dict(os.environ, {"LTC_HOME": str(home)}, clear=False),
                 mock.patch.object(cli, "systemd_user_dir", return_value=Path(tmp) / "systemd"),
                 mock.patch.object(cli.shutil, "which", return_value=None),
             ):
                 self.assertEqual(cli.install_systemd(args), 0)
 
-            proxy_file = home / "long-task-wakeup" / "service-proxy.env"
+            proxy_file = home / "service-proxy.env"
             self.assertEqual(cli.parse_proxy_environment_file(proxy_file), {
                 "HTTP_PROXY": "http://proxy.example:8080",
                 "no_proxy": "localhost,127.0.0.1",
@@ -1998,7 +2039,7 @@ class CliTests(unittest.TestCase):
                 print=False,
             )
             with (
-                mock.patch.dict(os.environ, {"CODEX_HOME": str(Path(tmp) / "codex-home")}, clear=False),
+                mock.patch.dict(os.environ, {"LTC_HOME": str(Path(tmp) / "ltc-home")}, clear=False),
                 mock.patch.object(cli, "systemd_user_dir", return_value=Path(tmp) / "systemd"),
                 mock.patch.object(cli.shutil, "which", side_effect=lambda command: "/usr/bin/systemctl" if command == "systemctl" else None),
                 mock.patch.object(cli, "run_systemctl", return_value=0) as run_systemctl,
@@ -2014,8 +2055,8 @@ class CliTests(unittest.TestCase):
             root = Path(tmp) / "queue"
             self._write_request(root, "inflight", tmp)
             cli.move_request(root / "pending" / "inflight.json", root / "running")
-            home = Path(tmp) / "codex-home"
-            runtime = home / "long-task-wakeup" / "daemon-runtime.json"
+            home = Path(tmp) / "ltc-home"
+            runtime = home / "daemon-runtime.json"
             runtime.parent.mkdir(parents=True)
             runtime.write_text(
                 json.dumps({"pid": os.getpid(), "reload_protocol": cli.RELOAD_PROTOCOL_VERSION,
@@ -2043,7 +2084,7 @@ class CliTests(unittest.TestCase):
                 print=False,
             )
             with (
-                mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}, clear=False),
+                mock.patch.dict(os.environ, {"LTC_HOME": str(home)}, clear=False),
                 mock.patch.object(cli, "systemd_user_dir", return_value=Path(tmp) / "systemd"),
                 mock.patch.object(cli.shutil, "which", side_effect=lambda command: "/usr/bin/systemctl" if command == "systemctl" else None),
                 mock.patch.object(cli, "run_systemctl", return_value=0) as run_systemctl,
@@ -2061,8 +2102,8 @@ class CliTests(unittest.TestCase):
 
     def test_supervisor_config_does_not_embed_proxy_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / "codex-home"
-            proxy = home / "long-task-wakeup" / "service-proxy.env"
+            home = Path(tmp) / "ltc-home"
+            proxy = home / "service-proxy.env"
             proxy.parent.mkdir(parents=True)
             proxy.write_text("HTTPS_PROXY=https://user:secret@proxy.example:8443\n", encoding="utf-8")
             args = argparse.Namespace(
@@ -2077,7 +2118,7 @@ class CliTests(unittest.TestCase):
                 codex_bin="/usr/local/bin/codex",
                 path="/bin",
             )
-            with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}, clear=False):
+            with mock.patch.dict(os.environ, {"LTC_HOME": str(home)}, clear=False):
                 text = cli.supervisor_config_text(args)
 
             self.assertIn(f"{cli.PROXY_ENV_FILE_ENV}=", text)
@@ -2093,13 +2134,13 @@ class CliTests(unittest.TestCase):
 
     def test_clear_proxy_removes_persisted_proxy_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / "codex-home"
-            proxy = home / "long-task-wakeup" / "service-proxy.env"
+            home = Path(tmp) / "ltc-home"
+            proxy = home / "service-proxy.env"
             proxy.parent.mkdir(parents=True)
             proxy.write_text("HTTP_PROXY=http://proxy.example:8080\n", encoding="utf-8")
             args = argparse.Namespace(proxy_env_file=None, inherit_proxy=False, clear_proxy=True)
 
-            with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}, clear=False):
+            with mock.patch.dict(os.environ, {"LTC_HOME": str(home)}, clear=False):
                 self.assertIsNone(cli.configure_proxy_environment(args))
 
             self.assertFalse(proxy.exists())

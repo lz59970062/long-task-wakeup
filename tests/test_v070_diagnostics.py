@@ -107,7 +107,7 @@ class HealthReportTests(unittest.TestCase):
         self.patches = contextlib.ExitStack()
         self.addCleanup(self.patches.close)
         self.patches.enter_context(mock.patch.dict(os.environ, {
-            "CODEX_HOME": str(self.codex_home), "CLAUDE_CONFIG_DIR": str(self.claude_home),
+            "CODEX_HOME": str(self.codex_home), "LTC_HOME": str(self.codex_home / "ltc-home"), "CLAUDE_CONFIG_DIR": str(self.claude_home),
             "CODEX_LONG_TASK_WAKEUP_CODEX_BIN": "fixture-codex", "LONG_TASK_WAKEUP_CLAUDE_BIN": "fixture-claude",
             "API_KEY": "SECRET_ENV_SENTINEL", "PATH": "/fixture/bin",
         }, clear=True))

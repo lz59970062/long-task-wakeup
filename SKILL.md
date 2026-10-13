@@ -108,7 +108,7 @@ not the time spent waiting for delivery; do not invent a duration when it is unk
 
 Configure with `ltc prompt-policy --system-every 4 --user-every 3`; no options shows
 the effective policy. `1` means every callback. The file is
-`${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-prompts.yaml`. Counters are per
+`${LTC_HOME:-~/.ltc}/callback-prompts.yaml`. Counters are per
 queue, agent and bound session, allocated at first delivery attempt. Retries reuse
 the same sequence and reminder decisions across restarts. Queuing/dry-run does not
 count. An unsafe `--last` target keeps full reminders because its identity is unknown.
@@ -219,7 +219,7 @@ ltc setup --force --enable --now
 ```
 
 `setup` installs this skill for Codex and Claude Code and configures the selected coordinator service. It requires a reachable native manager (systemd/launchd/Task Scheduler) or screen for the Linux/macOS compatibility backend. It creates the user-editable fixed prompt hook at
-`${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-hook.md` without overwriting existing content.
+`${LTC_HOME:-~/.ltc}/callback-hook.md` without overwriting existing content.
 The delivery worker reads that UTF-8 file on attempts whose saved user-reminder decision is
 due, so edits apply on the next due attempt without a restart. Non-empty content is appended
 under `[long-task-callback-user-hook]`; hook read failures warn and continue with the callback.
@@ -309,7 +309,7 @@ CLI delivery is the fallback when the optional socket is unavailable.
 
 ```bash
 launchctl print "gui/$(id -u)/codex-long-task-wakeup"
-tail -f "${CODEX_HOME:-$HOME/.codex}/long-task-wakeup/daemon.log"
+tail -f "${LTC_HOME:-$HOME/.ltc}/daemon.log"
 ```
 
 ## Containers (Docker / AutoDL)
@@ -369,7 +369,7 @@ inspection commands are:
 ```bash
 screen -ls
 screen -r ltc-<task-id>
-tail -f ~/.codex/long-task-wakeup/tasks/<task-id>/attempt-1.log
+tail -f ~/.ltc/tasks/<task-id>/attempt-1.log
 ```
 
 Detaching with `Ctrl-a d` leaves the task running.
@@ -696,7 +696,7 @@ systemctl --user status codex-long-task-wakeup.service
 journalctl --user -u codex-long-task-wakeup.service -f
 ```
 
-The daemon watches `${CODEX_HOME:-~/.codex}/long-task-wakeup/queue` by default. Use `--queue-dir`
+The daemon watches `${LTC_HOME:-~/.ltc}/queue` by default. Use `--queue-dir`
 or `CODEX_LONG_TASK_WAKEUP_QUEUE_DIR` for an explicit queue.
 
 Before restarting a service or container, drain live callback deliveries where possible.

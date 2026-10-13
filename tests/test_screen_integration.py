@@ -40,7 +40,7 @@ class RealStandaloneScreenTests(unittest.TestCase):
             directory = Path(temporary)
             home = directory / "codex-home"
             root = directory / "queue"
-            environment = dict(os.environ, CODEX_HOME=str(home),
+            environment = dict(os.environ, CODEX_HOME=str(home), LTC_HOME=str(home / "ltc-home"),
                                CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR=str(directory / "target-locks"),
                                CODEX_LONG_TASK_WAKEUP_DESKTOP_APP_SERVER="0")
             sleeper = subprocess.Popen(

@@ -16,6 +16,7 @@ from long_task_callback import callback_transport, cli, pi_callback as bridge
 def build_bound(tmp_path):
     os.environ['PI_CODING_AGENT_DIR'] = str(tmp_path / 'pi')
     os.environ['CODEX_HOME'] = str(tmp_path / 'codex')
+    os.environ['LTC_HOME'] = str(tmp_path / 'ltc')
     os.environ[cli.TARGET_LOCK_DIR_ENV] = str(tmp_path / 'target-locks')
     os.environ.pop(bridge.CHANNEL_ROOT_ENV, None)
     session = tmp_path / 'session 中文.jsonl'

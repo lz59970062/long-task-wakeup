@@ -15,10 +15,11 @@ RUN python -m pip install --no-cache-dir . \
     && rm -rf ./src ./build ./pyproject.toml
 
 RUN useradd --create-home --uid 1000 --shell /bin/bash ltc \
-    && mkdir -p /state/codex /state/claude /workspace \
+    && mkdir -p /state/ltc /state/codex /state/claude /workspace \
     && chown -R ltc:ltc /state /workspace
 
 ENV PYTHONUNBUFFERED=1 \
+    LTC_HOME=/state/ltc \
     CODEX_HOME=/state/codex \
     CLAUDE_CONFIG_DIR=/state/claude \
     LTC_EXECUTION_BACKEND=screen \

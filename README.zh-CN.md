@@ -66,7 +66,7 @@ LTC 等待一秒；若 screen 在握手前消失，则记录失败并按指数�
 升级时，缺少尝试计数的旧版 `launching` 记录会被视为历史启动失败，不会自动重跑。
 
 `ltc setup` 会创建用户可编辑的固定提示词钩子
-`${CODEX_HOME:-~/.codex}/long-task-wakeup/callback-hook.md`。该文件已有内容时不会被覆盖，
+`${LTC_HOME:-~/.ltc}/callback-hook.md`。该文件已有内容时不会被覆盖，
 即使使用 `setup --force` 也是如此。默认首次及其后每 3 条回调显示一次用户提示，
 到期投递（包括这条回调的重试）会重新读取文件，修改后无需重启 daemon。非空内容会以
 `[long-task-callback-user-hook]` 段落追加到 callback 提示词；文件缺失、为空或暂时不可读时，
@@ -90,7 +90,7 @@ ltc run --cwd "$PWD" --task "train model" \
 ```bash
 screen -ls
 screen -r ltc-<task-id>
-tail -f ~/.codex/long-task-wakeup/tasks/<task-id>/attempt-1.log
+tail -f ~/.ltc/tasks/<task-id>/attempt-1.log
 ```
 
 `0.6.5` 的 Agent 模式沿用 `run` 的命令语言：

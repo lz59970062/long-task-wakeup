@@ -45,7 +45,7 @@ executables and PATH in private coordinator configuration. Authenticate the Agen
 CLI using that same account and profile. Setup's local checks do not establish that
 a model call or original-session callback will succeed.
 
-The default queue is `<CODEX_HOME>\long-task-wakeup\queue`. To select another one,
+The default queue is `<LTC_HOME>\queue` (`LTC_HOME` defaults to `%USERPROFILE%\.ltc`). To select another one,
 pass the same absolute `--queue-dir` to setup, submission, doctor and ACK. A profile
 has one coordinator queue; do not point a live profile coordinator at a second
 queue. Use a separate profile for concurrent isolated deployments. To change an
@@ -194,8 +194,8 @@ Get-ScheduledTask | Where-Object TaskName -Like 'ltc-coordinator-*'
 ```
 
 Coordinator configuration is
-`<CODEX_HOME>\long-task-wakeup\windows-codex-long-task-wakeup.json`; its log is
-`<CODEX_HOME>\long-task-wakeup\daemon.log`. The task registration contains the
+`<LTC_HOME>\windows-codex-long-task-wakeup.json`; its log is
+`<LTC_HOME>\daemon.log`. The task registration contains the
 fixed runtime and private file references, not the full environment or prompts.
 `install-windows-task --print` previews that registration without printing the
 private configuration payload.

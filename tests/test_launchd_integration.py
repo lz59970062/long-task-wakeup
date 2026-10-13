@@ -119,7 +119,7 @@ class RealLaunchdTests(unittest.TestCase):
             fake = directory / "fake-codex"
             fake.write_text("#!/bin/sh\nexit 97\n")
             fake.chmod(0o700)
-            env = {"CODEX_HOME": str(home), "CLAUDE_CONFIG_DIR": str(directory / "claude"),
+            env = {"CODEX_HOME": str(home), "LTC_HOME": str(home / "ltc-home"), "CLAUDE_CONFIG_DIR": str(directory / "claude"),
                    cli.TARGET_LOCK_DIR_ENV: str(directory / "locks"), cli.DESKTOP_APP_SERVER_ENV: "0",
                    "CODEX_LONG_TASK_WAKEUP_CODEX_BIN": str(fake)}
             argv = ["ltc", "setup", "--callback-only", "--name", name, "--queue-dir", str(queue),

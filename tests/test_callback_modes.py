@@ -22,7 +22,7 @@ class CallbackModeTests(unittest.TestCase):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(mock.patch.dict(os.environ, {
-            "CODEX_HOME": str(self.root / "profile"),
+            "CODEX_HOME": str(self.root / "profile"), "LTC_HOME": str(self.root / "profile" / "ltc-home"),
             "CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR": str(self.root / "target-locks"),
         }, clear=True))
         self.stack.enter_context(contextlib.redirect_stderr(io.StringIO()))

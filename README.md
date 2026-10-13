@@ -52,7 +52,7 @@ receives a short envelope like this:
 [long-task-callback] <callback-id>
 Task: train model
 Result: finished; exit=0
-Files: ~/.codex/long-task-wakeup/tasks/<task-id>/ (attempt-1.log)
+Files: ~/.ltc/tasks/<task-id>/ (attempt-1.log)
 Details: .../details/<callback-id>.md (as needed)
 Session: <session-id> (only)
 ...plus the exact `ltc ack` command to run
@@ -173,7 +173,7 @@ ltc run \
 Returns as soon as the task is durable, printing the task ID, backend and log file:
 
 ```bash
-tail -f ~/.codex/long-task-wakeup/tasks/<task-id>/attempt-1.log
+tail -f ~/.ltc/tasks/<task-id>/attempt-1.log
 ```
 
 ### Claude Code: wake the live session
@@ -182,7 +182,7 @@ Claude Code wakes a session when a background shell command exits. After `ltc ru
 exact command to run with `run_in_background`:
 
 ```bash
-ltc wait --queue-dir ~/.codex/long-task-wakeup/queue --task <task-id>
+ltc wait --queue-dir ~/.ltc/queue --task <task-id>
 ```
 
 `ltc wait` exits — and the session wakes up — as soon as the callback is queued. While a waiter is
@@ -262,8 +262,9 @@ If no target can be determined, LTC fails instead of guessing. (`--last` exists 
 - **No blind reruns.** After a reboot, LTC wakes the original session with the task, log path and
   interruption reason — the agent decides whether to resume from a checkpoint. There is no `--resume-command`.
 - **No cross-host recovery.** LTC does not move workspaces, data, checkpoints or credentials between machines.
-- **Private state.** Everything lives under `${CODEX_HOME:-~/.codex}/long-task-wakeup/`; full callback
-  details are saved privately in `details/<callback-id>.md`.
+- **Private state.** Everything lives under `${LTC_HOME:-~/.ltc}/`; full callback
+  details are saved privately in `details/<callback-id>.md`. An older
+  `~/.codex/long-task-wakeup/` is moved there on first run and left as a symlink.
 
 More in [recovery & self-repair](docs/recovery.md) and [architecture](docs/architecture.md).
 

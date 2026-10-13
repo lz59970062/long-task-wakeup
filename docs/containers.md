@@ -152,7 +152,7 @@ delivery and uses the CLI callback path within the container.
 
 | Runtime path | Content |
 | --- | --- |
-| `/state/codex/long-task-wakeup/` | Queue, task metadata, logs, compact callback details, ACKs, goals and reminder settings |
+| `/state/ltc/` | Queue, task metadata, logs, compact callback details, ACKs, goals and reminder settings |
 | `/state/codex/` and `/state/claude/` | Agent profiles, credentials and session history stored by the installed CLI |
 | `/workspace/` | Your code, outputs and checkpoints |
 
@@ -215,11 +215,11 @@ or a crash supervisor. Register one of the startup routes below to restore it
 after the platform/container starts. Until then, restore the same environment and
 run `ltc setup --backend screen --service standalone --keep-skill --now` manually.
 Its log is
-`$CODEX_HOME/long-task-wakeup/daemon.log`.
+`$LTC_HOME/daemon.log`.
 
-Standalone coordinator PID/runtime files belong to the selected `CODEX_HOME`.
-Use a separate profile directory for an isolated installation or another standalone
-coordinator, and start its Agent with that same profile. Merely changing
+Standalone coordinator PID/runtime files belong to the selected `LTC_HOME`.
+Use a separate `LTC_HOME` for an isolated installation or another standalone
+coordinator, and start its Agent with that same `LTC_HOME`. Merely changing
 `--queue-dir` does not isolate those coordinator files.
 
 ### Give startup the same environment as the Agent
@@ -248,7 +248,8 @@ set -eu
 export PATH="/root/miniconda3/bin:/absolute/path/to/agent-runtime/bin:/usr/local/bin:/usr/bin:/bin"
 export CODEX_HOME="/root/.codex"
 export CLAUDE_CONFIG_DIR="/root/.claude"
-export CODEX_LONG_TASK_WAKEUP_QUEUE_DIR="/root/.codex/long-task-wakeup/queue"
+export LTC_HOME="/root/.ltc"
+export CODEX_LONG_TASK_WAKEUP_QUEUE_DIR="/root/.ltc/queue"
 export LTC_EXECUTION_BACKEND=screen
 export CODEX_LONG_TASK_WAKEUP_DESKTOP_APP_SERVER=0
 cd /root/long-task-wakeup
@@ -296,10 +297,10 @@ Supervisor route with its administrator or retain manual startup.
 In a confirmed **one-shot boot hook**, preserve its existing commands and add:
 
 ```bash
-mkdir -p /root/.codex/long-task-wakeup
+mkdir -p /root/.ltc
 /root/.local/bin/ltc-container setup --backend screen --service standalone \
   --skill-target codex --keep-skill --now \
-  >> /root/.codex/long-task-wakeup/startup.log 2>&1
+  >> /root/.ltc/startup.log 2>&1
 ```
 
 Use the actual profile path for the log directory. Place this where the hook runs
@@ -356,7 +357,7 @@ stopsignal=TERM
 stopasgroup=true
 killasgroup=true
 redirect_stderr=true
-stdout_logfile=/root/.codex/long-task-wakeup/supervisor.log
+stdout_logfile=/root/.ltc/supervisor.log
 stdout_logfile_maxbytes=10MB
 stdout_logfile_backups=3
 ```

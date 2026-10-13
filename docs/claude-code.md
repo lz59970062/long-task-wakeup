@@ -26,10 +26,10 @@ the callback to the session you are looking at.
 ltc run --cwd "$PWD" --task "train model" -- python train.py
 
 # 2. In Claude Code, run the printed command with run_in_background: true
-ltc wait --queue-dir ~/.codex/long-task-wakeup/queue --task <task-id>
+ltc wait --queue-dir ~/.ltc/queue --task <task-id>
 
 # 3. When it exits, the session wakes with the callback. Inspect, then:
-ltc ack --queue-dir ~/.codex/long-task-wakeup/queue --id <callback-id>
+ltc ack --queue-dir ~/.ltc/queue --id <callback-id>
 ```
 
 The installed Claude skill (`~/.claude/skills/long-task-callback/SKILL.md`) teaches Claude this

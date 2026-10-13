@@ -35,7 +35,7 @@ class WindowsIntegrationTests(unittest.TestCase):
         self.root = self.directory / "queue"
         self.profile = self.directory / "profile"
         self.environment = mock.patch.dict(os.environ, {
-            "CODEX_HOME": str(self.profile), "CLAUDE_CONFIG_DIR": str(self.directory / "claude"),
+            "CODEX_HOME": str(self.profile), "LTC_HOME": str(self.profile / "ltc-home"), "CLAUDE_CONFIG_DIR": str(self.directory / "claude"),
             cli.TARGET_LOCK_DIR_ENV: str(self.directory / "target locks"),
             "CODEX_LONG_TASK_WAKEUP_CODEX_BIN": sys.executable,
         })

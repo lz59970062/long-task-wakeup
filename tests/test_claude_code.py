@@ -171,7 +171,7 @@ class LiveWaiterTests(unittest.TestCase):
         self.directory = Path(temporary.name)
         self.root = self.directory / "queue"
         self.environment = {
-            "CODEX_HOME": str(self.directory / "codex-home"),
+            "CODEX_HOME": str(self.directory / "codex-home"), "LTC_HOME": str(self.directory / "codex-home" / "ltc-home"),
             cli.TARGET_LOCK_DIR_ENV: str(self.directory / "target-locks"),
         }
         patcher = mock.patch.dict(os.environ, self.environment)

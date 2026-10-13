@@ -25,7 +25,7 @@ class MacDesktopIntegrationTests(unittest.TestCase):
             root = Path(temporary)
             profile, metadata = root / "profile", root / "bridge/bridge.json"
             profile.mkdir()
-            env = dict(os.environ, CODEX_HOME=str(profile), CODEX_LONG_TASK_WAKEUP_DESKTOP_REAL_CODEX=core,
+            env = dict(os.environ, CODEX_HOME=str(profile), LTC_HOME=str(profile / "ltc-home"), CODEX_LONG_TASK_WAKEUP_DESKTOP_REAL_CODEX=core,
                        CODEX_LONG_TASK_WAKEUP_DESKTOP_BRIDGE_FILE=str(metadata))
             for key in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_APP_TOOLS_PIPE_PATH"):
                 env.pop(key, None)

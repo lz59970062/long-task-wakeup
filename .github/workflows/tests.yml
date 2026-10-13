@@ -30,6 +30,7 @@ jobs:
       - name: Unit and local process tests
         env:
           CODEX_HOME: ${{ runner.temp }}/ltc-test-profile
+          LTC_HOME: ${{ runner.temp }}/ltc-test-home
           CLAUDE_CONFIG_DIR: ${{ runner.temp }}/ltc-claude-profile
           CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR: ${{ runner.temp }}/ltc-test-locks
         run: python -m unittest discover -s tests -q
@@ -44,6 +45,7 @@ jobs:
           LTC_TEST_LAUNCHD: '1'
           LTC_TEST_SCREEN: '1'
           CODEX_HOME: ${{ runner.temp }}/ltc-test-profile
+          LTC_HOME: ${{ runner.temp }}/ltc-test-home
           CLAUDE_CONFIG_DIR: ${{ runner.temp }}/ltc-claude-profile
           CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR: ${{ runner.temp }}/ltc-test-locks
           TMPDIR: /tmp
@@ -57,6 +59,7 @@ jobs:
           LTC_TEST_SYSTEMD: '1'
           LTC_TEST_SCREEN: '1'
           CODEX_HOME: ${{ runner.temp }}/ltc-test-profile
+          LTC_HOME: ${{ runner.temp }}/ltc-test-home
           CLAUDE_CONFIG_DIR: ${{ runner.temp }}/ltc-claude-profile
           CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR: ${{ runner.temp }}/ltc-test-locks
         run: |
@@ -73,6 +76,7 @@ jobs:
         env:
           LTC_TEST_WINDOWS_SCHEDULER: '1'
           CODEX_HOME: ${{ runner.temp }}/ltc-windows-profile
+          LTC_HOME: ${{ runner.temp }}/ltc-windows-home
           CLAUDE_CONFIG_DIR: ${{ runner.temp }}/ltc-windows-claude-profile
           CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR: ${{ runner.temp }}/ltc-windows-locks
           PYTHONIOENCODING: utf-8
@@ -88,6 +92,7 @@ jobs:
         env:
           LTC_TEST_WINDOWS_TASK: '1'
           CODEX_HOME: ${{ runner.temp }}/ltc-windows-profile
+          LTC_HOME: ${{ runner.temp }}/ltc-windows-home
           CLAUDE_CONFIG_DIR: ${{ runner.temp }}/ltc-windows-claude-profile
           CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR: ${{ runner.temp }}/ltc-windows-locks
           PYTHONIOENCODING: utf-8

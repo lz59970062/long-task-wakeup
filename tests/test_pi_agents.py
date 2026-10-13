@@ -167,7 +167,7 @@ class PiAgentContractTests(unittest.TestCase):
             skill.parent.mkdir(parents=True)
             skill.write_text("Fixture LTC skill", encoding="utf-8")
         environment = mock.patch.dict(os.environ, {
-            "LTC_TEMPLATE_DIR": str(self.templates), "CODEX_HOME": str(self.codex_home),
+            "LTC_TEMPLATE_DIR": str(self.templates), "CODEX_HOME": str(self.codex_home), "LTC_HOME": str(self.codex_home / "ltc-home"),
             "CLAUDE_CONFIG_DIR": str(self.claude_home),
             cli.TARGET_LOCK_DIR_ENV: str(self.directory / "target-locks"),
             "PYTHONIOENCODING": "utf-8",

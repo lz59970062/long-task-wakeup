@@ -88,7 +88,7 @@ the Unix socket path-length limit and pending acceptance checks.
 ```bash
 ltc install-launchd --print
 launchctl print "gui/$(id -u)/codex-long-task-wakeup"
-tail -f "${CODEX_HOME:-$HOME/.codex}/long-task-wakeup/daemon.log"
+tail -f "${LTC_HOME:-$HOME/.ltc}/daemon.log"
 ltc doctor --agent codex --session <original-session-id>
 ```
 

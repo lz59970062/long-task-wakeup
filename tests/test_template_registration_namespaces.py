@@ -37,7 +37,7 @@ class TemplateRegistrationNamespaceTests(unittest.TestCase):
         )
         environment = mock.patch.dict(os.environ, {
             "LTC_TEMPLATE_DIR": str(self.first_directory),
-            "CODEX_HOME": str(self.base / "isolated-codex-home"),
+            "CODEX_HOME": str(self.base / "isolated-codex-home"), "LTC_HOME": str(self.base / "isolated-codex-home" / "ltc-home"),
             "CLAUDE_CONFIG_DIR": str(self.parent_home),
         })
         environment.start()

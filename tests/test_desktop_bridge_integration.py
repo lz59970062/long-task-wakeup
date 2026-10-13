@@ -28,7 +28,7 @@ class RealCodexBridgeTests(unittest.TestCase):
             codex = os.environ.get("LTC_TEST_CODEX_BRIDGE_BIN")
             if not codex:
                 self.skipTest("Set LTC_TEST_CODEX_BRIDGE_BIN to a native Core executable for the Desktop adapter")
-            env = dict(os.environ, CODEX_HOME=str(profile), PYTHONIOENCODING="utf-8",
+            env = dict(os.environ, CODEX_HOME=str(profile), LTC_HOME=str(profile / "ltc-home"), PYTHONIOENCODING="utf-8",
                        CODEX_LONG_TASK_WAKEUP_DESKTOP_REAL_CODEX=codex,
                        CODEX_LONG_TASK_WAKEUP_DESKTOP_BRIDGE_FILE=str(metadata))
             env.pop("CODEX_THREAD_ID", None)
@@ -113,7 +113,7 @@ class RealCodexBridgeTests(unittest.TestCase):
             root = Path(directory)
             profile = root / "profile"
             metadata = root / "state" / "bridge.json"
-            env = dict(os.environ, CODEX_HOME=str(profile), PYTHONIOENCODING="utf-8")
+            env = dict(os.environ, CODEX_HOME=str(profile), LTC_HOME=str(profile / "ltc-home"), PYTHONIOENCODING="utf-8")
             env.pop("CODEX_THREAD_ID", None)
             command = [sys.executable, "-m", "long_task_callback.desktop_bridge",
                        "--codex-home", str(profile), "--metadata-file", str(metadata)]

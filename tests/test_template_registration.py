@@ -44,7 +44,7 @@ class TemplateRegistrationTests(unittest.TestCase):
         environment = mock.patch.dict(os.environ, {
             "HOME": str(self.home),
             "USERPROFILE": str(self.home),
-            "CODEX_HOME": str(self.codex),
+            "CODEX_HOME": str(self.codex), "LTC_HOME": str(self.codex / "ltc-home"),
             "CLAUDE_CONFIG_DIR": str(self.claude),
             "XDG_CONFIG_HOME": str(self.root / "xdg-config"),
             "LTC_TEMPLATE_DIR": str(self.templates),

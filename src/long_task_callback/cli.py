@@ -92,6 +92,8 @@ AGENT_SYSTEM_PROMPT_FILE_NAME = "agent-system-prompt.md"
 CHILD_AGENT_PARENT_ENV_NAMES = tuple(
     dict.fromkeys(env_name for name in CHILD_AGENT_NAMES for env_name in get_child_agent(name).parent_env_names)
 )
+LTC_HOME_ENV = "LTC_HOME"
+LEGACY_STATE_DIR_NAME = "long-task-wakeup"  # Pre-LTC_HOME location inside the Codex profile.
 TARGET_LOCK_DIR_ENV = "CODEX_LONG_TASK_WAKEUP_TARGET_LOCK_DIR"
 PROXY_ENV_FILE_ENV = "CODEX_LONG_TASK_WAKEUP_PROXY_ENV_FILE"
 CALLBACK_HOOK_FILE_NAME = "callback-hook.md"
@@ -210,7 +212,7 @@ def queue_dir(args: argparse.Namespace | None = None) -> Path:
     path = explicit or os.environ.get("CODEX_LONG_TASK_WAKEUP_QUEUE_DIR")
     if path:
         return Path(path).expanduser()
-    return codex_home() / "long-task-wakeup" / "queue"
+    return daemon_state_dir() / "queue"
 
 
 def ack_path(root: Path, request_id: str) -> Path:
@@ -392,6 +394,7 @@ def systemd_service_text(args: argparse.Namespace) -> str:
             f"Environment={systemd_quote(f'{SCREEN_BIN_ENV}={screen_bin}')}",
             f"Environment={systemd_quote(f'{DESKTOP_APP_SERVER_ENV}=1')}",
             f"Environment={systemd_quote(f'{PROXY_ENV_FILE_ENV}={service_proxy_env_path()}')}",
+            f"Environment={systemd_quote(f'{LTC_HOME_ENV}={daemon_state_dir().resolve()}')}",
             f"EnvironmentFile=-{service_proxy_env_path()}",
             "",
             "[Install]",
@@ -993,7 +996,7 @@ def target_lock_dir() -> Path:
     override = os.environ.get(TARGET_LOCK_DIR_ENV)
     if override:
         return Path(override).expanduser()
-    return codex_home() / "long-task-wakeup" / "target-locks"
+    return daemon_state_dir() / "target-locks"
 
 
 def target_lock_path(request: dict[str, object]) -> Path | None:
@@ -4029,6 +4032,11 @@ def codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
 
 
+def ltc_home() -> Path:
+    """LTC's own state root; it belongs to no single Agent profile."""
+    return Path(os.environ.get(LTC_HOME_ENV) or "~/.ltc").expanduser()
+
+
 def claude_home() -> Path:
     return Path(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser()
 
@@ -4158,7 +4166,41 @@ def run_supervisorctl(args: list[str]) -> int:
 
 
 def daemon_state_dir() -> Path:
-    return codex_home() / "long-task-wakeup"
+    return ltc_home()
+
+
+def legacy_state_dir() -> Path:
+    return codex_home() / LEGACY_STATE_DIR_NAME
+
+
+def migrate_legacy_state_dir() -> None:
+    """Move state from the old Codex-profile location and link the old path to it.
+
+    The link keeps already installed services, queued callbacks and Desktop
+    metadata that still name the old path working. A cross-device move is not
+    attempted; the new home then links to the old directory instead.
+    """
+    if os.environ.get(LTC_HOME_ENV):
+        return  # An explicit home is the caller's layout; never move data into it.
+    new, old = daemon_state_dir(), legacy_state_dir()
+    if new.exists() or new.is_symlink() or old.is_symlink() or not old.is_dir():
+        return
+    try:
+        new.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(old, new)
+    except OSError:
+        try:
+            new.symlink_to(old.resolve(), target_is_directory=True)
+        except OSError as exc:
+            print(f"ltc: warning: could not adopt legacy state {old} as {new}: {exc}", file=sys.stderr)
+            return
+        print(f"LTC state: {new} -> {old}", file=sys.stderr)
+        return
+    try:
+        old.symlink_to(new.resolve(), target_is_directory=True)
+    except OSError as exc:
+        print(f"ltc: warning: moved LTC state to {new} but could not link {old} to it: {exc}", file=sys.stderr)
+    print(f"LTC state moved: {old} -> {new}", file=sys.stderr)
 
 
 def callback_hook_path() -> Path:
@@ -4465,6 +4507,7 @@ def daemon_environment(args: argparse.Namespace, *, include_proxy_values: bool =
         DESKTOP_APP_SERVER_ENV: os.environ.get(DESKTOP_APP_SERVER_ENV, "1"),
         "PATH": getattr(args, "path", None) or os.environ.get("PATH", ""),
         PROXY_ENV_FILE_ENV: str(service_proxy_env_path()),
+        LTC_HOME_ENV: str(daemon_state_dir().resolve()),
     }
     if include_proxy_values:
         values.update(configured_proxy_environment())
@@ -5764,6 +5807,7 @@ def main() -> int:
     shell_hook_parser.add_argument("--command", help="Executable path embedded in the hook")
 
     args = parser.parse_args()
+    migrate_legacy_state_dir()
     if args.mode == "desktop":
         from . import desktop
         return desktop.command(args)

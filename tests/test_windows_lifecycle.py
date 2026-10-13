@@ -31,7 +31,7 @@ class WindowsLifecycleTests(unittest.TestCase):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(mock.patch.dict(os.environ, {
-            "CODEX_HOME": str(self.directory / "codex-profile"),
+            "CODEX_HOME": str(self.directory / "codex-profile"), "LTC_HOME": str(self.directory / "codex-profile" / "ltc-home"),
             "CLAUDE_CONFIG_DIR": str(self.directory / "claude-profile"),
             cli.TARGET_LOCK_DIR_ENV: str(self.directory / "global-target-locks"),
             "PYTHONPATH": str(Path(cli.__file__).resolve().parents[1]),

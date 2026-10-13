@@ -68,7 +68,7 @@ class RealDiagnosticsRepairTests(unittest.TestCase):
             # CLI is discovered through its absolute path and must never run.
             environment = {
                 "PATH": "/usr/bin:/bin",
-                "CODEX_HOME": str(codex_home),
+                "CODEX_HOME": str(codex_home), "LTC_HOME": str(codex_home / "ltc-home"),
                 "CLAUDE_CONFIG_DIR": str(claude_home),
                 "XDG_CONFIG_HOME": str(config_home),
                 "XDG_RUNTIME_DIR": str(runtime_directory),
