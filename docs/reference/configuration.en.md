@@ -21,6 +21,7 @@ The child Agent's answer path and callback details path appear in the submission
 | Variable | Purpose |
 | --- | --- |
 | `LTC_HOME` | LTC state directory; defaults to `~/.ltc` |
+| `CODEX_LONG_TASK_WAKEUP_CODEX_BIN` | Codex executable to run; a Codex queue callback freezes it at submission |
 | `CODEX_HOME` | Codex configuration and sessions; defaults to `~/.codex` |
 | `CLAUDE_CONFIG_DIR` | Claude Code configuration; defaults to `~/.claude` |
 | `PI_CODING_AGENT_DIR` | Pi configuration; defaults to `~/.pi/agent` |

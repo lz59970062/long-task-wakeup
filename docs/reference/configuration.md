@@ -21,6 +21,7 @@ LTC 保存任务命令、日志、执行结果和回调记录。需要排错或�
 | 变量 | 用途 |
 | --- | --- |
 | `LTC_HOME` | 设置 LTC 状态目录，默认 `~/.ltc` |
+| `CODEX_LONG_TASK_WAKEUP_CODEX_BIN` | 要运行的 Codex 可执行文件；Codex 队列回调在提交时固定它 |
 | `CODEX_HOME` | Codex 配置与会话目录，默认 `~/.codex` |
 | `CLAUDE_CONFIG_DIR` | Claude Code 配置目录，默认 `~/.claude` |
 | `PI_CODING_AGENT_DIR` | Pi 配置目录，默认 `~/.pi/agent` |

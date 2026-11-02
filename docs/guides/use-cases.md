@@ -72,6 +72,6 @@ ltc run --cwd "$PWD" --task "分析文档集合" -- python workflows/analyse_doc
 | Codex CLI | 在当前会话提交，让协调器恢复同一个会话 |
 | Claude Code CLI 或桌面 Code 会话 | 提交后把输出中的 `ltc wait` 命令作为后台 Bash 任务运行 |
 | Pi | 安装扩展，在当前 Pi 进程接收回调；需要关闭后恢复时从 `ltc pi` 启动 |
-| Codex Desktop | 使用预览版共享 Core 启动器，再运行小任务检查回调 |
+| Codex Desktop | 正常启动 Desktop；预览版通过 `codex queue` 投递，用小任务检查回调 |
 
 对应版本和验证记录见 [Harness 支持情况](../integrations/support.md)。

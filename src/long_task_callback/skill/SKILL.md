@@ -50,46 +50,42 @@ Registration maintains only the following index; preserve the surrounding instru
 ### Callback modes (0.7.1 preview)
 
 `--callback-mode auto` recognizes the current Codex Desktop origin marker and
-selects `desktop`; other origins select `cli`. Use an explicit mode if the host
+selects `codex-queue`; other origins select `cli`. Use an explicit mode if the host
 omits that marker. A historical session source is not its current owner.
-`desktop` requires a verified shared Core and never silently falls back to a
-second CLI writer. An unavailable Desktop connection refuses a new `run` or
-`agent` before task admission. `done` still preserves already completed work.
-Do not force CLI mode to conceal a Desktop ownership conflict.
+`codex-queue` runs the public `codex queue --thread UUID --message TEXT` once with
+the submitting session's environment. It needs no launcher, shared Core or restart,
+and never falls back to a second writer. A Codex without that command refuses a new
+`run` or `agent` before task admission. `done` still preserves completed work.
+
+A queued message is not a received one. The callback stays pending until the chat
+runs its ACK, and `ltc status` says it is waiting. It does not hold back later
+callbacks for that thread. The ACK runs under the chat's own permissions: if the
+sandbox blocks it, request approval to run the same command. Nothing is sent again.
+A rejection (`codex queue` reported an error, or could not start) is in `failed`
+with the cause: fix it, then `ltc retry --id ID`. A kill, timeout or unreadable
+success is an unknown outcome and retry is refused, because the message may be in
+the chat: inspect the chat, then `ltc ack` or `ltc cancel`. Never resend it by hand.
 
 `manual` explicitly saves results/callbacks for later receipt and does not start
 an Agent automatically. Choose it only when the user accepts this limitation.
-On Mac and Windows, `ltc setup` automatically generates a private double-click
-launcher bound to the installed Python and current profile: `.command` on Mac,
-`.cmd` plus `.ps1` on Windows. `setup --desktop-app PATH` selects a Mac `.app`
-or Windows `.exe`; `--no-desktop-launcher` skips generation. Missing Desktop does
-not block CLI setup. Mac discovers the app during preparation; Windows resolves
-the Store manifest and matching Core during launch/preflight. Windows helpers
-ship inside the wheel; do not depend on a checkout or its examples directory.
-Generated absolute paths belong to that machine; regenerate them after moving
-the Python installation rather than copying another user's files.
-`ltc desktop prepare` is available for later configuration changes;
-`ltc desktop launch --check-only` checks launch blockers, and `ltc desktop launch`
-requires existing Desktop work to be saved and the app closed. Obtain permission
-before interrupting active Desktop work. Preparation and checks need no restart.
-Windows defaults to direct startup. `setup --desktop-launch-mode package-context`
-or `desktop prepare --launch-mode package-context --force` saves the explicitly
-chosen experimental Store route. Never silently fall back to this diagnostic
-context after an access-denied failure. `--check-only` uses the existing suspended
-creation/cleanup probe; it is not GUI/tool/callback acceptance. Ordinary setup
-only generates files and performs no native GUI creation probe.
+
+The Desktop launcher is retired: `--callback-mode desktop` is refused for new work,
+`ltc desktop` only explains the replacement, and setup generates no launcher. A saved
+`desktop` callback keeps its results and route; if it is blocked, move it with
+`ltc retry --id ID --callback-mode codex-queue`, which does not rerun the workload.
 
 Read `doctor`'s separate `callback` field. `owner_reachable` is a read-only
 observation, not proof of end-to-end receipt. Sandboxed tools may need authorized
 ordinary-user execution to inspect native peers; never weaken identity checks.
-After repairing a known failed handoff, `ltc retry --id ID --callback-mode desktop`
+After repairing a known failed handoff, `ltc retry --id ID`
 requeues the original callback without rerunning its workload. Unknown submission
 outcomes, active deliveries, ACKs and cancellations prevent ordinary retry.
 Inspect manual results in the bound session before ACK, and label that receipt
 as manual rather than a successful autonomous callback test.
 
-Upgrade the coordinator before using new task record v3 / callback record v2.
-Older daemons deliberately reject them instead of dropping callback-mode intent.
+Upgrade the coordinator before using new task records v3 and v6 / callback records
+v2 and v5. Older daemons deliberately reject them instead of dropping callback-mode
+intent, and keep the record; `ltc retry` delivers it after the upgrade.
 
 On every callback, inspect the result and relevant artifacts, decide whether the
 original goal is complete, blocked, or needs another action, and continue when the
@@ -258,7 +254,8 @@ its package-context route passed real Desktop original-session receipt/ACK on
 PowerShell ACK verbatim, including its leading `&` and quoted paths. ACK confirms
 receipt only, not goal completion. Never replace the target with `--last`.
 
-A live Windows test with Codex 0.153.4 could not resume its open Desktop session:
+On Windows, Desktop sessions use `codex-queue` like any other platform (not yet run
+natively). A live Windows test with Codex 0.153.4 could not resume its open Desktop session:
 the CLI reported `already has an active writer`. Ending an Agent turn does not
 guarantee that Desktop releases this owner. Preserve the failed callback and
 report this transport limitation; do not delete Codex's writer lock, forge an

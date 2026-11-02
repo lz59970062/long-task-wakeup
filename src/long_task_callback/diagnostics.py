@@ -349,12 +349,11 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
         try:
             route = callback_transport.selection(args)
             capability = callback_transport.inspect_route({**route, "agent": callback_agent, "target": target})
-        except (OSError, ValueError):
-            capability = {"status": "blocked", "reason": "invalid_callback_configuration",
-                          "action": "Inspect the selected callback mode and private Desktop configuration."}
+        except (OSError, ValueError) as exc:
+            capability = {"status": "blocked", "reason": "invalid_callback_configuration", "action": str(exc)}
     if capability.get("status") == "blocked":
         issues.append({"code": "callback_transport_blocked", "kind": "callback", "component": "callback_delivery",
-                       "action": capability.get("action", "Configure the original session's shared Core; do not resubmit saved work.")})
+                       "action": capability.get("action", "Repair the original session's callback route; do not resubmit saved work.")})
 
     skill_home = {"codex": cli.codex_home, "claude": cli.claude_home,
                   "pi": cli.pi_callback.profile_dir}.get(callback_agent or "", lambda: None)()

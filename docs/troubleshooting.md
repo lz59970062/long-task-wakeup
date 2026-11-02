@@ -36,7 +36,7 @@ ltc doctor --agent codex --session <原会话ID>
 | --- | --- |
 | 协调器尚未启动 | 按报告给出的 `setup` 命令启动它 |
 | Claude Code 会话正在打开 | 让 Claude 将提交输出中的 `ltc wait` 命令作为后台 Bash 任务运行 |
-| Codex Desktop 连接需要配置 | 从 [Desktop 启动器](integrations/desktop.md)启动应用 |
+| Codex Desktop 回调被阻止或结果未知 | 按 [Codex Desktop](integrations/desktop.md) 中的状态处理；为启动器保存的回调用 `ltc retry --id ID --callback-mode codex-queue` 迁移 |
 | 回调进入 `failed` | 读取错误记录，修复后在预览版中使用 `ltc retry --id <回调ID>` |
 
 业务任务的日志路径来自最初的提交输出。先打开日志和产物，可以了解任务本身的运行结果。

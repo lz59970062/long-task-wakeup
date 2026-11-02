@@ -1,5 +1,9 @@
 # macOS Desktop shared Core — experimental 0.7.1 preview
 
+> **Retired.** LTC no longer generates or starts this launcher; start Desktop normally and callbacks use
+> [`codex-queue`](callback-modes.md#native-queue-delivery). A saved `desktop` callback moves with
+> `ltc retry --id ID --callback-mode codex-queue`. The rest of this page is kept as history.
+
 This opt-in launcher lets Desktop and LTC use one Core through a private Unix
 socket. It preserves Desktop's bundled Core, configuration arguments and fresh
 App Tools environment. It changes the listening transport and relays Desktop's

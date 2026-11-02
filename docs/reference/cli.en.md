@@ -60,7 +60,6 @@ These commands use the `0.7.1` preview:
 | `ltc agent pi -- <prompt>` | Start a Pi child Agent |
 | `ltc pi` | Open an LTC-managed Pi session |
 | `ltc template list` | List registered templates |
-| `ltc desktop status` | Inspect Desktop connection settings |
-| `ltc desktop launch` | Start Desktop through the shared Core |
+| `ltc retry --id <callback-id> --callback-mode codex-queue` | Move a saved callback to the native Codex queue |
 
 See [Multi-stage goals](../guides/goals.md) for the goal command sequence.

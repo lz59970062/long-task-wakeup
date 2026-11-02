@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.7.1a3 — unreleased
+
+### Native Codex queue
+
+- Add the `codex-queue` callback route and make it the `auto` choice for Codex Desktop sessions.
+  It runs the public `codex queue --thread UUID --message TEXT` once, so a normally started Desktop
+  gets callbacks with no launcher, shared Core, private pipe or restart. Server and terminal
+  sessions keep `cli`. The Codex executable and profile are frozen at submission, and the command
+  runs with the submitting session's environment, kept privately per callback until nothing can
+  send it again, because a service coordinator's PATH may lack the `node` an npm Codex needs.
+- Keep a receipt in `codex-queue/` and never send automatically twice. A kill, a timeout, exit 128
+  or above, or exit 0 with unreadable output is an unknown outcome: retry is refused on every route
+  and later callbacks for that thread wait until `ltc ack` or `ltc cancel`. A worker that vanishes
+  is judged from the receipt alone. A rejection the command reported, or an executable that cannot
+  be resolved or started, sent nothing: the callback goes to `failed` with the cause and
+  `ltc retry --id ID` repairs it.
+- Once the queue accepts a message, release the target lease so an unanswered callback does not
+  hold back later ones for that thread. The callback stays pending until the chat ACKs, and
+  `ltc status` shows it.
+- New records use callback version 5 and task version 6. An older coordinator keeps them unsent,
+  with their results, instead of resuming a thread an open chat owns.
+- Report a retry refused by a blocked route with its repair action, and report an invalid callback
+  route from `ltc done` as a warning instead of a traceback.
+
+### Retired Desktop launcher
+
+- `ltc setup` no longer generates a Desktop launcher and names any it finds without deleting them;
+  `--desktop-app`, `--desktop-launch-mode` and `--no-desktop-launcher` are accepted and ignored.
+  `ltc desktop` only explains the replacement, so an old launcher tells the user what to do.
+- `--callback-mode desktop` is refused for new work and for `ltc retry`, naming `codex-queue`.
+- Saved `desktop` tasks and callbacks keep their results and route: a connection that still works
+  delivers them as before, and a blocked one waits in `failed` naming
+  `ltc retry --id ID --callback-mode codex-queue`, which does not rerun the workload.
+
 ## 0.7.1a2 — unreleased
 
 - Move LTC's own state (queue, tasks, logs, callback hook, reminder policy,

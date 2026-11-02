@@ -3,18 +3,17 @@
 ## 0.7.1 preview: explicit callback modes
 
 The working preview separates callback capability from OS task ownership.
-See [callback modes](callback-modes.md), the
-[Mac Desktop launcher](macos-desktop-bridge.md) and the
-[Windows Desktop launcher](windows-desktop-bridge.md).
-`desktop.py` dispatches the common setup/prepare/launch/status lifecycle to
-`desktop_macos.py` or `desktop_windows.py`. Standard setup generates local
-launchers for both platforms. Windows locates the native wrapper in the current
-distribution's install records and uses `desktop_windows_assets` from the wheel;
-the examples directory is only a compatibility entry point. Generation and
-activation are separate, and Windows package-context startup remains explicit.
-New managed task records are version 3 and explicit callback records version 2;
-older coordinators reject them so they cannot silently ignore manual/desktop
-intent. Existing versions remain readable. The 0.7.0 material below is the
+See [callback modes](callback-modes.md). Codex Desktop callbacks go through
+`codex_queue.py`, which runs the public `codex queue` command once and keeps a
+durable receipt; `callback_transport.py` selects it for Desktop origins. The earlier
+launcher ([Mac](macos-desktop-bridge.md), [Windows](windows-desktop-bridge.md)) is
+retired: `ltc` no longer reaches `desktop.py`, `desktop_macos.py` or
+`desktop_windows.py`, while `desktop_connection.py` still serves saved `desktop`
+records and `ltc-desktop-core` still serves a Core that is already running.
+New managed task records are version 3 and explicit callback records version 2,
+with version 6 and version 5 for the native queue; older coordinators reject them
+so they cannot silently ignore manual intent or resume a thread an open chat owns.
+Existing versions remain readable. The 0.7.0 material below is the
 released baseline; the preview's live Mac Desktop acceptance is still pending.
 
 The preview also adds Pi as both a child worker and a callback-session adapter.

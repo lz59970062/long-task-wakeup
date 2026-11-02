@@ -38,24 +38,15 @@ systemd 用户服务 / macOS LaunchAgent / Windows 用户登录计划任务
 
 Mac 安装方式见 [macOS 指南](docs/macos.md)：`ltc setup --force --enable --now` 自动选择
 LaunchAgent 协调器和独立 launchd 任务。任务作业不注册为登录启动项，不会在重启后自动重跑。
-`codex/macos-desktop-callback` 分支的 0.7.1 预览会在 Mac 和 Windows 按当前用户与 Python 安装位置自动生成 Desktop 启动器；
-资源随安装包分发，不依赖源码仓库或 `examples`。Mac 生成 `.command`，Windows 生成 `.cmd` 和 `.ps1`，
-统一使用 `ltc desktop prepare|launch|status`。详见 [Mac](docs/macos-desktop-bridge.md) 和
-[Windows](docs/windows-desktop-bridge.md) 共享 Core 安装说明。正式版 `v0.7.0` 尚无该生成功能。
+0.7.1 预览中，正常启动 Codex Desktop 即可：`auto` 通过公开命令 `codex queue` 投递回调，不需要启动器或重启。
+详见 [Codex Desktop](docs/integrations/desktop.md)。早期的启动器已退役（[Mac](docs/macos-desktop-bridge.md)、
+[Windows](docs/windows-desktop-bridge.md) 仅作历史记录）。真实 Desktop 应用、macOS 和 Windows 尚未运行验证。
 Windows 10+ 安装方式见 [Windows 指南](docs/windows.md)：用户登录状态下使用
 `ltc setup --service windows-task --force --enable --now`，通过 Agent CLI 回到原会话。
 PowerShell ACK 命令支持空格、中文与单引号路径；状态文件在创建时设置当前用户和 SYSTEM 私有 ACL。
 Windows 目录创建、重命名和删除不承诺断电持久性；注销或重启可能中断任务，未知结果不会自动重跑。
 每个 Agent profile 使用一个协调器队列，换队列前先排空并卸载。
-默认 CLI 回调仍可能被打开的 Desktop 会话的 active-writer 检查阻止。
-2026-09-27，[实验桥接启动器](docs/windows-desktop-bridge.md)的 `-PackageContext` 路径
-已在本机通过实际界面启动、App Tools 调用，以及两分钟任务的原会话回调和 ACK；业务任务没有重跑。
-详见 [Windows 验证记录](docs/validation-windows.md)。默认直接启动 Store 版 Desktop 仍报错误 5。
-该选项通过微软诊断工具赋予小型 Python helper 包身份，不修改持久环境或包调试策略，也不使用
-`-PreventBreakaway`；它的 token 和其他应用行为不保证等同于正常激活。完整预检还会拒绝运行中的 Desktop。
-Windows Desktop 包上下文桥接仍属于实验功能，核心正式发布不代表所有 Desktop 投递方式均已验证。
-新预览可用 `setup --desktop-launch-mode package-context` 保存该选择；默认直接启动不会失败后自动切换。
-这次安装流程改动在 macOS 开发，尚未完成 Windows 原生安装验收，历史回调成功不能替代这项验收。
+默认 CLI 回调仍可能被打开的 Desktop 会话的 active-writer 检查阻止，所以 Desktop 会话使用 `codex-queue`。
 PI、DSH 适配尚未实现。从 0.6 升级时，先排空已有任务并升级协调器，再提交原生任务；
 并行安装请使用独立 Agent profile、队列和对应版本 daemon，避免混用。
 

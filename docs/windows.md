@@ -52,71 +52,12 @@ queue. Use a separate profile for concurrent isolated deployments. To change an
 existing coordinator's queue, first drain its tasks and callbacks, uninstall it,
 then configure the new queue.
 
-### Desktop launcher in the 0.7.1 preview
+### Desktop callbacks in the 0.7.1 preview
 
-The 0.7.1 preview on `codex/macos-desktop-callback` extends this same `ltc setup` command to
-generate a Windows Desktop launcher. Published `v0.7.0` does not include this
-setup feature; install that preview branch (or a commit from it), then
-run setup using that installation. A wheel installation works without keeping
-the source checkout, `examples` directory or a repository-local `.venv`.
-
-The preview includes a native PowerShell Git installer. From a checkout of this
-branch, select the same branch when running the installer:
-
-```powershell
-& .\scripts\install_from_git.ps1 -RepoUrl 'https://github.com/lz59970062/long-task-wakeup.git@codex/macos-desktop-callback' -SetupArguments @('--desktop-launch-mode', 'package-context')
-```
-
-It runs pip and `setup --force --enable --now` with the same Python. `-Python`
-defaults to `python`; set it to an existing virtual environment's `python.exe`
-when needed. `-Subdirectory` selects an optional package subdirectory, and
-`-SetupArguments` passes an array of extra setup flags. Omit those extra flags
-for the default direct launch mode. Running against `v0.7.0` cannot add the new
-launcher feature; ordinary pip installation still requires a separate setup.
-
-Setup generates these files in `<CODEX_HOME>\long-task-wakeup`:
-
-- `Start LTC Desktop.cmd`, for double-click startup;
-- `Start LTC Desktop.ps1`, using the packaged launch implementation;
-- private `desktop.json`, with paths and choices from this installation.
-
-Setup binds the launcher to the installed Python environment and saves default
-dynamic discovery settings. `ltc desktop launch` and `ltc desktop launch --check-only`
-discover Desktop through the Store package manifest and select a Core that
-matches the installed bundle. Generated absolute paths belong to the local
-installation; do not copy another machine's generated files. Rerun setup after
-moving or replacing Python. An absent Desktop installation does not block CLI
-setup or launcher generation; after installing Desktop, use
-`ltc desktop launch --check-only` before launching it.
-
-The same commands work on Mac and Windows:
-
-```powershell
-ltc setup --force --enable --now
-ltc desktop status
-# Override automatic discovery when needed:
-ltc setup --desktop-app 'C:\Apps\Codex\Codex.exe' --force --enable --now
-# Or regenerate only the Desktop launcher/configuration:
-ltc desktop prepare --app 'C:\Apps\Codex\Codex.exe' --force
-```
-
-`desktop prepare` also accepts `--wrapper` and `--core` for explicit executable
-selection. `setup --no-desktop-launcher` skips launcher generation on both Mac
-and Windows. Setup/prepare generate files without starting Desktop, stopping an
-existing instance or running a native GUI-creation probe. Creating the launcher
-does not activate sharing. If configuration already exists, `desktop prepare`
-requires `--force` to replace it; it is not an application-discovery command.
-
-Windows defaults to direct launch. To select and save the experimental Store
-package route, use either `ltc setup --desktop-launch-mode package-context` or
-`ltc desktop prepare --launch-mode package-context --force`. There is no automatic
-fallback after direct launch fails. `ltc desktop launch --check-only` runs the
-existing suspended process-creation probe; actual activation uses
-`ltc desktop launch` or the generated `.cmd` after saving work and closing
-Desktop. Read the [bridge procedure and limits](windows-desktop-bridge.md) first.
-This packaging change was developed on macOS and has not received native Windows
-installation or callback acceptance. Historical Windows bridge success remains
-separate evidence.
+Start Desktop normally: new callbacks use the public `codex queue` command, see
+[callback modes](callback-modes.md#native-queue-delivery). This has not been run on
+Windows yet. Earlier previews generated a Desktop launcher during setup; it is
+retired, setup no longer creates one and names any it finds.
 
 ## Submit and acknowledge
 
@@ -142,25 +83,12 @@ variable. For deliberate shell syntax, invoke the shell explicitly, for example
 
 In release 0.7.0, Windows callbacks use the Agent CLI to resume the exact bound
 session by default. The 0.7.1 preview adds [explicit callback modes](callback-modes.md).
-An [experimental explicit Desktop bridge](windows-desktop-bridge.md) can connect
-Desktop and LTC to one shared App Server. The tested Windows Store package still
-fails default direct startup with error 5. The original launcher's explicit
-`-PackageContext -CheckOnly` option is based on a successful suspended-creation
-probe under package identity. In the preview, select `package-context` during
-setup/prepare and run `ltc desktop launch --check-only`. The probe reports
-`native_creation_passed` separately from running-Desktop and other
-`launch_blockers` that fail the full preflight. After saving work, closing Desktop
-and passing the full preflight, `ltc desktop launch` requests startup using the
-saved route.
-It uses a standard-library base-`pythonw.exe` helper under package identity,
-without persistent environment changes, package debugging policy changes or
-`-PreventBreakaway`. Microsoft's
-[tool limitations](https://learn.microsoft.com/en-us/powershell/module/appx/invoke-commandindesktoppackage?view=windowsserver2025-ps)
-include a token that differs from normal activation and no guarantee of other app
-behavior. GUI execution, one App Tools call, original-session delivery and ACK passed
-on the tested installation on 2026-09-27; other Desktop versions, workflows and
-the preview's new generated installation path remain unverified. Read the linked
-bridge procedure before closing Desktop for a test.
+A normally started Desktop now gets callbacks through the public `codex queue`
+command, which has not been run on Windows yet. An earlier, now
+[retired Desktop bridge](windows-desktop-bridge.md) connected Desktop and LTC to one
+shared App Server; its package-context route passed GUI execution, one App Tools
+call, original-session delivery and ACK on the tested installation on 2026-09-27,
+while default direct startup of the Store package failed with error 5.
 LTC does not guess a Desktop socket or silently switch sessions. Each callback includes a PowerShell
 ACK command pinned to this installation. Copy that command exactly, including
 the leading `&` and single-quoted paths; doubled single quotes inside paths are

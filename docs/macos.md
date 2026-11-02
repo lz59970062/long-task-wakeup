@@ -1,10 +1,8 @@
 # macOS
 
-For the 0.7.1 preview's Desktop automatic callback configuration, see
-[Mac Desktop shared Core](macos-desktop-bridge.md). OS task execution and
-[callback modes](callback-modes.md) have separate readiness and acceptance.
-Use branch `codex/macos-desktop-callback` for this preview. Stable
-`v0.7.0` does not include its automatic launcher setup.
+For the 0.7.1 preview's Desktop callbacks, start Desktop normally: they use the
+public `codex queue` command, see [callback modes](callback-modes.md). OS task
+execution and callback delivery have separate readiness and acceptance.
 
 LTC supports macOS through the system launchd manager. The coordinator runs as a
 user LaunchAgent, and each task has its own one-shot launchd job. The default
@@ -51,21 +49,8 @@ python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-On Mac, this setup also generates `Start LTC Desktop.command` and a private Core
-wrapper under `${CODEX_HOME:-~/.codex}/long-task-wakeup`. The launcher is bound to
-this installation's Python runtime. Its absolute paths are calculated locally;
-no username or checkout location is hardcoded in the distributed source. Generate
-it on each machine, and rerun setup after moving or replacing the environment.
 Plain pip installation has no user-configuration hook, so the setup command is
 required for a complete installation.
-
-Setup discovers valid `Codex.app` and `ChatGPT.app` bundles in `/Applications`
-and `~/Applications`, preserving an existing app or custom wrapper selection.
-If several valid apps are found, choose one with
-`ltc setup --desktop-app /path/to/Codex.app --force --enable --now`.
-Use `--no-desktop-launcher` to skip generation. Desktop does not need to be
-installed for CLI setup or launcher generation; after installing it, open the
-launcher or run `ltc desktop prepare` to complete discovery.
 
 The preview's Git installation helper combines pip and setup using one Python:
 
@@ -73,15 +58,12 @@ The preview's Git installation helper combines pip and setup using one Python:
 LTC_PYTHON=/absolute/path/to/python bash scripts/install_from_git.sh <github-https-url> [subdirectory] -- [setup flags]
 ```
 
-It runs `setup --force --enable --now`; extra setup flags follow `--`, for example
-`--desktop-app /path/to/Codex.app`. Select `codex/macos-desktop-callback` in the
-Git URL with `@codex/macos-desktop-callback`. The stable `v0.7.0` commands above
-continue to install the stable release without this new generator.
+It runs `setup --force --enable --now`; extra setup flags follow `--`. The stable
+`v0.7.0` commands above continue to install the stable release.
 
-Generation does not start or restart Desktop. Activating the shared Core remains
-an explicit launch after finishing active Desktop work. See the
-[Desktop guide](macos-desktop-bridge.md) for that step, custom configuration,
-the Unix socket path-length limit and pending acceptance checks.
+Earlier previews generated a Desktop launcher during setup. It is retired: setup no
+longer creates one and names any it finds, and a normally started Desktop gets
+callbacks through [the native queue](callback-modes.md#native-queue-delivery).
 
 ## Inspect and repair
 

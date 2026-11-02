@@ -109,8 +109,9 @@ To use the screen compatibility backend: `sudo apt install screen` (or `dnf inst
 <details>
 <summary><b>Trying the 0.7.1 preview (Desktop callbacks)</b></summary>
 
-`main` currently carries the **0.7.1a1 preview**, which adds explicit callback modes
-(`cli`, `desktop`, `manual`, `auto`) and generates a Desktop launcher during `ltc setup` on Mac and Windows.
+`main` currently carries the **0.7.1 preview**, which adds explicit callback modes
+(`cli`, `codex-queue`, `manual`, `auto`). From a Codex Desktop session, `auto` delivers
+through the public `codex queue` command, so Desktop needs no launcher or restart.
 
 ```bash
 # Installs from main and runs setup with the same interpreter
@@ -118,11 +119,8 @@ To use the screen compatibility backend: `sudo apt install screen` (or `dnf inst
 # Windows: scripts/install_from_git.ps1 -RepoUrl https://github.com/lz59970062/long-task-wakeup.git
 ```
 
-Setup never starts or interrupts Desktop. When you're ready, quit Desktop and open
-`Start LTC Desktop.command` (Mac) / `Start LTC Desktop.cmd` (Windows), or run `ltc desktop launch`.
-Read [callback modes](docs/callback-modes.md), [Mac Desktop setup](docs/macos-desktop-bridge.md) and
-[Windows Desktop setup](docs/windows-desktop-bridge.md) for the current limits — the Windows Desktop
-package-context bridge is still experimental.
+Read [callback modes](docs/callback-modes.md) and [Codex Desktop](docs/integrations/desktop.en.md)
+for the states and limits: verified with real Codex on Linux; a real Desktop app, macOS and Windows have not been run.
 
 </details>
 
@@ -309,11 +307,11 @@ Use `--service standalone --now` where user systemd is unavailable (e.g. AutoDL)
 | Registering templates as discoverable skills | [docs/template-registration.md](docs/template-registration.md) |
 | Goals and acknowledgement layers | [docs/goals.md](docs/goals.md) |
 | Callback format, reminder cadence, user hook | [docs/callback-reminders.md](docs/callback-reminders.md) |
-| Callback modes (CLI / Desktop / manual) — 0.7.1 | [docs/callback-modes.md](docs/callback-modes.md) |
+| Callback modes (CLI / Codex queue / manual) — 0.7.1 | [docs/callback-modes.md](docs/callback-modes.md) |
 | Restart, recovery and self-repair | [docs/recovery.md](docs/recovery.md) |
 | Architecture and extension points | [docs/architecture.md](docs/architecture.md) |
 | macOS · Windows · Containers | [macOS](docs/macos.md) · [Windows](docs/windows.md) · [Containers](docs/containers.md) |
-| Desktop bridges | [Mac](docs/macos-desktop-bridge.md) · [Windows](docs/windows-desktop-bridge.md) |
+| Codex Desktop | [Guide](docs/integrations/desktop.en.md) · retired bridges: [Mac](docs/macos-desktop-bridge.md), [Windows](docs/windows-desktop-bridge.md) |
 | Validation records | [0.7.0](docs/validation-0.7.0.md) · [0.7.1 preview](docs/validation-0.7.1-preview.md) · [Linux preview](docs/validation-0.7.0a1.md) · [macOS](docs/validation-macos.md) · [Windows](docs/validation-windows.md) |
 | Release history | [CHANGELOG.md](CHANGELOG.md) |
 
@@ -321,7 +319,7 @@ Use `--service standalone --now` where user systemd is unavailable (e.g. AutoDL)
 
 - [x] Native task owners on Linux, macOS and Windows (0.7.0)
 - [x] Fresh child agents with templates (0.6.5)
-- [ ] Explicit callback modes and Desktop shared Core (0.7.1 preview)
+- [ ] Explicit callback modes and native Codex queue delivery (0.7.1 preview)
 - [ ] Claude Code live callbacks via `ltc wait` (0.7.1 preview; verified on macOS and Linux)
 - [ ] Pi agent adapter: child worker and steered live callbacks (0.7.1 preview; verified on Linux)
 - [ ] DSH agent adapter

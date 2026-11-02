@@ -11,8 +11,12 @@ import os
 from pathlib import Path
 import sys
 
-MODES = ("auto", "cli", "desktop", "manual")
+# `desktop` stays parseable only to answer it with the replacement. Saved records
+# keep the mode, and their callback_bridge_file, until they are retried.
+MODES = ("auto", "cli", "codex-queue", "desktop", "manual")
+OFFERED_MODES = tuple(mode for mode in MODES if mode != "desktop")
 ROUTE_FIELDS = ("callback_mode", "callback_origin", "callback_bridge_file",
+                "callback_codex_bin", "callback_codex_home",
                 "pi_callback_protocol", "pi_profile_dir", "pi_channel_root", "pi_delivery")
 
 
@@ -38,6 +42,10 @@ def bridge_file(profile: Path) -> Path:
     return Path(record["metadata"])
 
 
+def desktop_route_repair(request: dict[str, object]) -> str:
+    return f"ltc retry --id {request.get('id') or '<callback-id>'} --callback-mode codex-queue"
+
+
 def selection(args: argparse.Namespace) -> dict[str, str]:
     from . import cli
 
@@ -47,15 +55,18 @@ def selection(args: argparse.Namespace) -> dict[str, str]:
     mode = getattr(args, "callback_mode", "auto") or "auto"
     if mode not in MODES:
         raise ValueError("unsupported callback mode")
+    if mode == "desktop":
+        raise ValueError("--callback-mode desktop is retired; use codex-queue, which works on a normally started Codex Desktop")
     origin = os.environ.get("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "").strip().casefold()
     desktop = origin == "codex desktop"
     if mode == "auto":
-        mode = "desktop" if cli.resolve_agent(args) == "codex" and desktop else "cli"
-    if mode == "desktop" and cli.resolve_agent(args) != "codex":
-        raise ValueError("Desktop callback mode currently supports Codex only")
+        mode = "codex-queue" if cli.resolve_agent(args) == "codex" and desktop else "cli"
+    if mode == "codex-queue" and cli.resolve_agent(args) != "codex":
+        raise ValueError("The codex-queue callback mode supports Codex only")
     route = {"callback_mode": mode, "callback_origin": "desktop" if desktop else "other"}
-    if mode == "desktop":
-        route["callback_bridge_file"] = str(bridge_file(cli.codex_home()))
+    if mode == "codex-queue":
+        from . import codex_queue
+        route.update(codex_queue.route_fields())
     if cli.resolve_agent(args) == "pi":
         from . import pi_callback
         route.update(pi_callback.route_fields())
@@ -70,6 +81,9 @@ def inspect_route(request: dict[str, object], *, timeout: float = 2) -> dict[str
     if mode == "manual":
         return dict(report, status="manual", reason="automatic_delivery_disabled",
                     action="Inspect saved results in the bound session and ACK when received.")
+    if mode == "codex-queue":
+        from . import codex_queue
+        return dict(report, **codex_queue.inspect_route(request, timeout=timeout))
     if cli.request_agent(request) == "pi":
         from . import pi_callback
         return dict(report, **pi_callback.inspect_route(request))
@@ -102,11 +116,12 @@ def inspect_route(request: dict[str, object], *, timeout: float = 2) -> dict[str
                 break
         return dict(report, status="blocked" if mode == "desktop" else "unverified",
                     transport="app_server", reason="bound_session_not_loaded",
-                    action="Open the original session through the configured shared Core; an idle or absent listing is not permission to take another Core's writer.")
+                    action=(f"Run {desktop_route_repair(request)}; an idle or absent listing is not permission to take another Core's writer."
+                            if mode == "desktop" else "Open the original session through the configured shared Core; an idle or absent listing is not permission to take another Core's writer."))
     except (OSError, ValueError, RuntimeError, TypeError):
         return dict(report, status="blocked" if mode == "desktop" else "unverified",
                     reason="desktop_bridge_unavailable" if mode == "desktop" else "cli_resume_unverified",
-                    action=("Configure/start the Desktop shared Core, then recheck outside a restricted tool sandbox; or explicitly choose manual callback mode."
+                    action=(f"Run {desktop_route_repair(request)}, or choose --callback-mode manual to keep the result for reading in the session."
                             if mode == "desktop" else "CLI resume remains available, but original-session receipt is not verified; inspect ownership if delivery fails."))
     finally:
         if connection is not None:

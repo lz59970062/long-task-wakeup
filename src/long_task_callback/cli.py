@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover - the durable run lifecycle is POSIX-onl
 from . import __version__
 from . import callbacks
 from . import callback_transport
-from . import claude_code, pi_callback
+from . import claude_code, codex_queue, pi_callback
 from . import diagnostics
 from . import storage
 from . import template_registration
@@ -543,6 +543,15 @@ def attach_routing_text(prompt: str, request: dict[str, object]) -> str:
     return f"{prompt}\n\n{routing_text(request)}"
 
 
+def callback_route_version(request: dict[str, object]) -> int:
+    """Older daemons must reject new route semantics."""
+    if request.get("callback_mode") == "codex-queue":
+        return codex_queue.CALLBACK_VERSION
+    if request_agent(request) != "pi":
+        return 2
+    return 4 if request.get("pi_delivery") == "steer" else 3
+
+
 def make_request(
     args: argparse.Namespace, prompt: str, *, duration: float | None = None,
 ) -> dict[str, object]:
@@ -569,9 +578,7 @@ def make_request(
         request["duration_seconds"] = duration
     request.update(callback_transport.selection(args))
     if request.get("callback_mode"):
-        request["version"] = 3 if agent == "pi" else 2  # Older daemons must reject new route semantics.
-        if agent == "pi" and request.get("pi_delivery") == "steer":
-            request["version"] = 4
+        request["version"] = callback_route_version(request)
     if agent == "claude":
         request["permission_mode"] = getattr(args, "permission_mode", None) or os.environ.get(
             CLAUDE_PERMISSION_MODE_ENV, DEFAULT_CLAUDE_PERMISSION_MODE
@@ -588,7 +595,9 @@ def prepare_request_for_queue(root: Path, request: dict[str, object], prompt: st
     request["lifecycle_state"] = "pending"
     acknowledgement = control_command("ack", "--queue-dir", str(root), "--id", request_id)
     routed_prompt = attach_routing_text(prompt, request)
-    request["prompt"] = f"{routed_prompt}\n\n{build_acknowledgement_text(acknowledgement, agent=request_agent(request))}"
+    acknowledgement_text = build_acknowledgement_text(acknowledgement, agent=request_agent(request),
+                                                      callback_mode=request.get("callback_mode"))
+    request["prompt"] = f"{routed_prompt}\n\n{acknowledgement_text}"
     if request.get("prompt_format") == callbacks.FORMAT:
         # Keep complete evidence locally; neither retries nor rendering counters
         # need to repeat command lines and boilerplate in the model context.
@@ -654,11 +663,20 @@ def enqueue_existing_request(root: Path, request: dict[str, object], prompt: str
 
 def enqueue_request(args: argparse.Namespace, prompt: str) -> int:
     root = queue_dir(args)
-    request = make_request(args, prompt)
+    try:
+        request = make_request(args, prompt)
+    except ValueError as exc:
+        print(f"ltc: warning: failed to enqueue callback: {exc}", file=sys.stderr)
+        return 1
     # A persistence error can occur after publication. Diagnostics must not tell
     # the caller to blindly submit a duplicate callback in that case.
     args._health_work = {"state": "unknown", "id": str(request["id"])}
+    native_queue = request.get("callback_mode") == "codex-queue"
+    if native_queue:
+        codex_queue.capture_environment(root, str(request["id"]))
     result = enqueue_existing_request(root, request, prompt)
+    if result != 0 and native_queue:
+        codex_queue.discard_environment(root, str(request["id"]))
     if result == 0:
         args._health_work = {"state": "callback_queued", "id": str(request["id"])}
     return result
@@ -919,10 +937,12 @@ def load_request(path: Path) -> dict[str, object]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("request must be a JSON object")
-    if data.get("version") not in (1, 2, 3, 4):
+    if data.get("version") not in (1, 2, 3, 4, 5):
         raise ValueError("unsupported request version")
     if data.get("version") in (2, 3, 4) and data.get("callback_mode") not in ("cli", "desktop", "manual"):
         raise ValueError("version 2 callback requires an explicit mode")
+    if (data.get("version") == codex_queue.CALLBACK_VERSION) != (data.get("callback_mode") == "codex-queue"):
+        raise ValueError("the codex-queue route requires a version 5 callback")
     if not isinstance(data.get("id"), str) or data["id"] != path.stem:
         raise ValueError("request id must match its filename")
     if not isinstance(data.get("cwd"), str):
@@ -939,8 +959,11 @@ def load_request(path: Path) -> dict[str, object]:
     return data
 
 
-def build_acknowledgement_text(command: str, agent: str = "codex") -> str:
-    if agent == "claude":
+def build_acknowledgement_text(command: str, agent: str = "codex", callback_mode: object = None) -> str:
+    if agent == "codex" and callback_mode == "codex-queue":
+        delivery_note = ("This callback arrived through the native Codex queue; the original thread keeps its existing "
+                         "permissions. If its sandbox blocks this command, request approval to run it.")
+    elif agent == "claude":
         delivery_note = (
             "This resume runs Claude Code headless with automatic permission handling "
             "and grants the callback queue directory as an additional working directory."
@@ -963,7 +986,8 @@ def build_acknowledgement_text(command: str, agent: str = "codex") -> str:
             command,
             delivery_note,
             ("Once a Pi callback is published, an uncertain outcome requires manual inspection; automatic replay is suppressed."
-             if agent == "pi" else "The wakeup daemon will retry this callback until the acknowledgement marker exists or retries are exhausted."),
+             if agent == "pi" else "This native queue message is published once and waits for your ACK; do not submit it again."
+             if callback_mode == "codex-queue" else "The wakeup daemon will retry this callback until the acknowledgement marker exists or retries are exhausted."),
         ]
     )
 
@@ -1232,6 +1256,8 @@ def select_pending(root: Path, now: float) -> Path | None:
         except Exception:
             return path
         if isinstance(request, dict) and (request.get("callback_mode") == "manual"
+                                         or (request.get("delivery_state") == codex_queue.AWAITING_ACK
+                                             and not ack_path(root, path.stem).exists())
                                          or target_has_live_resume(root, request)
                                          or claude_code.live_watcher_is_held(request)):
             continue
@@ -1888,6 +1914,9 @@ def delivery_worker_main() -> int:
             result = {"returncode": 0, "skipped": "already_acknowledged"}
         elif Path(str(payload["canceled_path"])).exists():
             result = {"returncode": 0, "skipped": "canceled"}
+        elif isinstance(payload.get("request"), dict) and payload["request"].get("callback_mode") == "codex-queue":
+            payload["prompt"] = prompt
+            result = codex_queue.publish(payload)
         elif (desktop_delivery := start_desktop_app_server_turn(payload)) is not None:
             result = wait_for_remote_delivery(payload, desktop_delivery, timeout)
         else:
@@ -2105,7 +2134,7 @@ def run_resume_until_exit_or_ack(
             if returncode is not None:
                 child_returncode = finish_delivery_worker(process)
                 acked = ack_path(root, request_id).exists()
-                if (not acked and child_returncode != pi_callback.PUBLISHED_RETURN_CODE
+                if (not acked and child_returncode not in (pi_callback.PUBLISHED_RETURN_CODE, codex_queue.PUBLISHED_RETURN_CODE)
                         and not is_canceled(root, request_id) and desktop_submission_pending(root, request)):
                     child_returncode = 125
                 return subprocess.CompletedProcess(command, child_returncode), acked, False
@@ -2150,8 +2179,8 @@ def move_request(source: Path, destination_dir: Path) -> Path:
             not isinstance(source_id, str)
             or not isinstance(source_data, dict)
             or not isinstance(destination_data, dict)
-            or source_data.get("version") not in (1, 2, 3, 4)
-            or destination_data.get("version") not in (1, 2, 3, 4)
+            or source_data.get("version") not in (1, 2, 3, 4, 5)
+            or destination_data.get("version") not in (1, 2, 3, 4, 5)
             or source_id != destination_id
             or source_id != source.stem
             or source_data != destination_data
@@ -2548,6 +2577,15 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
             return True
         if result is None:
             return True
+        if result.returncode == codex_queue.PUBLISHED_RETURN_CODE and not acked:
+            # Not a failed attempt, and Codex now keeps the order: later callbacks
+            # for this thread go ahead while this one stays pending until its ACK.
+            request["attempts"] = max(0, attempts - 1)
+            codex_queue.mark_awaiting_ack(request, codex_queue.read_receipt(root, request_id))
+            if running.exists() and not is_canceled(root, request_id):
+                write_request(running, request)
+                move_request(running, root / "pending")
+            return True
         if result.returncode == pi_callback.PUBLISHED_RETURN_CODE and not acked:
             # Not a failed attempt: the retained target lease keeps later
             # callbacks for this session in order until ACK or recovery.
@@ -2576,10 +2614,18 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
             )
         if result.returncode == 126 and not acked:
             request["delivery_state"] = "blocked"
-            request["last_error"] = "callback transport blocked; repair the original session connection, then use ltc retry --id " + request_id
+            if request.get("callback_mode") == "codex-queue":
+                request["last_error"] = codex_queue.rejection_error(root, request_id)
+            elif request.get("callback_mode") == "desktop":
+                request["last_error"] = ("callback transport blocked; move it to the native queue with "
+                                         + callback_transport.desktop_route_repair(request))
+            else:
+                request["last_error"] = "callback transport blocked; repair the original session connection, then use ltc retry --id " + request_id
         if result.returncode == 125 and not acked:
-            delivery_name = "Pi" if request_agent(request) == "pi" else "Desktop"
-            request["last_error"] = delivery_name + " callback outcome is unknown; automatic retry suppressed to prevent duplicate delivery"
+            delivery_name = ("Codex queue" if request.get("callback_mode") == "codex-queue"
+                             else "Pi" if request_agent(request) == "pi" else "Desktop")
+            request["last_error"] = (codex_queue.UNKNOWN_ERROR if request.get("callback_mode") == "codex-queue" else
+                                     delivery_name + " callback outcome is unknown; automatic retry suppressed to prevent duplicate delivery")
             request["retain_target_lease"] = True
             destination_dir = root / "failed"
             print(
@@ -2595,7 +2641,7 @@ def process_one(root: Path, args: argparse.Namespace) -> bool:
             if result.returncode == 125 and acked:
                 release_retained_target_lease(root, request)
             destination_dir = root / ("done" if acked else "failed")
-        if result.returncode != 0:
+        if result.returncode not in (0, codex_queue.PUBLISHED_RETURN_CODE):
             print(
                 f"ltc: warning: daemon callback {running.name} exited with {result.returncode}",
                 file=sys.stderr,
@@ -2658,6 +2704,8 @@ def recover_running(root: Path) -> None:
             request = load_request(path)
             request_id = str(request.get("id", path.stem))
             destination = root / ("done" if ack_path(root, request_id).exists() else "pending")
+            if request.get("callback_mode") == "codex-queue" and not ack_path(root, request_id).exists():
+                destination = codex_queue.recover_interrupted(root, path, request)
             move_request(path, destination)
         except FileNotFoundError:
             if is_canceled(root, path.stem):
@@ -2849,6 +2897,7 @@ def daemon(args: argparse.Namespace) -> int:
             reap_background_resumes()
             recover_running(root)
             reconcile_acknowledged_retained_leases(root)
+            codex_queue.reconcile(root)
             pi_callback.reconcile_publications(root, max(1.0, float(getattr(args, "resume_timeout", DEFAULT_RESUME_TIMEOUT))))
             managed_work = recover_managed_tasks(root)
             recover_active(root)
@@ -2933,7 +2982,7 @@ def write_managed_task(root: Path, task: dict[str, object]) -> None:
 
 def load_managed_task(path: Path) -> dict[str, object]:
     task = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(task, dict) or task.get("version") not in (1, 2, 3, 4, 5):
+    if not isinstance(task, dict) or task.get("version") not in (1, 2, 3, 4, 5, 6):
         raise ValueError("invalid managed task record")
     if task.get("id") != path.parent.name:
         raise ValueError("managed task id must match its directory")
@@ -2941,7 +2990,7 @@ def load_managed_task(path: Path) -> dict[str, object]:
     if task.get("task_kind") == "agent":
         get_child_agent(str(task.get("agent_worker", "")))
     backend = task.get("execution_backend", "screen")
-    if task.get("version") in (2, 3, 4, 5) and "execution_backend" not in task:
+    if task.get("version") in (2, 3, 4, 5, 6) and "execution_backend" not in task:
         raise ValueError("native task records require an execution backend")
     if task.get("version") in (3, 4, 5) and task.get("callback_mode") not in ("cli", "desktop", "manual"):
         raise ValueError("version 3 task requires an explicit callback mode")
@@ -2951,6 +3000,8 @@ def load_managed_task(path: Path) -> dict[str, object]:
         pi_callback.validate_route(task)
     if task.get("version") == 5 and task.get("pi_delivery") != "steer":
         raise ValueError("version 5 task requires explicit Pi steer delivery")
+    if (task.get("version") == codex_queue.TASK_VERSION) != (task.get("callback_mode") == "codex-queue"):
+        raise ValueError("the codex-queue route requires a version 6 task")
     if backend not in ("screen", "systemd-user", "launchd", "windows-task"):
         raise ValueError(f"unsupported execution backend: {backend!r}")
     if not isinstance(task.get("queue_dir"), str):
@@ -3602,6 +3653,8 @@ def submit_managed_run(args: argparse.Namespace) -> int:
     task.update(callback_transport.selection(args))
     if task.get("pi_delivery") == "steer":
         task["version"] = 5  # Old coordinators must not downgrade steer to follow-up.
+    if task.get("callback_mode") == "codex-queue":
+        task["version"] = codex_queue.TASK_VERSION  # Nor resume a thread an open chat owns.
     if task_kind == "agent" and agent_prompt_path is not None and agent_result_path is not None:
         task.update(
             {
@@ -3629,6 +3682,10 @@ def submit_managed_run(args: argparse.Namespace) -> int:
         if agent_system_prompt_path is not None:
             write_private_text(agent_system_prompt_path, args.agent_system_prompt_text)
         write_request(environment_path, {"version": 1, "environment": environment})
+        if task["callback_mode"] == "codex-queue":
+            # Before the task exists, so even one that ends at once finds it. The
+            # worker removes environment.json; the callback outlives the worker.
+            codex_queue.capture_environment(root, task_id, environment)
         write_managed_task(root, task)
     except OSError as exc:
         print(f"ltc: refusing to submit task because its durable record could not be written: {exc}", file=sys.stderr)
@@ -3963,7 +4020,8 @@ def agent(args: argparse.Namespace) -> int:
 
 def add_common_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--callback-mode", choices=callback_transport.MODES, default="auto",
-                        help="Callback route: auto detects Codex Desktop; cli uses existing CLI/shared service; desktop requires its bridge; manual saves for later receipt")
+                        metavar="{" + ",".join(callback_transport.OFFERED_MODES) + "}",
+                        help="Callback route: auto uses codex-queue for Codex Desktop; cli uses existing CLI/shared service; codex-queue sends through the public codex queue command; manual saves for later receipt")
     parser.add_argument("--backend", choices=("auto", "systemd", "launchd", "windows-task", "screen"),
                         default=os.environ.get("LTC_EXECUTION_BACKEND", "auto"),
                         help="Task owner: systemd on Linux, launchd on macOS, windows-task on Windows; screen is the POSIX fallback")
@@ -4903,11 +4961,17 @@ def select_daemon_service(args: argparse.Namespace) -> str:
     return service
 
 
-def setup(args: argparse.Namespace) -> int:
-    from . import desktop
+def report_retired_desktop_launcher() -> None:
+    state = codex_home() / LEGACY_STATE_DIR_NAME
+    names = ("Start LTC Desktop.command", "desktop-core.command", "Start LTC Desktop.cmd", "Start LTC Desktop.ps1")
+    stale = [path for path in (state / name for name in names) if path.is_file()]
+    if stale:
+        print("ltc: the Desktop launcher is retired; open Codex Desktop normally. You can delete: "
+              + ", ".join(str(path) for path in stale), file=sys.stderr)
 
+
+def setup(args: argparse.Namespace) -> int:
     try:
-        desktop.validate_setup(args)
         service = select_daemon_service(args)
         if not getattr(args, "callback_only", False):
             select_execution_backend(args)
@@ -4931,11 +4995,7 @@ def setup(args: argparse.Namespace) -> int:
             return 2
     ensure_callback_hook_file()
     report_claude_agent_readiness(args)
-    try:
-        desktop.install_for_setup(codex_home(), args)
-    except (OSError, ValueError) as exc:
-        print(f"ltc: could not prepare the optional Desktop launcher: {exc}; "
-              "CLI setup can continue. Retry with ltc desktop prepare.", file=sys.stderr)
+    report_retired_desktop_launcher()
 
     systemd_args = argparse.Namespace(
         name=args.name,
@@ -4983,7 +5043,6 @@ def setup(args: argparse.Namespace) -> int:
 
 def ack(args: argparse.Namespace) -> int:
     root = queue_dir(args)
-    ensure_daemon_dirs(root)
     marker = ack_path(root, args.id)
     payload = {
         "id": args.id,
@@ -4991,7 +5050,15 @@ def ack(args: argparse.Namespace) -> int:
     }
     if args.message:
         payload["message"] = args.message
-    write_request(marker, payload)
+    try:
+        ensure_daemon_dirs(root)
+        write_request(marker, payload)
+    except OSError as exc:
+        print(f"ltc: could not record the ACK for {args.id} in {root}: {exc}", file=sys.stderr)
+        print("ltc: the callback stays unacknowledged and is not sent again by this failure. A tool sandbox may be "
+              "blocking this directory: approve this command, add the directory to the writable roots, "
+              "or run it from a terminal.", file=sys.stderr)
+        return 1
     for state in ("failed", "running", "pending"):
         source = request_path(root, state, args.id)
         if not source.exists():
@@ -5012,6 +5079,7 @@ def ack(args: argparse.Namespace) -> int:
         except FileNotFoundError:
             continue
         break
+    codex_queue.discard_environment(root, args.id)
     print(f"ltc: acknowledged callback {args.id} in {root}", file=sys.stderr)
     return 0
 
@@ -5036,7 +5104,8 @@ def retry_callback(args: argparse.Namespace) -> int:
             raise ValueError("callback is already pending")
         if ack_path(root, args.id).exists() or is_canceled(root, args.id):
             raise ValueError("acknowledged or canceled callbacks cannot be retried")
-        if request.get("retain_target_lease") is True or desktop_submission_pending(root, request):
+        if (request.get("retain_target_lease") is True or desktop_submission_pending(root, request)
+                or codex_queue.may_have_been_queued(root, args.id)):
             raise ValueError("previous submission outcome is unknown; inspect the original session before recovery")
         target_lock = acquire_target_lock(request, blocking=False)
         if target_lock is None or retained_target_lease_is_held(request):
@@ -5048,12 +5117,19 @@ def retry_callback(args: argparse.Namespace) -> int:
                 request.pop(key, None)
             request.update(callback_transport.selection(options))
             request.update(pi_route)
-            request["version"] = 3 if request_agent(request) == "pi" else 2
-            if request.get("pi_delivery") == "steer":
-                request["version"] = 4
+            request["version"] = callback_route_version(request)
+            if request.get("callback_mode") == "codex-queue":
+                # The route was frozen from this shell, so its environment goes with it.
+                codex_queue.capture_environment(root, args.id)
+            else:
+                codex_queue.discard_environment(root, args.id)
+        elif request.get("callback_mode") == "codex-queue" and codex_queue.load_environment(root, args.id) is None:
+            codex_queue.capture_environment(root, args.id)
         capability = callback_transport.inspect_route(request)
         if capability["status"] == "blocked":
-            raise ValueError("callback route remains blocked: " + str(capability.get("reason")))
+            action = capability.get("action")
+            raise ValueError("callback route remains blocked: " + str(capability.get("reason"))
+                             + (f". {action}" if action else ""))
         history = request.setdefault("retry_history", [])
         if not isinstance(history, list):
             raise ValueError("callback retry history is invalid")
@@ -5455,6 +5531,8 @@ def status(args: argparse.Namespace) -> int:
             line += " | manual receipt; automatic callback disabled"
         if request.get("delivery_state") == "blocked":
             line += " | callback blocked; saved workload result retained"
+        if request.get("delivery_state") == codex_queue.AWAITING_ACK:
+            line += " | in the Codex queue; waiting for the thread to ACK"
         if state == "running" and ack_path(root, request_id).exists():
             line += " | acknowledged; resumed Codex process still active"
         error = request.get("last_error")
@@ -5536,7 +5614,8 @@ def main() -> int:
                                help="Workflow whose prerequisites are checked (default: run)")
     doctor_parser.add_argument("--agent", choices=AGENT_NAMES, help="Callback Agent (default: detect current Agent)")
     doctor_parser.add_argument("--agent-worker", choices=CHILD_AGENT_NAMES, help="Child Agent for --operation agent")
-    doctor_parser.add_argument("--callback-mode", choices=callback_transport.MODES, default="auto")
+    doctor_parser.add_argument("--callback-mode", choices=callback_transport.MODES, default="auto",
+                               metavar="{" + ",".join(callback_transport.OFFERED_MODES) + "}")
     doctor_target = doctor_parser.add_mutually_exclusive_group()
     doctor_target.add_argument("--session", help="Original Agent session to preserve during repair")
     doctor_target.add_argument("--last", action="store_true", help="Inspect an already explicitly chosen unsafe last-session target")
@@ -5548,20 +5627,12 @@ def main() -> int:
     retry_parser = sub.add_parser("retry", help="Requeue a failed/manual callback without rerunning its workload")
     retry_parser.add_argument("--id", required=True)
     retry_parser.add_argument("--queue-dir")
-    retry_parser.add_argument("--callback-mode", choices=callback_transport.MODES)
+    retry_parser.add_argument("--callback-mode", choices=callback_transport.MODES,
+                              metavar="{" + ",".join(callback_transport.OFFERED_MODES) + "}")
 
-    desktop_parser = sub.add_parser("desktop", help="Prepare, inspect or launch the opt-in Mac/Windows Desktop shared Core")
-    desktop_actions = desktop_parser.add_subparsers(dest="desktop_action", required=True)
-    prepare = desktop_actions.add_parser("prepare", help="Save configuration and a double-click launcher without restarting Desktop")
-    prepare.add_argument("--app", help="Desktop .app on Mac or .exe on Windows (default: platform discovery)")
-    prepare.add_argument("--wrapper", help="Custom Core wrapper (default: preserve selection, or use this LTC installation)")
-    prepare.add_argument("--core", help="Windows Desktop Core .exe override (default: matching Desktop Core)")
-    prepare.add_argument("--launch-mode", choices=("direct", "package-context"),
-                         help="Windows launch route; package-context is experimental and explicitly selected")
-    prepare.add_argument("--force", action="store_true")
-    desktop_actions.add_parser("status", help="Inspect the configured Core identity")
-    launch = desktop_actions.add_parser("launch", help="Launch Desktop only after its existing process has exited")
-    launch.add_argument("--check-only", action="store_true")
+    # Launchers generated by older versions still call `ltc desktop launch`.
+    desktop_parser = sub.add_parser("desktop", help="Retired: open Codex Desktop normally, no launcher is needed")
+    desktop_parser.add_argument("retired_arguments", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
 
     done_parser = sub.add_parser("done", help="Queue a callback after an externally managed task finishes")
     add_common_flags(done_parser)
@@ -5703,12 +5774,10 @@ def main() -> int:
     setup_parser.add_argument("--force", action="store_true", help="Overwrite an existing skill and service file")
     setup_parser.add_argument("--keep-skill", action="store_true",
                               help="Keep existing skill files during coordinator setup, even with --force; install if missing")
-    desktop_setup = setup_parser.add_mutually_exclusive_group()
-    desktop_setup.add_argument("--desktop-app", help="Desktop .app on Mac or .exe on Windows for the generated launcher")
-    desktop_setup.add_argument("--no-desktop-launcher", action="store_true",
-                               help="Skip Mac/Windows Desktop launcher generation (default: prepare without launching)")
-    setup_parser.add_argument("--desktop-launch-mode", choices=("direct", "package-context"),
-                              help="Windows Desktop launch route (default: preserve selection, or direct)")
+    # Accepted so existing install scripts keep working; setup generates no launcher.
+    setup_parser.add_argument("--desktop-app", help=argparse.SUPPRESS)
+    setup_parser.add_argument("--no-desktop-launcher", action="store_true", help=argparse.SUPPRESS)
+    setup_parser.add_argument("--desktop-launch-mode", help=argparse.SUPPRESS)
     setup_parser.add_argument("--enable", action="store_true", help="Enable the service for this user")
     setup_parser.add_argument("--now", action="store_true", help="Start the service or request a safe reload")
 
@@ -5809,8 +5878,10 @@ def main() -> int:
     args = parser.parse_args()
     migrate_legacy_state_dir()
     if args.mode == "desktop":
-        from . import desktop
-        return desktop.command(args)
+        print("ltc: the Desktop launcher is retired. Quit Codex Desktop and open it normally; callbacks use the "
+              "native Codex queue. Move a saved desktop callback with: ltc retry --id ID --callback-mode codex-queue",
+              file=sys.stderr)
+        return 2
     if args.mode == "retry":
         return retry_callback(args)
     if args.mode == "doctor":

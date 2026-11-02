@@ -9,47 +9,55 @@ an installed CLI, or an idle Agent turn does not prove that connection exists.
 
 | Selection | Behavior | Acceptance requirement |
 | --- | --- | --- |
-| `--callback-mode auto` (default) | Recognizes the current `Codex Desktop` origin marker and selects `desktop`; otherwise selects `cli` | If an integration omits the marker, select the mode explicitly. Historical session `source` is not current ownership. |
+| `--callback-mode auto` (default) | Recognizes the current `Codex Desktop` origin marker and selects `codex-queue`; otherwise selects `cli` | If an integration omits the marker, select the mode explicitly. Historical session `source` is not current ownership. |
 | `--callback-mode cli` | Uses the existing local App Server when available, otherwise the bound Agent's CLI resume | Real original-session receipt/ACK must be verified for that CLI configuration; an unrelated Core may still own the session. |
-| `--callback-mode desktop` | Requires an explicit shared Core; never falls back to an independent CLI writer | Desktop and LTC must access the same original conversation and its normal tools/approvals. |
+| `--callback-mode codex-queue` | Runs the public `codex queue --thread UUID --message TEXT` once with the session's environment; never falls back to another writer | Queued is not received: the open chat must consume it and ACK. |
+| `--callback-mode desktop` | Retired for new work; refused with this replacement. Saved records keep the route. | See below. |
 | `--callback-mode manual` | Runs the workload and saves a callback for later inspection; never automatically starts an Agent | User or original Agent reads results and ACKs receipt. A file by itself does not wake the Agent. |
 
 PI Agent callbacks always use CLI resume: PI has no shared-Core App Server, so
-`auto` never selects `desktop` for `--agent pi`, delivery runs
-`pi --print --session <session-file>`, and an explicit `desktop` mode is rejected
+`auto` never selects `codex-queue` for `--agent pi`, delivery runs
+`pi --print --session <session-file>`, and an explicit `codex-queue` mode is rejected
 before admission.
 
-For a new `run` or `agent`, a blocked Desktop preflight refuses admission before
-creating the task. The user can configure the bridge or explicitly choose
-`manual`. `done` reports work that already happened, so it preserves the callback
-even if the connection is currently unavailable. Do not silently choose manual
-or force CLI mode to conceal a Desktop failure.
+For a new `run` or `agent`, a blocked route preflight refuses admission before
+creating the task. The user can repair the route or explicitly choose `manual`.
+`done` reports work that already happened, so it preserves the callback even if
+the connection is currently unavailable.
 
-Mode and bridge metadata path are frozen with the task. Each delivery reloads
-the endpoint metadata and checks the live peer. PID reuse, another profile, and
-an unavailable metadata file cannot authorize sending a prompt elsewhere.
-CLI mode remains independent of a Desktop bridge selected in the coordinator's
-environment. Legacy records retain their prior routing behavior.
+Mode, Codex executable and profile are frozen with the task. The session's
+environment is saved privately per callback and removed once nothing can send
+again. CLI mode remains independent. Legacy records retain their prior routing.
 
-## Desktop launcher installation
+## Native queue delivery
 
-On Mac and Windows, standard `ltc setup` generates a launcher for the current
-profile and installed Python runtime. Mac generates `Start LTC Desktop.command`;
-Windows generates `Start LTC Desktop.cmd` and `Start LTC Desktop.ps1`, with local
-settings in `desktop.json`. The implementation and script resources ship in the
-wheel; neither platform requires a source checkout or an `examples` script.
-Use `--no-desktop-launcher` to skip this setup step on either platform.
+The receipt in `codex-queue/<id>.json` is written before the command starts, so a
+callback is never sent twice automatically. After the queue accepts a message
+the target lease is released: Codex owns the message and its order, so one
+unanswered callback does not block later callbacks for that thread. The callback
+stays pending until the chat ACKs, and `ltc status` says so.
 
-The shared commands are `ltc desktop prepare`, `ltc desktop launch` and
-`ltc desktop status`. The Desktop step of setup and `desktop prepare` only
-generate configuration and launchers; they do not start or stop Desktop.
-Activation remains an explicit launch after
-closing the existing Desktop. On Windows, direct launch is the default;
-`ltc setup --desktop-launch-mode package-context` or
-`ltc desktop prepare --launch-mode package-context --force` saves the explicit
-experimental alternative. A failed direct launch does not select it automatically.
-`ltc desktop launch --check-only` retains the Windows suspended process-creation
-probe, whose success alone does not prove bridge or callback delivery.
+| Outcome | Classification | Next step |
+| --- | --- | --- |
+| Exit 0 naming this thread | Queued; pending until ACK | Nothing is sent again |
+| Exit 1 to 127, or the command cannot be started | Rejected; nothing was queued | `ltc retry --id ID` after repair |
+| Kill, timeout, exit 128 or above, exit 0 with unreadable output | Unknown; lease kept, later callbacks wait | Inspect the chat, then `ltc ack` or `ltc cancel` |
+
+A delivery worker that vanishes is judged from the receipt alone: no receipt means
+nothing was sent, `queued` keeps the acceptance, and anything else is unknown.
+
+## Retired Desktop launcher
+
+Setup no longer generates a launcher, `ltc desktop` only explains the replacement,
+and `--callback-mode desktop` is refused for new work, because a normally started
+Desktop already gets callbacks through the queue. `setup --desktop-app`,
+`--desktop-launch-mode` and `--no-desktop-launcher` are accepted and ignored so
+install scripts keep working, and setup names leftover launcher files without
+deleting them.
+
+Saved `desktop` records and tasks keep their results and route. A connection that
+still works delivers them as before; otherwise they wait in `failed/` naming
+`ltc retry --id ID --callback-mode codex-queue`, which does not rerun the workload.
 
 ## Readiness and recovery
 
@@ -58,7 +66,8 @@ probe, whose success alone does not prove bridge or callback delivery.
 - `owner_reachable`: a read-only query observed the bound thread in this Core.
 - `unverified`: CLI delivery may be available, but no original-session delivery
   was proved. An absent loaded-thread entry does not mean the thread is free.
-- `blocked`: Desktop connection or ownership was not verified.
+- `available`: the selected Codex has `codex queue`; receipt is still unproved.
+- `blocked`: the route's executable, thread or connection was not verified.
 - `manual`: automatic delivery was explicitly disabled.
 
 The probe only initializes a client and reads `thread/loaded/list`; it never
@@ -78,7 +87,7 @@ without consuming its retry budget; it does not interrupt that turn.
 After inspecting and repairing the connection, requeue the same callback:
 
 ```bash
-ltc retry --id <callback-id> --callback-mode desktop
+ltc retry --id <callback-id> --callback-mode codex-queue
 # Or explicitly put a failed result into the manual inbox:
 ltc retry --id <callback-id> --callback-mode manual
 ltc status --state pending --state failed
@@ -93,8 +102,10 @@ session. This confirms receipt, not autonomous transport acceptance or goal comp
 ## Upgrade and acceptance
 
 New tasks use record version **3**, and callbacks with explicit modes use version
-**2**. Upgrade the coordinator before submitting them. Older coordinators reject
-these versions instead of silently ignoring manual/desktop intent. Old task and
+**2**; the native queue uses task version **6** and callback version **5**. Upgrade
+the coordinator before submitting them. Older coordinators reject these versions
+instead of ignoring manual intent or resuming a thread an open chat owns, and keep
+the record with its results; `ltc retry` delivers it after the upgrade. Old task and
 callback versions remain readable. Do not downgrade a queue containing new work.
 
 Acceptance is by OS **and connection**, not OS alone: CLI, shared Desktop,
@@ -105,8 +116,6 @@ the 60.014-second workload `bdfd671d` completed, but its callback hit an active
 writer conflict. Those two observations are separate evidence, not interchangeable
 proof of Mac Desktop acceptance.
 
-See [Mac Desktop setup](macos-desktop-bridge.md) and
-[Windows Desktop setup](windows-desktop-bridge.md). Automatic launcher generation
-is part of the `codex/macos-desktop-callback` preview. The Windows installation path still
-needs native acceptance; historical package-context callback success does not
-establish that the new setup/packaging flow works on Windows.
+The earlier launcher notes remain as history: [Mac](macos-desktop-bridge.md),
+[Windows](windows-desktop-bridge.md). See the
+[queue validation record](validation-codex-queue.md) for what has been run.

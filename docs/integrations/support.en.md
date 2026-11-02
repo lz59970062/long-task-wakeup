@@ -12,7 +12,7 @@ This page reflects the current `main` implementation and repository validation r
 | Claude Code CLI | `ltc agent claude` | Background `ltc wait` for live delivery; standalone CLI for session resume | Child and CLI resume support from 0.7.0; live delivery in the 0.7.1 preview, verified on Linux/macOS |
 | Claude desktop app, Code sessions | Child tasks use a signed-in standalone Claude CLI | Run `ltc wait` through background Bash | 0.7.1 preview; verified with macOS local sessions and Linux SSH sessions |
 | Pi | `ltc agent pi` | Extension sends a steer message to the live process; `ltc pi` adds recovery after closing | 0.7.1 preview; recorded validation on Linux with Pi 0.87.1; macOS/Windows validation pending |
-| Codex Desktop | Child tasks use Codex CLI | Shared Core launcher with `--callback-mode desktop` | 0.7.1 preview; real Desktop restart, receipt, and ACK acceptance for the new installation path is pending |
+| Codex Desktop | Child tasks use Codex CLI | Public `codex queue`, selected automatically (`--callback-mode codex-queue`) | 0.7.1 preview; real Desktop restart, receipt, and ACK acceptance for the new installation path is pending |
 
 You can combine child and receiving Agents. For example, `ltc agent claude` in Codex runs the task with Claude and returns the result to Codex. Follow the [Codex](codex.md), [Claude](claude.md), [Pi](pi.md), or [Desktop](desktop.md) guide.
 
@@ -56,4 +56,5 @@ Start with [`agents/base.py`](https://github.com/lz59970062/long-task-wakeup/blo
 - [0.7.0 release validation](https://github.com/lz59970062/long-task-wakeup/blob/main/docs/validation-0.7.0.md)
 - [Claude Code platform records](https://github.com/lz59970062/long-task-wakeup/blob/main/docs/claude-code.md#platform-status)
 - [Pi integration validation](https://github.com/lz59970062/long-task-wakeup/blob/main/docs/validation-pi-child.md)
+- [Codex queue validation](https://github.com/lz59970062/long-task-wakeup/blob/main/docs/validation-codex-queue.md)
 - [Desktop preview acceptance record](https://github.com/lz59970062/long-task-wakeup/blob/main/docs/validation-0.7.1-preview.md)

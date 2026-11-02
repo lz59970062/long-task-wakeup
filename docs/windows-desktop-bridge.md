@@ -1,5 +1,9 @@
 # Experimental Windows Desktop callback bridge
 
+> **Retired.** LTC no longer generates or starts this launcher; start Desktop normally and callbacks use
+> [`codex-queue`](callback-modes.md#native-queue-delivery). A saved `desktop` callback moves with
+> `ltc retry --id ID --callback-mode codex-queue`. The rest of this page is kept as history.
+
 This opt-in adapter is intended to let Codex Desktop and LTC use **one App
 Server**, so callback delivery reaches the process that already owns the thread.
 The 0.7.1 preview generates its launcher during ordinary Windows setup;
