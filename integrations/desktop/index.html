@@ -821,27 +821,45 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#生成启动器" class="md-nav__link">
+  <a href="#用小任务检查" class="md-nav__link">
     <span class="md-ellipsis">
-      生成启动器
+      用小任务检查
     </span>
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#启动-desktop" class="md-nav__link">
+  <a href="#各状态的含义" class="md-nav__link">
     <span class="md-ellipsis">
-      启动 Desktop
+      各状态的含义
     </span>
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#调整应用路径" class="md-nav__link">
+  <a href="#ack-与沙箱" class="md-nav__link">
     <span class="md-ellipsis">
-      调整应用路径
+      ACK 与沙箱
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#限制" class="md-nav__link">
+    <span class="md-ellipsis">
+      限制
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#迁移为旧启动器保存的回调" class="md-nav__link">
+    <span class="md-ellipsis">
+      迁移为旧启动器保存的回调
     </span>
   </a>
   
@@ -1101,27 +1119,45 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#生成启动器" class="md-nav__link">
+  <a href="#用小任务检查" class="md-nav__link">
     <span class="md-ellipsis">
-      生成启动器
+      用小任务检查
     </span>
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#启动-desktop" class="md-nav__link">
+  <a href="#各状态的含义" class="md-nav__link">
     <span class="md-ellipsis">
-      启动 Desktop
+      各状态的含义
     </span>
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#调整应用路径" class="md-nav__link">
+  <a href="#ack-与沙箱" class="md-nav__link">
     <span class="md-ellipsis">
-      调整应用路径
+      ACK 与沙箱
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#限制" class="md-nav__link">
+    <span class="md-ellipsis">
+      限制
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#迁移为旧启动器保存的回调" class="md-nav__link">
+    <span class="md-ellipsis">
+      迁移为旧启动器保存的回调
     </span>
   </a>
   
@@ -1152,29 +1188,58 @@
 
 
 <h1 id="接入-codex-desktop">接入 Codex Desktop<a class="headerlink" href="#接入-codex-desktop" title="Permanent link">&para;</a></h1>
-<p>Codex Desktop 接入使用 <code>0.7.1</code> 预览版的共享 Core 启动器。Desktop 和 LTC 通过同一个 Core 访问会话，任务结束后把回调送回桌面应用。</p>
-<h2 id="生成启动器">生成启动器<a class="headerlink" href="#生成启动器" title="Permanent link">&para;</a></h2>
-<p>在 macOS 或 Windows 上完成<a href="../../installation/#安装预览版">预览版安装</a>，然后运行：</p>
+<p>正常启动 Desktop 即可。在 Desktop 会话中，<code>auto</code> 会选择 <code>codex-queue</code>：任务结束后，协调器使用你所在会话的环境和 Codex 配置，运行一次公开命令 <code>codex queue --thread UUID --message TEXT</code>。Desktop 不需要启动器、共享 Core、私有管道，也不需要重启。</p>
+<h2 id="用小任务检查">用小任务检查<a class="headerlink" href="#用小任务检查" title="Permanent link">&para;</a></h2>
+<p>完成<a href="../../installation/#安装预览版">预览版安装</a>，然后从 Desktop 会话提交一个任务：</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>ltc<span class="w"> </span>setup<span class="w"> </span>--force<span class="w"> </span>--enable<span class="w"> </span>--now
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>ltc<span class="w"> </span>desktop<span class="w"> </span>status
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>ltc<span class="w"> </span>run<span class="w"> </span>--cwd<span class="w"> </span><span class="s2">"</span><span class="nv">$PWD</span><span class="s2">"</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">"Desktop 回调示例"</span><span class="w"> </span>--<span class="w"> </span>python<span class="w"> </span>-c<span class="w"> </span><span class="s2">"print('Desktop callback ready')"</span>
 </code></pre></div>
-<p>macOS 会生成 <code>Start LTC Desktop.command</code>；Windows 会生成 <code>Start LTC Desktop.cmd</code> 和对应的 PowerShell 脚本。默认位置是用户 Codex 配置目录下的 <code>long-task-wakeup</code> 文件夹。</p>
-<h2 id="启动-desktop">启动 Desktop<a class="headerlink" href="#启动-desktop" title="Permanent link">&para;</a></h2>
-<p>保存当前工作并退出 Desktop，再双击生成的启动器，或运行：</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>ltc<span class="w"> </span>desktop<span class="w"> </span>launch
+<p>提交时会打印 <code>ltc: callback mode: codex-queue</code>。PowerShell 工具环境中将 <code>--cwd "$PWD"</code> 换成 <code>--cwd "$($PWD.Path)"</code>。如果 Desktop 没有标记会话来源，请加上 <code>--callback-mode codex-queue</code>。</p>
+<p>会话忙时，Codex 会等当前回合结束再处理这条消息；会话已关闭时，再次打开就会收到。</p>
+<h2 id="各状态的含义">各状态的含义<a class="headerlink" href="#各状态的含义" title="Permanent link">&para;</a></h2>
+<p>进入队列不等于已经收到。回调会一直保持待处理，直到会话执行其中的 ACK 命令，<code>ltc status</code> 显示 <code>in the Codex queue; waiting for the thread to ACK</code>。等待 ACK 的回调不会阻塞同一会话后续的回调。</p>
+<table>
+<thead>
+<tr>
+<th>发生的情况</th>
+<th>LTC 的处理</th>
+<th>你要做的</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>codex queue</code> 报错，例如会话不存在</td>
+<td>连同错误信息移入 <code>failed</code>；消息没有进入队列</td>
+<td>修复原因后运行 <code>ltc retry --id ID</code></td>
+</tr>
+<tr>
+<td>无法启动 <code>codex</code></td>
+<td>同上，包括 Windows 无法解析可执行文件</td>
+<td>修正路径或设置 <code>CODEX_LONG_TASK_WAKEUP_CODEX_BIN</code>，然后重试</td>
+</tr>
+<tr>
+<td>命令被杀死、超时，或成功退出但输出无法识别</td>
+<td>结果未知：移入 <code>failed</code>，该会话后续回调等待</td>
+<td>查看会话后运行 <code>ltc ack --id ID</code> 或 <code>ltc cancel --id ID</code>；<code>retry</code> 会被拒绝</td>
+</tr>
+</tbody>
+</table>
+<p>LTC 在队列目录的 <code>codex-queue/</code> 中保存回执，不会自动把同一个回调发送两次。</p>
+<h2 id="ack-与沙箱">ACK 与沙箱<a class="headerlink" href="#ack-与沙箱" title="Permanent link">&para;</a></h2>
+<p>ACK 按会话自身的权限运行。如果沙箱不能写 LTC 队列目录（默认 <code>~/.ltc</code>），命令会失败，回调继续保持待处理。请批准该命令、把目录加入沙箱可写路径，或在终端中执行 ACK。在此期间不会重复发送。</p>
+<h2 id="限制">限制<a class="headerlink" href="#限制" title="Permanent link">&para;</a></h2>
+<p>已在 Linux 上用真实 Codex 0.166.0 验证，打开的会话使用 TUI，见<a href="https://github.com/lz59970062/long-task-wakeup/blob/main/docs/validation-codex-queue.md">验证记录</a>。真实 Desktop 应用、macOS 和 Windows 尚未运行过。macOS 优先使用应用内置的 Codex，<code>CODEX_LONG_TASK_WAKEUP_CODEX_BIN</code> 可以覆盖。可执行文件和配置目录在提交时固定。<code>--thread</code> 需要会话 UUID：绑定到会话名称的回调会连同错误信息移入 <code>failed</code>，可用 <code>ltc retry --id ID --callback-mode cli</code> 迁移。消息通过命令行传递，命令运行期间本机其他用户可以在进程列表中看到；特别长的 <code>--callback-format full</code> 消息可能超过系统参数长度限制，默认的紧凑格式很短。</p>
+<p>使用这条路径前先升级协调器：新记录是 callback 版本 5 和 task 版本 6，旧协调器会保留它们而不发送，也不会去恢复该会话。</p>
+<h2 id="迁移为旧启动器保存的回调">迁移为旧启动器保存的回调<a class="headerlink" href="#迁移为旧启动器保存的回调" title="Permanent link">&para;</a></h2>
+<p>启动器和共享 Core 已移除。<code>ltc setup</code> 不再生成它们，新任务使用 <code>--callback-mode desktop</code> 会被拒绝。已保存的 <code>desktop</code> 回调保留结果。在 macOS 和 Windows 上，它会留在 <code>failed</code> 中；在 Linux 上，它继续通过本地 App Server socket 投递，只有 socket 不可用时才留在 <code>failed</code> 中。用以下命令迁移：</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>ltc<span class="w"> </span>retry<span class="w"> </span>--id<span class="w"> </span>ID<span class="w"> </span>--callback-mode<span class="w"> </span>codex-queue
 </code></pre></div>
-<p>之后从这个 Desktop 会话提交一个小任务：</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>ltc<span class="w"> </span>run<span class="w"> </span>--callback-mode<span class="w"> </span>desktop<span class="w"> </span>--cwd<span class="w"> </span><span class="s2">"</span><span class="nv">$PWD</span><span class="s2">"</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">"Desktop 回调示例"</span><span class="w"> </span>--<span class="w"> </span>python<span class="w"> </span>-c<span class="w"> </span><span class="s2">"print('Desktop callback ready')"</span>
+<p>这不会重新运行任务。</p>
+<p>升级前先退出由启动器打开的 Desktop，因为包装脚本指向的文件删除后，它无法再次启动 Core。之后正常打开 Desktop 即可。</p>
+<p>在 Windows 上，桥接进程可能在 Desktop 退出后继续运行。如有残留，请结束它，它的 App Server 会一起停止。这条命令尚未在 Windows 上运行过：</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nb">Get-CimInstance</span> <span class="n">Win32_Process</span> <span class="n">-Filter</span> <span class="s2">"CommandLine LIKE '%long_task_callback.desktop_bridge%'"</span> <span class="p">|</span> <span class="k">ForEach</span><span class="n">-Object</span> <span class="p">{</span> <span class="nb">Stop-Process</span> <span class="n">-Id</span> <span class="nv">$_</span><span class="p">.</span><span class="n">ProcessId</span> <span class="p">}</span>
 </code></pre></div>
-<p>让 Agent 读取结果并执行回调中的 ACK，完成一次接入检查。PowerShell 工具环境中将 <code>--cwd "$PWD"</code> 换成 <code>--cwd "$($PWD.Path)"</code>。</p>
-<h2 id="调整应用路径">调整应用路径<a class="headerlink" href="#调整应用路径" title="Permanent link">&para;</a></h2>
-<p>macOS 同时安装多个应用时，可以明确选择：</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>ltc<span class="w"> </span>desktop<span class="w"> </span>prepare<span class="w"> </span>--app<span class="w"> </span>/Applications/Codex.app<span class="w"> </span>--force
-</code></pre></div>
-<p>Windows 默认使用直接启动方式。Store 包上下文启动是实验选项，配置命令是：</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="n">ltc</span> <span class="n">setup</span> <span class="p">-</span><span class="n">-desktop-launch-mode</span> <span class="n">package-context</span> <span class="p">-</span><span class="n">-force</span> <span class="p">-</span><span class="n">-enable</span> <span class="p">-</span><span class="n">-now</span>
-</code></pre></div>
-<p>各平台的启动步骤、运行条件和验证记录见 <a href="https://github.com/lz59970062/long-task-wakeup/blob/main/docs/macos-desktop-bridge.md">macOS Desktop</a>与 <a href="https://github.com/lz59970062/long-task-wakeup/blob/main/docs/windows-desktop-bridge.md">Windows Desktop</a>。应用升级后，再用上面的示例检查回调。</p>
+<p><code>ltc setup</code> 会列出遗留的启动器和桥接文件，包括 <code>desktop.json</code>。Desktop 和桥接都停止后即可删除。</p>
 
 
 

@@ -821,27 +821,45 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#generate-a-launcher" class="md-nav__link">
+  <a href="#check-it-with-a-small-task" class="md-nav__link">
     <span class="md-ellipsis">
-      Generate a launcher
+      Check it with a small task
     </span>
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#start-desktop" class="md-nav__link">
+  <a href="#what-the-states-mean" class="md-nav__link">
     <span class="md-ellipsis">
-      Start Desktop
+      What the states mean
     </span>
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#choose-an-app-path" class="md-nav__link">
+  <a href="#ack-and-sandboxes" class="md-nav__link">
     <span class="md-ellipsis">
-      Choose an app path
+      ACK and sandboxes
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      Limits
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#move-a-callback-saved-for-the-old-launcher" class="md-nav__link">
+    <span class="md-ellipsis">
+      Move a callback saved for the old launcher
     </span>
   </a>
   
@@ -1101,27 +1119,45 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#generate-a-launcher" class="md-nav__link">
+  <a href="#check-it-with-a-small-task" class="md-nav__link">
     <span class="md-ellipsis">
-      Generate a launcher
+      Check it with a small task
     </span>
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#start-desktop" class="md-nav__link">
+  <a href="#what-the-states-mean" class="md-nav__link">
     <span class="md-ellipsis">
-      Start Desktop
+      What the states mean
     </span>
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#choose-an-app-path" class="md-nav__link">
+  <a href="#ack-and-sandboxes" class="md-nav__link">
     <span class="md-ellipsis">
-      Choose an app path
+      ACK and sandboxes
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      Limits
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#move-a-callback-saved-for-the-old-launcher" class="md-nav__link">
+    <span class="md-ellipsis">
+      Move a callback saved for the old launcher
     </span>
   </a>
   
@@ -1152,29 +1188,58 @@
 
 
 <h1 id="codex-desktop">Codex Desktop<a class="headerlink" href="#codex-desktop" title="Permanent link">&para;</a></h1>
-<p>Codex Desktop integration uses the shared Core launcher in the <code>0.7.1</code> preview. Desktop and LTC access sessions through the same Core, which delivers callbacks into the desktop app when tasks finish.</p>
-<h2 id="generate-a-launcher">Generate a launcher<a class="headerlink" href="#generate-a-launcher" title="Permanent link">&para;</a></h2>
-<p>Install the <a href="../../installation/#install-the-preview">preview</a> on macOS or Windows, then run:</p>
+<p>Start Desktop normally. From a Desktop session, <code>auto</code> selects <code>codex-queue</code>: when the task ends, the coordinator runs the public <code>codex queue --thread UUID --message TEXT</code> once with your session's environment and Codex profile. Desktop needs no launcher, shared Core, private pipe or restart.</p>
+<h2 id="check-it-with-a-small-task">Check it with a small task<a class="headerlink" href="#check-it-with-a-small-task" title="Permanent link">&para;</a></h2>
+<p>Install the <a href="../../installation/#install-the-preview">preview</a>, then submit a task from a Desktop session:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>ltc<span class="w"> </span>setup<span class="w"> </span>--force<span class="w"> </span>--enable<span class="w"> </span>--now
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>ltc<span class="w"> </span>desktop<span class="w"> </span>status
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>ltc<span class="w"> </span>run<span class="w"> </span>--cwd<span class="w"> </span><span class="s2">"</span><span class="nv">$PWD</span><span class="s2">"</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">"Desktop callback example"</span><span class="w"> </span>--<span class="w"> </span>python<span class="w"> </span>-c<span class="w"> </span><span class="s2">"print('Desktop callback ready')"</span>
 </code></pre></div>
-<p>macOS generates <code>Start LTC Desktop.command</code>. Windows generates <code>Start LTC Desktop.cmd</code> and a PowerShell script. The default location is the <code>long-task-wakeup</code> folder inside your Codex configuration directory.</p>
-<h2 id="start-desktop">Start Desktop<a class="headerlink" href="#start-desktop" title="Permanent link">&para;</a></h2>
-<p>Save your work and quit Desktop. Double-click the generated launcher, or run:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>ltc<span class="w"> </span>desktop<span class="w"> </span>launch
+<p>The submission prints <code>ltc: callback mode: codex-queue</code>. In a PowerShell tool environment, use <code>--cwd "$($PWD.Path)"</code> in place of <code>--cwd "$PWD"</code>. If Desktop does not mark its sessions, pass <code>--callback-mode codex-queue</code>.</p>
+<p>Codex holds the message until a busy chat finishes its turn. A closed chat receives it when you open it again.</p>
+<h2 id="what-the-states-mean">What the states mean<a class="headerlink" href="#what-the-states-mean" title="Permanent link">&para;</a></h2>
+<p>A queued message is not a received one. The callback stays pending until the chat runs its ACK command, and <code>ltc status</code> shows <code>in the Codex queue; waiting for the thread to ACK</code>. A callback waiting for its ACK does not hold back later callbacks for the same chat.</p>
+<table>
+<thead>
+<tr>
+<th>What happened</th>
+<th>What LTC does</th>
+<th>What you do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>codex queue</code> reported an error, for example no such thread</td>
+<td>Moves it to <code>failed</code> with the error; nothing was queued</td>
+<td>Fix the cause, then run <code>ltc retry --id ID</code></td>
+</tr>
+<tr>
+<td><code>codex</code> cannot be started</td>
+<td>Same, including an executable that Windows cannot resolve</td>
+<td>Fix the path or set <code>CODEX_LONG_TASK_WAKEUP_CODEX_BIN</code>, then retry</td>
+</tr>
+<tr>
+<td>The command was killed, timed out, or succeeded with output LTC cannot read</td>
+<td>Outcome unknown: <code>failed</code>, and later callbacks for this chat wait</td>
+<td>Look in the chat, then run <code>ltc ack --id ID</code> or <code>ltc cancel --id ID</code>; retry is refused</td>
+</tr>
+</tbody>
+</table>
+<p>LTC keeps a receipt in <code>codex-queue/</code> in the queue directory and never sends the same callback twice on its own.</p>
+<h2 id="ack-and-sandboxes">ACK and sandboxes<a class="headerlink" href="#ack-and-sandboxes" title="Permanent link">&para;</a></h2>
+<p>The ACK runs under the chat's own permissions. If its sandbox cannot write the LTC queue directory (<code>~/.ltc</code> by default), the command fails and the callback stays pending. Approve the command, add that directory to the sandbox's writable roots, or run the ACK from a terminal. Nothing is sent again in the meantime.</p>
+<h2 id="limits">Limits<a class="headerlink" href="#limits" title="Permanent link">&para;</a></h2>
+<p>Verified with real Codex 0.166.0 on Linux, using the TUI as the open chat; see the <a href="https://github.com/lz59970062/long-task-wakeup/blob/main/docs/validation-codex-queue.md">validation record</a>. A real Desktop app, macOS and Windows have not been run. macOS prefers the Codex bundled with the app, and <code>CODEX_LONG_TASK_WAKEUP_CODEX_BIN</code> overrides it. The executable and profile are frozen at submission. <code>--thread</code> needs the thread UUID: a callback bound to a session name goes to <code>failed</code> with that error, and <code>ltc retry --id ID --callback-mode cli</code> moves it. The message travels on the command line, so other local users can see it in the process list while the command runs, and an unusually long <code>--callback-format full</code> message can exceed the system's argument limit; the compact default stays small.</p>
+<p>Update the coordinator before using this route: new records are callback version 5 and task version 6, and an older coordinator keeps them unsent instead of resuming the thread.</p>
+<h2 id="move-a-callback-saved-for-the-old-launcher">Move a callback saved for the old launcher<a class="headerlink" href="#move-a-callback-saved-for-the-old-launcher" title="Permanent link">&para;</a></h2>
+<p>The launcher and its shared Core are gone. <code>ltc setup</code> no longer generates them and <code>--callback-mode desktop</code> is refused for new work. A saved <code>desktop</code> callback keeps its results. On macOS and Windows it waits in <code>failed</code>; on Linux it keeps delivering through the local App Server socket and only waits in <code>failed</code> if that socket is unavailable. Move it with:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>ltc<span class="w"> </span>retry<span class="w"> </span>--id<span class="w"> </span>ID<span class="w"> </span>--callback-mode<span class="w"> </span>codex-queue
 </code></pre></div>
-<p>Submit a small task from that Desktop session:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>ltc<span class="w"> </span>run<span class="w"> </span>--callback-mode<span class="w"> </span>desktop<span class="w"> </span>--cwd<span class="w"> </span><span class="s2">"</span><span class="nv">$PWD</span><span class="s2">"</span><span class="w"> </span>--task<span class="w"> </span><span class="s2">"Desktop callback example"</span><span class="w"> </span>--<span class="w"> </span>python<span class="w"> </span>-c<span class="w"> </span><span class="s2">"print('Desktop callback ready')"</span>
+<p>This does not rerun the workload.</p>
+<p>Quit any Desktop opened from the launcher before you upgrade, because it cannot start its Core again once the wrapper's target is gone. Then open Desktop normally.</p>
+<p>On Windows, a bridge process can outlive Desktop. If one remains, end it. Its App Server stops with it. This command has not been run on Windows:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nb">Get-CimInstance</span> <span class="n">Win32_Process</span> <span class="n">-Filter</span> <span class="s2">"CommandLine LIKE '%long_task_callback.desktop_bridge%'"</span> <span class="p">|</span> <span class="k">ForEach</span><span class="n">-Object</span> <span class="p">{</span> <span class="nb">Stop-Process</span> <span class="n">-Id</span> <span class="nv">$_</span><span class="p">.</span><span class="n">ProcessId</span> <span class="p">}</span>
 </code></pre></div>
-<p>Ask the Agent to read the result and run the included ACK command to check the integration. In a PowerShell tool environment, use <code>--cwd "$($PWD.Path)"</code> in place of <code>--cwd "$PWD"</code>.</p>
-<h2 id="choose-an-app-path">Choose an app path<a class="headerlink" href="#choose-an-app-path" title="Permanent link">&para;</a></h2>
-<p>On macOS with multiple app installations, select one explicitly:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>ltc<span class="w"> </span>desktop<span class="w"> </span>prepare<span class="w"> </span>--app<span class="w"> </span>/Applications/Codex.app<span class="w"> </span>--force
-</code></pre></div>
-<p>Windows uses direct launch by default. The experimental Store package-context option is configured with:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="n">ltc</span> <span class="n">setup</span> <span class="p">-</span><span class="n">-desktop-launch-mode</span> <span class="n">package-context</span> <span class="p">-</span><span class="n">-force</span> <span class="p">-</span><span class="n">-enable</span> <span class="p">-</span><span class="n">-now</span>
-</code></pre></div>
-<p>See the <a href="https://github.com/lz59970062/long-task-wakeup/blob/main/docs/macos-desktop-bridge.md">macOS Desktop</a> and <a href="https://github.com/lz59970062/long-task-wakeup/blob/main/docs/windows-desktop-bridge.md">Windows Desktop</a> notes for platform setup and validation records. After an app upgrade, run the small example again to check callbacks.</p>
+<p><code>ltc setup</code> names any leftover launcher and bridge files, including <code>desktop.json</code>. Delete them once Desktop and the bridge have stopped.</p>
 
 
 
