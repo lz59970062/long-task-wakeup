@@ -28,4 +28,4 @@ codex-long-task-wakeup = "long_task_callback.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-long_task_callback = ["skill/SKILL.md", "claude_skill/SKILL.md", "pi_skill/SKILL.md", "skill/agents/openai.yaml", "templates/*.md", "platforms/*.ps1", "pi_extension/*.js"]
+long_task_callback = ["skill/SKILL.md", "claude_skill/SKILL.md", "dsh_skill/SKILL.md", "pi_skill/SKILL.md", "skill/agents/openai.yaml", "templates/*.md", "platforms/*.ps1", "pi_extension/*.js"]

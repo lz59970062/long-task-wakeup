@@ -63,6 +63,10 @@ def inspect_route(request: dict[str, object], *, timeout: float = 2) -> dict[str
     if cli.request_agent(request) == "pi":
         from . import pi_callback
         return dict(report, **pi_callback.inspect_route(request))
+    if cli.request_agent(request) == "dsh":
+        return dict(report, transport="live_wait", reason="live_session_delivery",
+                    action="Run `ltc wait --task <id>` as a background job from the bound DSH session; "
+                           "DSH callbacks are never resumed headlessly.")
     if cli.request_agent(request) != "codex":
         return dict(report, transport="cli_resume", reason="session_delivery_not_probed")
     connection = None

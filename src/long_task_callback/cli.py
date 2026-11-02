@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover - the durable run lifecycle is POSIX-onl
 from . import __version__
 from . import callbacks
 from . import callback_transport
-from . import claude_code, codex_queue, pi_callback
+from . import claude_code, codex_queue, dsh_code, pi_callback
 from . import diagnostics
 from . import storage
 from . import template_registration
@@ -52,6 +52,7 @@ from .agents.claude import (
     CLAUDE_BIN_ENV,
     CLAUDE_PERMISSION_MODE_ENV,
 )
+from .agents.dsh import DSH_BIN_ENV
 from .agents.pi import PI_BIN_ENV, PI_SESSION_FILE_ENV
 from .runtime import worker_command
 from .platforms import LaunchError, OwnerState, ScreenBackend, SystemdUserBackend, LaunchdBackend
@@ -316,6 +317,14 @@ def pi_bin_path(args: argparse.Namespace) -> str:
     return command or "pi"
 
 
+def dsh_bin_path(args: argparse.Namespace) -> str:
+    dsh_bin = getattr(args, "dsh_bin", None)
+    if dsh_bin:
+        return str(Path(dsh_bin).expanduser())
+    found = dsh_code.discover_executable(os.environ, which=shutil.which)
+    return found.path if found is not None else "dsh"
+
+
 def report_claude_agent_readiness(args: argparse.Namespace) -> None:
     configured = claude_bin_path(args)
     command = shutil.which(configured)
@@ -366,6 +375,7 @@ def systemd_service_text(args: argparse.Namespace) -> str:
     codex_bin = codex_bin_path(args)
     claude_bin = claude_bin_path(args)
     pi_bin = pi_bin_path(args)
+    dsh_bin = dsh_bin_path(args)
     screen_bin = screen_binary() or "screen"
     path = args.path or os.environ.get("PATH", "")
     return "\n".join(
@@ -389,6 +399,7 @@ def systemd_service_text(args: argparse.Namespace) -> str:
             f"Environment={systemd_quote(f'CODEX_LONG_TASK_WAKEUP_CODEX_BIN={codex_bin}')}",
             f"Environment={systemd_quote(f'{CLAUDE_BIN_ENV}={claude_bin}')}",
             f"Environment={systemd_quote(f'{PI_BIN_ENV}={pi_bin}')}",
+            f"Environment={systemd_quote(f'{DSH_BIN_ENV}={dsh_bin}')}",
             f"Environment={systemd_quote(f'{SCREEN_BIN_ENV}={screen_bin}')}",
             f"Environment={systemd_quote(f'{DESKTOP_APP_SERVER_ENV}=1')}",
             f"Environment={systemd_quote(f'{PROXY_ENV_FILE_ENV}={service_proxy_env_path()}')}",
@@ -681,10 +692,21 @@ def enqueue_request(args: argparse.Namespace, prompt: str) -> int:
 
 
 def agent_environment(agent: str) -> dict[str, str]:
-    """Environment for building an agent command; Claude's binary is located on demand."""
+    """Environment for building an agent command; local CLIs are located on demand."""
     if agent == "claude":
         return claude_code.with_resolved_executable(os.environ, which=shutil.which)
+    if agent == "dsh":
+        return dsh_code.with_resolved_executable(os.environ, which=shutil.which)
     return dict(os.environ)
+
+
+def is_live_delivery(request: dict[str, object]) -> bool:
+    """Whether this agent receives callbacks only through a live ``ltc wait``."""
+    try:
+        agent = request_agent(request)
+    except ValueError:
+        return False  # A malformed record must reach the worker's error path, not stop selection.
+    return getattr(get_agent(agent), "callback_delivery", "resume") == "live"
 
 
 def resume_command(request: dict[str, object]) -> list[str]:
@@ -693,11 +715,19 @@ def resume_command(request: dict[str, object]) -> list[str]:
 
 
 def resume_cwd(request: dict[str, object]) -> str:
-    """Claude looks sessions up by their starting directory, not the task's."""
-    if request_agent(request) == "claude":
+    """Claude and DSH resolve a session from its starting directory, not the task's."""
+    agent = request_agent(request)
+    session_cwd = None
+    if agent == "claude":
         session_cwd = claude_code.resume_cwd(request, os.environ)
-        if session_cwd:
-            return session_cwd
+    elif agent == "dsh":
+        target = request.get("target")
+        if isinstance(target, dict) and target.get("kind") == "session":
+            value = target.get("value")
+            if isinstance(value, str) and value:
+                session_cwd = dsh_code.session_cwd(value, os.environ)
+    if session_cwd:
+        return session_cwd
     return str(request["cwd"])
 
 
@@ -953,7 +983,8 @@ def load_request(path: Path) -> dict[str, object]:
         pi_callback.validate_route(data)
     if data.get("version") == 4 and data.get("pi_delivery") != "steer":
         raise ValueError("version 4 callback requires explicit Pi steer delivery")
-    resume_command(data)
+    if not is_live_delivery(data):
+        resume_command(data)
     return data
 
 
@@ -970,6 +1001,11 @@ def build_acknowledgement_text(command: str, agent: str = "codex", callback_mode
         delivery_note = (
             "This callback is delivered to the original PI Agent process through its native message API. "
             "Only LTC-managed sessions can recover in print mode after the entire original process exits."
+        )
+    elif agent == "dsh":
+        delivery_note = (
+            "This callback is delivered to the live DeepSeek Harness session that ran `ltc wait`; "
+            "DSH has no headless resume, so only that live session can receive it."
         )
     else:
         delivery_note = (
@@ -1256,6 +1292,7 @@ def select_pending(root: Path, now: float) -> Path | None:
         if isinstance(request, dict) and (request.get("callback_mode") == "manual"
                                          or (request.get("delivery_state") == codex_queue.AWAITING_ACK
                                              and not ack_path(root, path.stem).exists())
+                                         or is_live_delivery(request)
                                          or target_has_live_resume(root, request)
                                          or claude_code.live_watcher_is_held(request)):
             continue
@@ -1885,6 +1922,12 @@ def delivery_worker_main() -> int:
             result = {"returncode": 0, "skipped": "already_acknowledged"}
         elif Path(str(payload["canceled_path"])).exists():
             result = {"returncode": 0, "skipped": "canceled"}
+        elif isinstance(payload.get("request"), dict) and is_live_delivery(payload["request"]):
+            result = {
+                "returncode": 126,
+                "delivery_state": "blocked",
+                "error": "this agent receives callbacks only from a live `ltc wait`; no resume was attempted",
+            }
         elif isinstance(payload.get("request"), dict) and payload["request"].get("callback_mode") == "codex-queue":
             payload["prompt"] = prompt
             result = codex_queue.publish(payload)
@@ -3683,6 +3726,12 @@ def submit_managed_run(args: argparse.Namespace) -> int:
             wait = control_command("wait", "--queue-dir", str(root), "--task", task_id)
             print(f"ltc: Claude Code live callback: run in the background (run_in_background): {wait}",
                   file=sys.stderr)
+    if task["agent"] == "dsh" and target.get("kind") == "session":
+        wait = control_command("wait", "--queue-dir", str(root), "--task", task_id)
+        print(f"ltc: DeepSeek Harness live callback: run as a background job (run_in_background: true): {wait}",
+              file=sys.stderr)
+        print("ltc: DSH has no headless fallback; the callback waits until this session runs `ltc wait`",
+              file=sys.stderr)
     return 0
 
 
@@ -3935,6 +3984,8 @@ def agent(args: argparse.Namespace) -> int:
     if args.child_model is not None and not args.child_model.strip():
         raise SystemExit("--model must not be empty")
     child_adapter = get_child_agent(args.agent_worker)
+    if args.child_model and not getattr(child_adapter, "supports_model", True):
+        raise SystemExit(f"{child_adapter.display_name} children do not support --model")
     if args.child_reasoning_effort and not child_adapter.supports_reasoning_effort:
         raise SystemExit(f"{child_adapter.display_name} children do not support --reasoning-effort")
     if args.template is not None or args.template_file is not None:
@@ -4070,7 +4121,12 @@ def claude_home() -> Path:
     return Path(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser()
 
 
-SKILL_TARGETS = ("codex", "claude", "pi", "both", "all")
+def dsh_home() -> Path:
+    """DeepSeek Harness's config root; its ``skills`` child is the user skill root."""
+    return Path(os.environ.get("DSH_HOME", "~/.dsh")).expanduser()
+
+
+SKILL_TARGETS = ("codex", "claude", "pi", "dsh", "both", "all")
 
 
 def install_skill_tree(target: Path, *, include_codex_plugin: bool, force: bool, keep_existing: bool = False,
@@ -4134,6 +4190,9 @@ def install_skill(args: argparse.Namespace) -> int:
     if target_name in ("pi", "all"):
         status |= install_skill_tree(pi_callback.profile_dir() / "skills" / "long-task-callback", include_codex_plugin=False,
                                      force=args.force, keep_existing=keep, focused="pi_skill")
+    if target_name in ("dsh", "all"):
+        status |= install_skill_tree(dsh_home() / "skills" / "long-task-callback", include_codex_plugin=False,
+                                     force=args.force, keep_existing=keep, focused="dsh_skill")
     return status
 
 
@@ -4532,6 +4591,7 @@ def daemon_environment(args: argparse.Namespace, *, include_proxy_values: bool =
         "CODEX_LONG_TASK_WAKEUP_CODEX_BIN": codex_bin_path(args),
         CLAUDE_BIN_ENV: claude_bin_path(args),
         PI_BIN_ENV: pi_bin_path(args),
+        DSH_BIN_ENV: dsh_bin_path(args),
         SCREEN_BIN_ENV: screen_binary() or "screen",
         DESKTOP_APP_SERVER_ENV: os.environ.get(DESKTOP_APP_SERVER_ENV, "1"),
         "PATH": getattr(args, "path", None) or os.environ.get("PATH", ""),
@@ -4960,7 +5020,9 @@ def setup(args: argparse.Namespace) -> int:
         path=args.skill_path,
         force=args.force,
         keep_existing=bool(getattr(args, "keep_skill", False)),
-        target=getattr(args, "skill_target", None) or ("all" if getattr(args, "with_pi_extension", False) else "both"),
+        target=getattr(args, "skill_target", None) or (
+            "all" if getattr(args, "with_pi_extension", False) or getattr(args, "with_dsh", False) else "both"
+        ),
     )
     skill_status = install_skill(skill_args)
     if skill_status != 0:
@@ -4989,6 +5051,7 @@ def setup(args: argparse.Namespace) -> int:
         codex_bin=args.codex_bin,
         claude_bin=getattr(args, "claude_bin", None),
         pi_bin=getattr(args, "pi_bin", None),
+        dsh_bin=getattr(args, "dsh_bin", None),
         path=args.path,
         proxy_env_file=getattr(args, "proxy_env_file", None),
         inherit_proxy=bool(getattr(args, "inherit_proxy", False)),
@@ -5678,6 +5741,7 @@ def main() -> int:
         service_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
         service_parser.add_argument("--claude-bin", help="Path to claude executable used by the daemon")
         service_parser.add_argument("--pi-bin", help="Path to the PI Agent executable used by the daemon")
+        service_parser.add_argument("--dsh-bin", help="Path to the DeepSeek Harness dsh launcher used by the daemon")
         service_parser.add_argument("--path", help="PATH environment for the daemon service")
         add_proxy_environment_flags(service_parser)
         service_parser.add_argument("--force", action="store_true", help="Overwrite an existing service file")
@@ -5685,14 +5749,14 @@ def main() -> int:
         service_parser.add_argument("--now", action="store_true", help="Start the service or request a safe reload")
         service_parser.add_argument("--print", action="store_true", help="Print configuration without installing it")
 
-    install_parser = sub.add_parser("install-skill", help="Install the bundled skill for Codex, Claude Code and/or Pi")
+    install_parser = sub.add_parser("install-skill", help="Install the bundled skill for Codex, Claude Code, Pi and/or DeepSeek Harness")
     install_parser.add_argument("--path", help="Skills directory to install into (overrides --target)")
     install_parser.add_argument(
         "--target",
         choices=SKILL_TARGETS,
         default="both",
         help="Agent home to install into (default: both — ${CODEX_HOME:-~/.codex}/skills and ${CLAUDE_CONFIG_DIR:-~/.claude}/skills; "
-             "pi — ${PI_CODING_AGENT_DIR:-~/.pi/agent}/skills; all — the three)",
+             "pi — ${PI_CODING_AGENT_DIR:-~/.pi/agent}/skills; dsh — ${DSH_HOME:-~/.dsh}/skills; all — the four)",
     )
     install_parser.add_argument("--force", action="store_true", help="Overwrite an existing long-task-callback skill")
 
@@ -5730,10 +5794,11 @@ def main() -> int:
                               help="Coordinator hosting: systemd on Linux, launchd on macOS, Task Scheduler on Windows")
     setup_parser.add_argument("--skill-path", help="Skills directory to install into (overrides --skill-target)")
     setup_parser.add_argument("--with-pi-extension", action="store_true", help="Also install Pi's native live callback extension")
+    setup_parser.add_argument("--with-dsh", action="store_true", help="Also install the DeepSeek Harness skill and record its launcher")
     setup_parser.add_argument(
         "--skill-target",
         choices=SKILL_TARGETS,
-        help="Agent home to install the skill into (default: both; all with --with-pi-extension)",
+        help="Agent home to install the skill into (default: both; all with --with-pi-extension or --with-dsh)",
     )
     setup_parser.add_argument("--name", default="codex-long-task-wakeup", help="Service name / LaunchAgent label")
     setup_parser.add_argument("--queue-dir", help="Wakeup queue directory")
@@ -5747,6 +5812,7 @@ def main() -> int:
     setup_parser.add_argument("--codex-bin", help="Path to codex executable used by the daemon")
     setup_parser.add_argument("--claude-bin", help="Path to claude executable used by the daemon")
     setup_parser.add_argument("--pi-bin", help="Path to the PI Agent executable used by the daemon")
+    setup_parser.add_argument("--dsh-bin", help="Path to the DeepSeek Harness dsh launcher used by the daemon")
     setup_parser.add_argument("--path", help="PATH environment for the daemon service")
     add_proxy_environment_flags(setup_parser)
     setup_parser.add_argument("--force", action="store_true", help="Overwrite an existing skill and service file")
@@ -5761,11 +5827,12 @@ def main() -> int:
 
     wait_parser = sub.add_parser(
         "wait",
-        help="Claude Code only: block until this session's callback is ready, then print it (run in the background)",
+        help="Claude Code or DeepSeek Harness: block until this session's callback is ready, then print it (run in the background)",
     )
     wait_parser.add_argument("--queue-dir", help="Wakeup queue directory")
     wait_parser.add_argument("--task", help="Only wait for this managed task's callback")
-    wait_parser.add_argument("--session", help="Claude Code session id (default: $CLAUDE_CODE_SESSION_ID)")
+    wait_parser.add_argument("--agent", choices=AGENT_NAMES, help="Live agent that owns the session (default: detect from the environment)")
+    wait_parser.add_argument("--session", help="Session id (default: $CLAUDE_CODE_SESSION_ID or $DSH_SESSION_ID)")
     wait_parser.add_argument("--timeout", type=float, help="Give up after this many seconds (exit 3)")
     wait_parser.add_argument("--poll-interval", type=float, default=1.0, help=argparse.SUPPRESS)
 

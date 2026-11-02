@@ -139,6 +139,7 @@ nav:
       - Codex CLI: integrations/codex.md
       - Claude Code: integrations/claude.md
       - Pi: integrations/pi.md
+      - DeepSeek Harness: integrations/dsh.md
       - Codex Desktop: integrations/desktop.md
   - 参考:
       - 命令速查: reference/cli.md

@@ -26,6 +26,7 @@ class CodexAdapter:
     parent_env_names = (CODEX_THREAD_ID_ENV,)
     detection_priority = 0
     child_result_mode: Literal["file", "stdout"] = "file"
+    supports_model = True
     supports_reasoning_effort = True
     reasoning_efforts = CODEX_REASONING_EFFORTS
     supports_system_prompt_file = False

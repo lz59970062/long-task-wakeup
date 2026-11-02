@@ -316,9 +316,10 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
     adapter = get_agent(callback_agent)
     executables: dict[str, str] = {}
     callback_executable = shutil.which(adapter.executable(cli.agent_environment(callback_agent)))
-    if callback_executable is None:
+    live_only = cli.is_live_delivery({"agent": callback_agent})
+    if callback_executable is None and not live_only:
         issues.append({"code": "callback_agent_unavailable", "action": "Make the selected callback Agent CLI available in the coordinator's environment."})
-    else:
+    elif callback_executable is not None:
         executables[callback_agent] = callback_executable
     child_agent = getattr(args, "agent_worker", None)
     if operation == "agent" and not child_agent:
@@ -356,19 +357,19 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
                        "action": capability.get("action", "Repair the original session's callback route; do not resubmit saved work.")})
 
     skill_home = {"codex": cli.codex_home, "claude": cli.claude_home,
-                  "pi": cli.pi_callback.profile_dir}.get(callback_agent or "", lambda: None)()
+                  "pi": cli.pi_callback.profile_dir, "dsh": cli.dsh_home}.get(callback_agent or "", lambda: None)()
     if skill_home is not None and not (skill_home / "skills" / "long-task-callback" / "SKILL.md").is_file():
         issues.append({"code": "skill_missing", "action": "Install the bundled LTC skill for the selected Agent so it can inspect, acknowledge and continue callbacks."})
 
     repair = worker_command("setup", "--queue-dir", str(root), "--backend", choice,
                             "--service", "auto")
-    if callback_agent in {"codex", "claude", "pi"}:
+    if callback_agent in {"codex", "claude", "pi", "dsh"}:
         repair.extend(["--skill-target", callback_agent])
     repair.extend(["--keep-skill", "--force", "--now"])
     if operation == "done":
         repair.append("--callback-only")
     for agent, executable in executables.items():
-        if agent in {"codex", "claude", "pi"}:
+        if agent in {"codex", "claude", "pi", "dsh"}:
             repair.extend([f"--{agent}-bin", executable])
     recheck = worker_command("doctor", "--queue-dir", str(root), "--backend", choice,
                              "--agent", callback_agent, "--operation", operation)
@@ -411,7 +412,25 @@ def inspect(args: argparse.Namespace) -> dict[str, object]:
     }
     if callback_agent == "claude":
         report["claude_code"] = claude_code_profile(callback_executable)
+    elif callback_agent == "dsh":
+        report["dsh"] = dsh_profile(callback_executable)
     return report
+
+
+def dsh_profile(executable: str | None) -> dict[str, object]:
+    """Explain DSH's single callback route."""
+    return {
+        "executable": executable,
+        "live_callback": (
+            "Run `ltc wait --task <id>` as a background job; the DSH job notification wakes the session "
+            "when the callback is queued."
+        ),
+        "headless_fallback": "unavailable: DSH desktop sessions cannot be resumed headlessly",
+        "child_agents": (
+            "available through `dsh --profile headless`; that profile needs DEEPSEEK_API_KEY or restored "
+            "stored credentials" if executable is not None else "unavailable: no dsh launcher found"
+        ),
+    }
 
 
 def claude_code_profile(executable: str | None) -> dict[str, object]:

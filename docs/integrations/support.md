@@ -12,6 +12,7 @@ Harness 指运行 Agent 的外层程序：它管理会话、调用模型、执�
 | Claude Code CLI | `ltc agent claude` | 后台 `ltc wait` 实时接收；独立 CLI 可恢复会话 | 子 Agent、CLI 恢复从 0.7.0 起；实时回调为 0.7.1 预览，Linux/macOS 已验证 |
 | Claude 桌面应用的 Code 会话 | 子任务通过已登录的独立 Claude CLI 执行 | 后台 Bash 运行 `ltc wait` | 0.7.1 预览；macOS 本地会话、Linux SSH 会话已验证 |
 | Pi | `ltc agent pi` | 扩展向当前进程发送 steer 消息；`ltc pi` 增加关闭后的会话恢复 | 0.7.1 预览；Linux、Pi 0.87.1 有验证记录，macOS/Windows 待验证 |
+| DeepSeek Harness（DSH） | `ltc agent dsh` | 后台 `ltc wait` 作为 DSH 作业运行，作业完成通知唤醒同一会话；DSH 不支持 headless 恢复 | 当前分支新增；macOS 桌面会话的提交、作业通知和 ACK 已验证 |
 | Codex Desktop | 子任务使用 Codex CLI | 公开命令 `codex queue`，自动选择（`--callback-mode codex-queue`） | 0.7.1 预览；新安装路径的真实 Desktop 重启、接收和 ACK 验收待完成 |
 
 子 Agent 与接收方可以组合。例如在 Codex 中执行 `ltc agent claude`，Claude 执行任务，结果回到 Codex。操作步骤见 [Codex](codex.md)、[Claude](claude.md)、[Pi](pi.md)和 [Desktop](desktop.md)。
@@ -24,9 +25,8 @@ Claude 还提供 `ltc claude` channel 研究预览入口，已记录 Linux 上 C
 | --- | --- | --- |
 | Gemini CLI、OpenCode、Aider、Goose | 可将已配置的命令行任务放在 `ltc run -- <命令>` 后执行，结果交回现有接收方 | 实现各自的子 Agent 参数、会话识别和回调传输；逐项进行端到端验证 |
 | LangGraph、AutoGen、CrewAI、自定义 Agent SDK 程序 | 将工作流保存为脚本，通过 `ltc run` 执行，或在已有任务末尾调用 `ltc done` | 为接收回调的会话实现适配器与唤醒通道 |
-| DSH | 仓库路线图中规划了适配器 | 完成实现与验证后加入原生接入表 |
 
-这些框架目前处于通用命令接入层，仓库原生适配器注册表包含 `codex`、`claude`、`pi`。开始接入时，先让脚本打印一行结果并正常退出，再检查日志、回调和 ACK；随后接入实际工作流。脚本示例见[典型使用场景](../guides/use-cases.md#运行自定义-agent-工作流)。
+这些框架目前处于通用命令接入层，仓库原生适配器注册表包含 `codex`、`claude`、`pi`、`dsh`。开始接入时，先让脚本打印一行结果并正常退出，再检查日志、回调和 ACK；随后接入实际工作流。脚本示例见[典型使用场景](../guides/use-cases.md#运行自定义-agent-工作流)。
 
 ## 执行环境
 

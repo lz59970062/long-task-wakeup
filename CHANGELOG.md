@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.1a4 — unreleased
+
+- Add DeepSeek Harness (`dsh`) as a callback parent and child worker. A submission
+  from a DSH shell binds `DSH_SESSION_ID`; a background `ltc wait` job exits when
+  the callback is queued, and DSH's job completion notification wakes the same
+  conversation. DSH callbacks are live-only: the desktop preset cannot be
+  resumed by `dsh --profile headless`, so an unclaimed callback stays queued until
+  the same session waits again.
+- `ltc agent dsh` runs `dsh --profile headless` with the prompt on stdin and
+  captures the final answer from stdout. It strips the parent DSH markers and
+  keeps provider credentials.
+- `ltc setup --with-dsh` installs the focused DSH skill under
+  `${DSH_HOME:-~/.dsh}/skills/long-task-callback` and records `--dsh-bin` for the
+  coordinator. `ltc doctor --agent dsh` explains the live-only route.
+
 ## 0.7.1a3 — unreleased
 
 ### Native Codex queue

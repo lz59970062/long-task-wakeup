@@ -192,7 +192,7 @@ class ChannelServer:
                     request = json.loads(path.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     continue
-                if (not isinstance(request, dict) or not claude_code._matches(request, self.session, None)
+                if (not isinstance(request, dict) or not claude_code._matches(request, "claude", self.session, None)
                         or cli.ack_path(self.root, callback_id).exists()):
                     continue
                 pushed_at = self.pushed.get(callback_id)

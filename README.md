@@ -9,7 +9,7 @@
   <a href="./CHANGELOG.md"><img src="https://img.shields.io/badge/preview-0.7.1a1-a371f7" alt="Preview 0.7.1a1"></a>
   <img src="https://img.shields.io/badge/python-%E2%89%A53.9-3776ab" alt="Python ≥ 3.9">
   <img src="https://img.shields.io/badge/platforms-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-58a6ff" alt="Linux, macOS, Windows">
-  <img src="https://img.shields.io/badge/agents-Codex%20%C2%B7%20Claude%20Code%20%C2%B7%20Pi-d29922" alt="Works with Codex, Claude Code and Pi">
+  <img src="https://img.shields.io/badge/agents-Codex%20%C2%B7%20Claude%20Code%20%C2%B7%20Pi%20%C2%B7%20DSH-d29922" alt="Works with Codex, Claude Code, Pi and DeepSeek Harness">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT license"></a>
 </p>
 
@@ -25,7 +25,7 @@
 
 ## The problem
 
-You ask Codex or Claude Code to train a model, run a benchmark, or build a big project. The job takes
+You ask Codex, Claude Code, Pi or DeepSeek Harness to train a model, run a benchmark, or build a big project. The job takes
 two hours. Now what?
 
 - The agent **polls** with `sleep && tail` — burning turns, tokens and context on nothing.
@@ -63,11 +63,12 @@ Session: <session-id> (only)
 | | |
 | --- | --- |
 | 🛌 **No polling** | The worker and daemon wait for you. No model turns are spent while the task runs. |
-| 🔁 **Same conversation** | Callbacks are bound to the original Codex (`CODEX_THREAD_ID`) or Claude Code (`CLAUDE_CODE_SESSION_ID`) session — never a guess. |
+| 🔁 **Same conversation** | Callbacks are bound to the original Codex (`CODEX_THREAD_ID`), Claude Code (`CLAUDE_CODE_SESSION_ID`), Pi (`PI_SESSION_FILE`) or DeepSeek Harness (`DSH_SESSION_ID`) session — never a guess. |
 | 🧱 **Survives the agent** | Tasks run under systemd, launchd or Task Scheduler — not as a child of the agent turn or even the daemon. |
 | ⚡ **Claude Code native** | In Claude Code (CLI or desktop app), a background `ltc wait` wakes the conversation you're looking at — no headless side session. → [Claude Code guide](docs/claude-code.md) |
 | 🥧 **Pi native** | Pi's extension steers the result into the running Pi session — even mid-run, before its next model call. → [Pi guide](docs/pi.md) |
-| 🤖 **Child agents** | `ltc agent codex\|claude\|pi` launches a fresh agent as a durable background job, with reusable prompt templates. |
+| 🧭 **DeepSeek Harness native** | A background `ltc wait` runs as a DSH job; its completion notification wakes the same conversation. DSH has no headless fallback, so delivery is always the original live session. → [DSH guide](docs/dsh.md) |
+| 🤖 **Child agents** | `ltc agent codex\|claude\|pi\|dsh` launches a fresh agent as a durable background job, with reusable prompt templates. |
 | 🎯 **Multi-stage goals** | Track an objective across many callbacks with a YAML plan that the agent must verify before declaring victory. |
 | 🛡️ **Never reruns blindly** | Ambiguous launches, reboots and failures are reported to the agent for inspection — LTC never silently replays work. |
 | 🩺 **Self-repairing setup** | When something is misconfigured, the agent gets a machine-readable repair plan and fixes it itself. |
@@ -82,6 +83,7 @@ python3 -m pip install "git+https://github.com/lz59970062/long-task-wakeup.git@v
 # 2. Install the skill for Codex + Claude Code and start the background daemon
 ltc setup --force --enable --now
 #    Using Pi too? Add --with-pi-extension (Pi skill + live-callback extension)
+#    Using DeepSeek Harness too? Add --with-dsh (skill + launcher discovery)
 
 # 3. Check that everything is healthy
 ltc --version
@@ -89,7 +91,7 @@ ltc doctor --agent codex --session <session-id>
 ```
 
 That's it. `setup` installs the bundled skill, so your agent already knows when and how to use `ltc`.
-From inside a Codex or Claude Code session, just ask it to run something long.
+From inside a Codex, Claude Code or DeepSeek Harness session, just ask it to run something long.
 
 <details>
 <summary><b>Platform requirements</b></summary>
@@ -173,6 +175,20 @@ Returns as soon as the task is durable, printing the task ID, backend and log fi
 ```bash
 tail -f ~/.ltc/tasks/<task-id>/attempt-1.log
 ```
+
+### DeepSeek Harness: wake the live session
+
+DSH keeps background jobs alive across turns and notifies the conversation when one exits. After
+`ltc run`, it prints the exact command to start with `run_in_background: true`:
+
+```bash
+ltc wait --queue-dir ~/.ltc/queue --task <task-id>
+```
+
+Read the finished job's output with `job_output`; that output is the callback. DSH's one-shot
+runner refuses desktop-preset sessions, and a second writer would race the live writer lock, so LTC
+never resumes a DSH conversation headlessly: with no waiter the callback stays queued until this
+session runs `ltc wait` again. → [DSH guide](docs/dsh.md)
 
 ### Claude Code: wake the live session
 
@@ -303,6 +319,7 @@ Use `--service standalone --now` where user systemd is unavailable (e.g. AutoDL)
 | --- | --- |
 | Claude Code: live callbacks, binary discovery, session directories | [docs/claude-code.md](docs/claude-code.md) |
 | Pi: steered live callbacks, managed sessions, Pi child agents | [docs/pi.md](docs/pi.md) |
+| DeepSeek Harness: live jobs, no headless resume, DSH child agents | [docs/dsh.md](docs/dsh.md) |
 | Agent mode, templates, Claude Code config | [docs/agent-mode.md](docs/agent-mode.md) |
 | Registering templates as discoverable skills | [docs/template-registration.md](docs/template-registration.md) |
 | Goals and acknowledgement layers | [docs/goals.md](docs/goals.md) |
@@ -322,7 +339,7 @@ Use `--service standalone --now` where user systemd is unavailable (e.g. AutoDL)
 - [ ] Explicit callback modes and native Codex queue delivery (0.7.1 preview)
 - [ ] Claude Code live callbacks via `ltc wait` (0.7.1 preview; verified on macOS and Linux)
 - [ ] Pi agent adapter: child worker and steered live callbacks (0.7.1 preview; verified on Linux)
-- [ ] DSH agent adapter
+- [ ] DeepSeek Harness adapter: child worker and live `ltc wait` callbacks (0.7.1 preview)
 
 ## License
 

@@ -42,8 +42,8 @@ class PiAdapterContractTests(unittest.TestCase):
         )
 
     def test_pi_is_registered_as_both_a_child_worker_and_a_callback_parent(self):
-        self.assertEqual(set(AGENTS.names), {"codex", "claude", "pi"})
-        self.assertEqual(set(CHILD_AGENT_NAMES), {"codex", "claude", "pi"})
+        self.assertEqual(set(AGENTS.names), {"codex", "claude", "pi", "dsh"})
+        self.assertEqual(set(CHILD_AGENT_NAMES), {"codex", "claude", "pi", "dsh"})
         self.assertIs(get_agent("pi"), get_child_agent("pi"))
         for environment, expected in (
             ({"PI_SESSION_FILE": "/pi/session.jsonl"}, "pi"),

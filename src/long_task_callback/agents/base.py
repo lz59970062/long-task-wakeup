@@ -43,6 +43,7 @@ class ChildAgentAdapter(Protocol):
     display_name: str
     parent_env_names: tuple[str, ...]
     child_result_mode: Literal["file", "stdout"]
+    supports_model: bool
     supports_reasoning_effort: bool
     reasoning_efforts: tuple[str, ...]
     supports_system_prompt_file: bool

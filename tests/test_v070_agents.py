@@ -33,8 +33,8 @@ class FixtureAdapter:
 
 class AgentRegistryTests(unittest.TestCase):
     def test_current_registry_rejects_unimplemented_agents_without_fallback(self) -> None:
-        self.assertEqual(set(AGENTS.names), {"codex", "claude", "pi"})
-        for name in ("dsh", "unknown", "", "Codex"):
+        self.assertEqual(set(AGENTS.names), {"codex", "claude", "pi", "dsh"})
+        for name in ("unknown", "", "Codex"):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 get_agent(name)
 
@@ -89,10 +89,16 @@ class AgentRegistryTests(unittest.TestCase):
     def test_native_resume_commands_preserve_bound_session_and_reject_malformed_targets(self) -> None:
         for name in AGENTS.names:
             adapter = get_agent(name)
-            with self.subTest(agent=name):
-                command = adapter.resume_command({"target": {"kind": "session", "value": "bound-session"}}, {})
-                self.assertIn("bound-session", command)
-                self.assertNotIn("--last", command)
+            if name == "dsh":
+                # DSH has no headless callback resume; only malformed targets
+                # share the common validation contract.
+                with self.subTest(agent=name), self.assertRaises(ValueError):
+                    adapter.resume_command({"target": {"kind": "session", "value": "bound-session"}}, {})
+            else:
+                with self.subTest(agent=name):
+                    command = adapter.resume_command({"target": {"kind": "session", "value": "bound-session"}}, {})
+                    self.assertIn("bound-session", command)
+                    self.assertNotIn("--last", command)
             for target in (None, {}, {"kind": "session", "value": ""}, {"kind": "future-unknown"}):
                 with self.subTest(agent=name, target=target), self.assertRaises(ValueError):
                     adapter.resume_command({"target": target}, {})

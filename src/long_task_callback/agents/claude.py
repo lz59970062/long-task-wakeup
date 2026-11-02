@@ -22,6 +22,7 @@ class ClaudeAdapter:
     # environment markers: Claude's explicit marker/session takes precedence.
     detection_priority = 10
     child_result_mode: Literal["file", "stdout"] = "stdout"
+    supports_model = True
     supports_reasoning_effort = False
     reasoning_efforts: tuple[str, ...] = ()
     supports_system_prompt_file = False
