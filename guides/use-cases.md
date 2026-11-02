@@ -72,6 +72,6 @@ Have the script save its report and intermediate artifacts. Results return to th
 | Codex CLI | Submit in the current conversation; the coordinator resumes that session |
 | Claude Code CLI or desktop Code session | Run the printed `ltc wait` command as a background Bash task |
 | Pi | Install the extension for live callbacks; launch through `ltc pi` for recovery after closing |
-| Codex Desktop | Use the preview shared Core launcher, then check delivery with a small task |
+| Codex Desktop | Start Desktop normally; the preview delivers through `codex queue`. Check it with a small task |
 
 See [Harness support](../integrations/support.md) for versions and validation records.

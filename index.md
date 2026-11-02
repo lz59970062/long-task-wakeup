@@ -31,7 +31,7 @@ For worked examples, see [Use cases](guides/use-cases.md).
 
 LTC runs on Linux, macOS, and Windows. Follow [Installation](installation.md), then choose your Agent: [Codex CLI](integrations/codex.md), [Claude Code](integrations/claude.md), [Pi](integrations/pi.md), or [Codex Desktop](integrations/desktop.md). The [support matrix](integrations/support.md) lists versions, callback routes, and validation records.
 
-The quickstart uses stable version `0.7.0`. Claude live callbacks, Pi, and the Desktop launcher use the `0.7.1` preview, with setup steps on each integration page.
+The quickstart uses stable version `0.7.0`. Claude live callbacks, Pi, and Codex Desktop callbacks use the `0.7.1` preview, with setup steps on each integration page.
 
 ## Keep reading
 

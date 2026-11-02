@@ -17,8 +17,6 @@ Use these references to inspect the implementation, extend a backend, or investi
 - [macOS](https://github.com/lz59970062/long-task-wakeup/blob/main/docs/macos.md)
 - [Windows](https://github.com/lz59970062/long-task-wakeup/blob/main/docs/windows.md)
 - [Docker and AutoDL](https://github.com/lz59970062/long-task-wakeup/blob/main/docs/containers.md)
-- [macOS Desktop integration](https://github.com/lz59970062/long-task-wakeup/blob/main/docs/macos-desktop-bridge.md)
-- [Windows Desktop integration](https://github.com/lz59970062/long-task-wakeup/blob/main/docs/windows-desktop-bridge.md)
 - [Claude Code](https://github.com/lz59970062/long-task-wakeup/blob/main/docs/claude-code.md)
 - [Pi](https://github.com/lz59970062/long-task-wakeup/blob/main/docs/pi.md)
 

@@ -51,7 +51,7 @@ Place LTC, the Agent, the working directory, and the session files in the same r
 
 ## Install the preview
 
-The `0.7.1` preview includes Claude live callbacks, Pi integration, and the Desktop launcher. Install the current `main` branch in a new directory:
+The `0.7.1` preview includes Claude live callbacks, Pi integration, and Codex Desktop callbacks. Install the current `main` branch in a new directory:
 
 ```bash
 git clone https://github.com/lz59970062/long-task-wakeup.git ltc-preview
