@@ -57,7 +57,9 @@ dsh: session "session-…" runs under agent preset "standard", which the one-sho
 - 没有 waiter 时，回调保持排队，直到原会话再次运行 `ltc wait`；`ltc status` 仍能看到它；
 - DSH 不会出现 wait 退出码 4；退出码 3 表示等待超时，回调仍在队列中。
 
-这与普通 Pi 会话的保证一致：只在原进程存活时投递，且 LTC 不会猜测替代 owner。
+这与普通 Pi 会话的保证一致：只在原进程存活时投递，且 LTC 不会猜测替代 owner。一次性
+`dsh --profile headless` 运行在回答后即退出，请勿在其中提交 LTC 任务；请使用存活的桌面会话或
+交互式 CLI 会话。
 
 ## DSH 作为子 Agent
 

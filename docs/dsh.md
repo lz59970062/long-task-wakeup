@@ -65,7 +65,9 @@ session headlessly**:
   the wait timed out and the callback is still queued.
 
 This is the same guarantee as an ordinary Pi session: delivery happens only while the original
-process is alive, and LTC never guesses a replacement owner.
+process is alive, and LTC never guesses a replacement owner. A one-shot
+`dsh --profile headless` run exits after its turn, so do not submit LTC work from it; use a live
+desktop or interactive CLI session.
 
 ## DSH as a child agent
 
