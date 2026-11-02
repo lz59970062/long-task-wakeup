@@ -30,9 +30,15 @@
   `--desktop-app`, `--desktop-launch-mode` and `--no-desktop-launcher` are accepted and ignored.
   `ltc desktop` only explains the replacement, so an old launcher tells the user what to do.
 - `--callback-mode desktop` is refused for new work and for `ltc retry`, naming `codex-queue`.
-- Saved `desktop` tasks and callbacks keep their results and route: a connection that still works
-  delivers them as before, and a blocked one waits in `failed` naming
-  `ltc retry --id ID --callback-mode codex-queue`, which does not rerun the workload.
+- Remove the launcher, its shared Core and the Windows bridge: `desktop_bridge`, `desktop_core`,
+  `desktop_connection`, the Mac and Windows launcher modules and assets, `platforms/windows_tcp`,
+  `examples/windows`, the `ltc-desktop-core` entry point and
+  `CODEX_LONG_TASK_WAKEUP_DESKTOP_BRIDGE_FILE`. LTC no longer connects to a Core that is still
+  running; quit Desktop and open it normally.
+- Saved `desktop` tasks and callbacks keep their results and still load. On macOS and Windows they
+  wait in `failed` naming `ltc retry --id ID --callback-mode codex-queue`, which does not rerun the
+  workload. On Linux they keep delivering through the local App Server socket. The removal has been
+  tested on Linux only; the deleted macOS and Windows paths could not be run.
 
 ## 0.7.1a2 — unreleased
 

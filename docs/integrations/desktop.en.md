@@ -39,7 +39,7 @@ Update the coordinator before using this route: new records are callback version
 
 ## Move a callback saved for the old launcher
 
-The launcher and its shared Core are retired. `ltc setup` no longer generates them and `--callback-mode desktop` is refused for new work. A saved `desktop` callback keeps its results and its route: it is delivered if its connection still works, and otherwise waits in `failed`. Move it with:
+The launcher and its shared Core are gone. `ltc setup` no longer generates them and `--callback-mode desktop` is refused for new work. A saved `desktop` callback keeps its results. On macOS and Windows it waits in `failed`; on Linux it keeps delivering through the local App Server socket and only waits in `failed` if that socket is unavailable. Move it with:
 
 ```bash
 ltc retry --id ID --callback-mode codex-queue

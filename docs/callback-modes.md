@@ -55,9 +55,18 @@ Desktop already gets callbacks through the queue. `setup --desktop-app`,
 install scripts keep working, and setup names leftover launcher files without
 deleting them.
 
-Saved `desktop` records and tasks keep their results and route. A connection that
-still works delivers them as before; otherwise they wait in `failed/` naming
-`ltc retry --id ID --callback-mode codex-queue`, which does not rerun the workload.
+Saved `desktop` records and tasks keep their results and route, and still load. The
+launcher's shared Core was the only way to deliver them on macOS and Windows, so
+there they wait in `failed/` with `delivery_state: blocked`, and `last_error` names
+the command:
+
+```bash
+ltc retry --id <callback-id> --callback-mode codex-queue
+```
+
+The workload does not run again. Linux records keep delivering through the local App
+Server socket, which never needed the launcher, and the same command moves them if
+that socket is unavailable.
 
 ## Readiness and recovery
 
@@ -76,7 +85,7 @@ only actual receipt and ACK establish a successful callback. A tool sandbox may
 deny socket/process access; retry the check through an authorized ordinary-user
 execution context rather than weakening peer checks.
 
-A definite App Server writer conflict or explicit bridge failure is retained in
+A definite App Server writer conflict or a blocked Desktop route is retained in
 `failed/` with `delivery_state: blocked`. It does not spend retries attempting a
 second writer. Other transient failures retain the existing retry policy.
 Unknown submission outcomes retain their cross-queue lease and cannot be retried
@@ -108,14 +117,12 @@ instead of ignoring manual intent or resuming a thread an open chat owns, and ke
 the record with its results; `ltc retry` delivers it after the upgrade. Old task and
 callback versions remain readable. Do not downgrade a queue containing new work.
 
-Acceptance is by OS **and connection**, not OS alone: CLI, shared Desktop,
-unconfigured Desktop, restart, owner change, lost response, and duplicate receipt.
+Acceptance is by OS **and connection**, not OS alone: CLI,
+native queue, restart, owner change, lost response, and duplicate receipt.
 The 2026-09-26 Mac success `9e4dabc9` occurred in a `source=vscode` conversation.
 On 2026-09-27 Desktop resumed that same conversation into its separate stdio Core;
 the 60.014-second workload `bdfd671d` completed, but its callback hit an active
 writer conflict. Those two observations are separate evidence, not interchangeable
 proof of Mac Desktop acceptance.
 
-The earlier launcher notes remain as history: [Mac](macos-desktop-bridge.md),
-[Windows](windows-desktop-bridge.md). See the
-[queue validation record](validation-codex-queue.md) for what has been run.
+See the [queue validation record](validation-codex-queue.md) for what has been run.

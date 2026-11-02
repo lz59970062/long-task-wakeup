@@ -247,10 +247,7 @@ for the new queue. Do not copy another machine's session binding.
 
 Use native argument lists. Recognized npm/forwarding `.cmd` launchers are resolved
 without a shell; unsupported wrappers require their underlying executable.
-Windows callbacks default to CLI resume of the actual original session. An
-experimental shared-server bridge is available only through explicit setup;
-its package-context route passed real Desktop original-session receipt/ACK on
-2026-09-27 on one tested installation. It remains experimental. Execute the callback's emitted
+Windows callbacks default to CLI resume of the actual original session. Execute the callback's emitted
 PowerShell ACK verbatim, including its leading `&` and quoted paths. ACK confirms
 receipt only, not goal completion. Never replace the target with `--last`.
 
@@ -258,16 +255,9 @@ On Windows, Desktop sessions use `codex-queue` like any other platform (not yet 
 natively). A live Windows test with Codex 0.153.4 could not resume its open Desktop session:
 the CLI reported `already has an active writer`. Ending an Agent turn does not
 guarantee that Desktop releases this owner. Preserve the failed callback and
-report this transport limitation; do not delete Codex's writer lock, forge an
+report this transport limitation or move it to `codex-queue`; do not delete Codex's writer lock, forge an
 ACK, change the bound session or rerun the business work. Native workload and
 fake-Agent delivery tests do not establish live original-session receipt.
-
-For the experimental bridge, follow the repository's `docs/windows-desktop-bridge.md`.
-It requires Desktop and LTC to use one App Server and the explicit
-`CODEX_LONG_TASK_WAKEUP_DESKTOP_BRIDGE_FILE` metadata path. Never guess a port or
-expose an unauthenticated App Server. The supplied launcher refuses a running
-Desktop; switching its connection requires closing active Desktop work first.
-After explicit bridge selection, connection failure must not fall back to CLI.
 
 New private files/directories grant only the current user and SYSTEM access.
 Do not weaken those ACLs to work around an Agent sandbox's restricted token;

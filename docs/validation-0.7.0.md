@@ -80,6 +80,6 @@ native test helpers explicitly use the source checkout.
 - The optional Windows Codex Desktop bridge remains experimental. Its tested
   package-context route is not a guarantee for other Desktop versions, all App
   Tools flows, or normal package activation. The default CLI active-writer limit
-  remains; see [bridge setup and limits](windows-desktop-bridge.md).
+  remains. The bridge was later removed; its notes remain in git history.
 - Native PI/DSH adapters and npm/frozen distribution remain future work. No live
   Claude end-to-end callback is claimed by these release checks.

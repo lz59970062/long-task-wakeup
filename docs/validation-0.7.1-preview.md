@@ -2,7 +2,7 @@
 
 This is an unreleased preview on `codex/macos-desktop-callback`, based on the
 0.7.0 release `f2695b8`. Native execution and live callback acceptance are
-reported separately.
+reported separately. The launcher and bridge this record describes were later removed; their code and notes remain in git history.
 
 ## Completed checks
 

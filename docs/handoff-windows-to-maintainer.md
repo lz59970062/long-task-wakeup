@@ -1,5 +1,7 @@
 # LTC 0.7.0：Windows 完成后的开发交接
 
+> 后续状态：下文的 Desktop 桥接、启动器和 `examples/windows` 已移除，代码和说明保留在 git 历史中。Desktop 回调改用 `codex-queue`，见 [回调模式](callback-modes.md)。下文保留为历史基线。
+
 交接日期：2026-09-27。后续统一在 **`codex/0.7.0-preview`** 上继续开发。
 Windows 临时分支 `codex/windows-support` 已快进合入此分支；不要再次从旧 Mac
 基线开始 Windows 适配。临时分支保留作历史引用，不作为后续开发入口。
@@ -104,7 +106,7 @@ GUI、一次 App Tools 调用及原会话 receipt/ACK 均已验证。
    Core 0.155.0-alpha.9.2；没有承诺所有版本和所有 App Tools 流程兼容。
 2. 测试的 Store 版 Desktop 默认直接启动路线仍报 Win32 error 5。
    `-PackageContext` 使用微软诊断工具的包上下文；其 token 和其他行为不保证等同正常激活。
-   先阅读 [桥接文档](windows-desktop-bridge.md)，预检成功且用户保存工作、关闭 Desktop 后再启动。
+   先阅读桥接文档，预检成功且用户保存工作、关闭 Desktop 后再启动。
 3. 默认 CLI resume 仍可能受打开的 Desktop 会话的 active-writer 约束。
    不得删除 writer 锁、换成 `--last`、伪造 ACK 或重跑已完成的业务任务掩盖投递失败。
 4. Windows 依赖已登录的交互用户；不是注销后仍工作的系统服务。注销、重启可中断任务，
@@ -114,7 +116,7 @@ GUI、一次 App Tools 调用及原会话 receipt/ACK 均已验证。
 ## 可直接交给接手 Agent 的任务说明
 
 > 在 `codex/0.7.0-preview` 继续维护 LTC 0.7.0a1，不要再创建 Windows 专用开发分支。
-> 先读本交接、`docs/windows.md`、`docs/windows-desktop-bridge.md`、
+> 先读本交接、`docs/windows.md`、
 > `docs/validation-windows.md`、`docs/architecture.md` 和根目录 `SKILL.md`。
 > 核对实际 HEAD、本机协调器队列及 Desktop 桥接状态，保留正在运行的任务和用户配置。
 > Windows 原生执行及指定 Desktop 路线的真实回调已完成，不要重复实现或重复跑旧业务任务。

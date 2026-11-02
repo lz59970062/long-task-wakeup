@@ -6,9 +6,7 @@ not a guarantee that the owner, connection or authentication will stay alive.
 from __future__ import annotations
 
 import argparse
-import json
 import os
-from pathlib import Path
 import sys
 
 # `desktop` stays parseable only to answer it with the replacement. Saved records
@@ -18,28 +16,6 @@ OFFERED_MODES = tuple(mode for mode in MODES if mode != "desktop")
 ROUTE_FIELDS = ("callback_mode", "callback_origin", "callback_bridge_file",
                 "callback_codex_bin", "callback_codex_home",
                 "pi_callback_protocol", "pi_profile_dir", "pi_channel_root", "pi_delivery")
-
-
-def configuration_path(profile: Path) -> Path:
-    return profile / "long-task-wakeup" / "desktop.json"
-
-
-def bridge_file(profile: Path) -> Path:
-    raw = os.environ.get("CODEX_LONG_TASK_WAKEUP_DESKTOP_BRIDGE_FILE")
-    if raw:
-        return Path(raw).expanduser().absolute()
-    config = configuration_path(profile)
-    try:
-        record = json.loads(config.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        if sys.platform == "win32":
-            return profile / "long-task-wakeup" / "desktop-bridge.json"
-        return profile / "long-task-wakeup" / "desktop" / "bridge.json"
-    if (not isinstance(record, dict) or record.get("version") != 1
-            or record.get("codex_home") != str(profile.resolve())
-            or not isinstance(record.get("metadata"), str) or not Path(record["metadata"]).is_absolute()):
-        raise ValueError("Desktop configuration is invalid for this profile")
-    return Path(record["metadata"])
 
 
 def desktop_route_repair(request: dict[str, object]) -> str:
@@ -94,7 +70,7 @@ def inspect_route(request: dict[str, object], *, timeout: float = 2) -> dict[str
         endpoint = cli.desktop_app_server_socket(request)
         if endpoint is None:
             if mode == "desktop":
-                raise ValueError("Desktop bridge not selected")
+                raise ValueError("Desktop App Server not selected")
             return dict(report, transport="cli_resume", reason="session_delivery_not_probed")
         connection = cli.AppServerConnection(endpoint, timeout)
         connection.connect()
@@ -117,10 +93,10 @@ def inspect_route(request: dict[str, object], *, timeout: float = 2) -> dict[str
         return dict(report, status="blocked" if mode == "desktop" else "unverified",
                     transport="app_server", reason="bound_session_not_loaded",
                     action=(f"Run {desktop_route_repair(request)}; an idle or absent listing is not permission to take another Core's writer."
-                            if mode == "desktop" else "Open the original session through the configured shared Core; an idle or absent listing is not permission to take another Core's writer."))
+                            if mode == "desktop" else "Open the original session through the Core this socket reaches; an idle or absent listing is not permission to take another Core's writer."))
     except (OSError, ValueError, RuntimeError, TypeError):
         return dict(report, status="blocked" if mode == "desktop" else "unverified",
-                    reason="desktop_bridge_unavailable" if mode == "desktop" else "cli_resume_unverified",
+                    reason="desktop_route_unavailable" if mode == "desktop" else "cli_resume_unverified",
                     action=(f"Run {desktop_route_repair(request)}, or choose --callback-mode manual to keep the result for reading in the session."
                             if mode == "desktop" else "CLI resume remains available, but original-session receipt is not verified; inspect ownership if delivery fails."))
     finally:

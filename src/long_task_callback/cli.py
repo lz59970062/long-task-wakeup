@@ -38,7 +38,6 @@ from . import claude_code, codex_queue, pi_callback
 from . import diagnostics
 from . import storage
 from . import template_registration
-from .desktop_connection import BridgeEndpoint, UnixBridgeEndpoint, load_bridge_endpoint, load_unix_bridge_endpoint
 from .agents import AGENTS, AGENT_NAMES, CHILD_AGENT_NAMES, ChildOptions, get_agent, get_child_agent
 from .agents.base import (
     DEFAULT_APPROVALS_REVIEWER,
@@ -108,7 +107,6 @@ STANDARD_CALLBACK_GUIDANCE = "\n".join([
 DESKTOP_APP_SERVER_ENV = "CODEX_LONG_TASK_WAKEUP_DESKTOP_APP_SERVER"
 APP_SERVER_SOCKET_ENV = "CODEX_LONG_TASK_WAKEUP_APP_SERVER_SOCKET"
 ALLOW_APP_SERVER_SOCKET_OVERRIDE_ENV = "CODEX_LONG_TASK_WAKEUP_ALLOW_APP_SERVER_SOCKET_OVERRIDE"
-APP_SERVER_BRIDGE_FILE_ENV = "CODEX_LONG_TASK_WAKEUP_DESKTOP_BRIDGE_FILE"
 PROXY_ENV_NAMES = (
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -1320,8 +1318,12 @@ class CallbackTargetBusy(RuntimeError):
     """The correct Core still has an active turn; wait without consuming a retry."""
 
 
-def desktop_app_server_socket(request: dict[str, object]) -> Path | BridgeEndpoint | UnixBridgeEndpoint | None:
+def desktop_app_server_socket(request: dict[str, object]) -> Path | None:
     target = request.get("target")
+    if request.get("callback_mode") == "desktop" and sys.platform in ("darwin", "win32"):
+        # Only the retired launcher's shared Core could serve these records here.
+        raise CallbackTransportBlocked("the Desktop launcher route is retired; run "
+                                       + callback_transport.desktop_route_repair(request))
     if DESKTOP_APP_SERVER_ENV in os.environ and not truthy_env(DESKTOP_APP_SERVER_ENV):
         if request.get("callback_mode") == "desktop":
             raise CallbackTransportBlocked("Desktop App Server delivery is explicitly disabled")
@@ -1335,16 +1337,8 @@ def desktop_app_server_socket(request: dict[str, object]) -> Path | BridgeEndpoi
         or not target["value"]
     ):
         return None
-    configured_bridge = (request.get("callback_bridge_file") or os.environ.get(APP_SERVER_BRIDGE_FILE_ENV)
-                         if request.get("callback_mode") != "cli" else None)
-    if request.get("callback_mode") == "desktop" and sys.platform in ("darwin", "win32") and not configured_bridge:
-        raise CallbackTransportBlocked("Desktop callbacks require an explicitly configured shared Core")
-    if sys.platform == "darwin" and configured_bridge:
-        return load_unix_bridge_endpoint(Path(str(configured_bridge)).expanduser(), codex_home())
     if os.name == "nt":
-        if not configured_bridge:
-            return None
-        return load_bridge_endpoint(Path(configured_bridge).expanduser(), codex_home())
+        return None
     configured = os.environ.get(APP_SERVER_SOCKET_ENV)
     if configured and truthy_env(ALLOW_APP_SERVER_SOCKET_OVERRIDE_ENV):
         return Path(configured).expanduser()
@@ -1364,7 +1358,7 @@ def desktop_sandbox_policy(request: dict[str, object]) -> dict[str, object] | No
 
 
 class AppServerConnection:
-    def __init__(self, path: Path | BridgeEndpoint | UnixBridgeEndpoint, timeout: float) -> None:
+    def __init__(self, path: Path, timeout: float) -> None:
         self.path = path
         self.timeout = timeout
         self.socket: socket.socket | None = None
@@ -1375,35 +1369,17 @@ class AppServerConnection:
 
     def connect(self) -> None:
         deadline = time.monotonic() + self.timeout
-        if isinstance(self.path, BridgeEndpoint):
-            connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        else:
-            unix_path = self.path.path if isinstance(self.path, UnixBridgeEndpoint) else self.path
-            if not unix_path.is_socket():
-                raise AppServerProtocolError(f"control socket unavailable at {self.path}")
-            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        if not self.path.is_socket():
+            raise AppServerProtocolError(f"control socket unavailable at {self.path}")
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             connection.settimeout(max(0.1, deadline - time.monotonic()))
-            if isinstance(self.path, BridgeEndpoint):
-                from .platforms.windows_tcp import verify_loopback_peer
-                connection.connect(("127.0.0.1", self.path.port))
-                verify_loopback_peer(connection, expected_pid=self.path.pid,
-                                     expected_identity=self.path.identity)
-                host = f"127.0.0.1:{self.path.port}"
-            else:
-                connection.connect(str(unix_path))
-                self._verify_peer_uid(connection)
-                if isinstance(self.path, UnixBridgeEndpoint):
-                    # Darwin SOL_LOCAL / LOCAL_PEERPID, from sys/un.h.
-                    peer_pid = connection.getsockopt(0, 2)
-                    if (peer_pid != self.path.pid
-                            or macos_platform.process_identity(peer_pid) != self.path.identity):
-                        raise AppServerProtocolError("Desktop socket peer identity changed")
-                host = "localhost"
+            connection.connect(str(self.path))
+            self._verify_peer_uid(connection)
             key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
             request = (
                 "GET / HTTP/1.1\r\n"
-                f"Host: {host}\r\n"
+                "Host: localhost\r\n"
                 "Upgrade: websocket\r\n"
                 "Connection: Upgrade\r\n"
                 f"Sec-WebSocket-Key: {key}\r\n"
@@ -1702,18 +1678,13 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
         raise CallbackTransportBlocked("manual callback mode does not launch an Agent")
     if request_agent(request) != "codex":
         return None  # The Desktop App Server delivery path is Codex-only.
-    try:
-        socket_path = desktop_app_server_socket(request)
-    except (OSError, ValueError) as exc:
-        if request.get("callback_mode") == "desktop":
-            raise CallbackTransportBlocked("configured Desktop bridge is unavailable; inspect and retry this callback only") from exc
-        raise
+    socket_path = desktop_app_server_socket(request)
     target = request.get("target")
     sandbox_policy = desktop_sandbox_policy(request)
-    explicit_desktop = request.get("callback_mode") == "desktop" or isinstance(socket_path, (BridgeEndpoint, UnixBridgeEndpoint))
+    explicit_desktop = request.get("callback_mode") == "desktop"
     if socket_path is None or sandbox_policy is None or not isinstance(target, dict) or not isinstance(target.get("value"), str):
         if explicit_desktop:
-            raise CallbackTransportBlocked("Desktop callbacks require a bound session, shared Core and workspace-write callback policy")
+            raise CallbackTransportBlocked("Desktop callbacks require a bound session, an App Server socket and workspace-write callback policy")
         return None
     connection = AppServerConnection(socket_path, min(15.0, max(1.0, float(payload["timeout"]))))
     delivery_context = desktop_delivery_context(payload)
@@ -1791,14 +1762,14 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
                     )
                     return DesktopAppServerDelivery(None, target["value"], None)
             if explicit_desktop:
-                raise CallbackTransportBlocked("explicit Desktop bridge rejected the callback; CLI fallback disabled") from exc
+                raise CallbackTransportBlocked("explicit Desktop route rejected the callback; CLI fallback disabled") from exc
             print(
                 f"ltc: desktop App Server rejected turn/start: {exc}; falling back to CLI",
                 file=sys.stderr,
             )
         else:
             if explicit_desktop:
-                raise CallbackTransportBlocked("explicit Desktop bridge could not resume the bound session; CLI fallback disabled") from exc
+                raise CallbackTransportBlocked("explicit Desktop route could not resume the bound session; CLI fallback disabled") from exc
             print(f"ltc: desktop App Server delivery unavailable: {exc}; falling back to CLI", file=sys.stderr)
         return None
     except (OSError, ValueError, TypeError, AppServerProtocolError) as exc:
@@ -1810,7 +1781,7 @@ def start_desktop_app_server_turn(payload: dict[str, object]) -> DesktopAppServe
             )
             return DesktopAppServerDelivery(None, target["value"], None)
         if explicit_desktop:
-            raise CallbackTransportBlocked("explicit Desktop bridge is unavailable; CLI fallback disabled") from exc
+            raise CallbackTransportBlocked("explicit Desktop route is unavailable; CLI fallback disabled") from exc
         print(f"ltc: desktop App Server delivery unavailable: {exc}; falling back to CLI", file=sys.stderr)
         return None
     finally:

@@ -39,8 +39,7 @@ systemd 用户服务 / macOS LaunchAgent / Windows 用户登录计划任务
 Mac 安装方式见 [macOS 指南](docs/macos.md)：`ltc setup --force --enable --now` 自动选择
 LaunchAgent 协调器和独立 launchd 任务。任务作业不注册为登录启动项，不会在重启后自动重跑。
 0.7.1 预览中，正常启动 Codex Desktop 即可：`auto` 通过公开命令 `codex queue` 投递回调，不需要启动器或重启。
-详见 [Codex Desktop](docs/integrations/desktop.md)。早期的启动器已退役（[Mac](docs/macos-desktop-bridge.md)、
-[Windows](docs/windows-desktop-bridge.md) 仅作历史记录）。真实 Desktop 应用、macOS 和 Windows 尚未运行验证。
+详见 [Codex Desktop](docs/integrations/desktop.md)。早期的启动器已移除。真实 Desktop 应用、macOS 和 Windows 尚未运行验证。
 Windows 10+ 安装方式见 [Windows 指南](docs/windows.md)：用户登录状态下使用
 `ltc setup --service windows-task --force --enable --now`，通过 Agent CLI 回到原会话。
 PowerShell ACK 命令支持空格、中文与单引号路径；状态文件在创建时设置当前用户和 SYSTEM 私有 ACL。

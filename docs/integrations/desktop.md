@@ -39,7 +39,7 @@ ACK 按会话自身的权限运行。如果沙箱不能写 LTC 队列目录（�
 
 ## 迁移为旧启动器保存的回调
 
-启动器和共享 Core 已退役。`ltc setup` 不再生成它们，新任务使用 `--callback-mode desktop` 会被拒绝。已保存的 `desktop` 回调保留结果和原路径：连接仍可用时照常投递，否则留在 `failed` 中。用以下命令迁移：
+启动器和共享 Core 已移除。`ltc setup` 不再生成它们，新任务使用 `--callback-mode desktop` 会被拒绝。已保存的 `desktop` 回调保留结果。在 macOS 和 Windows 上，它会留在 `failed` 中；在 Linux 上，它继续通过本地 App Server socket 投递，只有 socket 不可用时才留在 `failed` 中。用以下命令迁移：
 
 ```bash
 ltc retry --id ID --callback-mode codex-queue

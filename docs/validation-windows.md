@@ -3,7 +3,7 @@
 This is a chronological development record: earlier pending/failed checks remain
 as historical evidence and are superseded where the later acceptance sections
 say so. See [0.7.0 release validation](validation-0.7.0.md) for consolidated CI and
-release status; the Desktop bridge remains explicitly experimental.
+release status. The launcher and bridge this record describes were later removed; their code and notes remain in git history.
 
 Baseline: `d2974cd` (Mac handoff), developed on `codex/windows-support`.
 Package version remains `0.7.0a1`; no release or remote CI run is claimed here.
@@ -115,7 +115,7 @@ The temporary coordinator registration was removed after validation; its daemon
 and supervisor locks are released. The failed callback is preserved without ACK.
 
 The default Windows implementation uses explicit CLI resume and disables Unix
-socket discovery. An experimental [shared-server bridge](windows-desktop-bridge.md)
+socket discovery. An experimental shared-server bridge
 has since passed the real two-client protocol test; actual Desktop reconnection
 and original-session receipt/ACK remain pending. A verified transport into the running
 Desktop owner, or a session that the CLI can validly acquire, must be verified
@@ -125,7 +125,7 @@ change to `--last`, forge an ACK, or rerun the business task to hide this failur
 ## Follow-up: experimental Desktop bridge
 
 The active-writer investigation and opt-in connection procedure are in
-[Windows Desktop bridge](windows-desktop-bridge.md). Local Desktop implementation
+the Windows Desktop bridge notes, since removed. Local Desktop implementation
 inspection found explicit transport overrides but no shared listener in the
 currently running stdio configuration. The final opt-in uses a Desktop-owned
 CLI wrapper, retaining Desktop's original flags and fresh App Tools environment.

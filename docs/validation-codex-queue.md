@@ -58,8 +58,11 @@ both stripped-PATH runs, no ACK) also passed on Python 3.9.
 - A real Codex Desktop app. The origin marker was set by hand, and the open chat was the TUI.
 - macOS and Windows. Only mocked unit tests cover the Windows executable-resolution
   path and the macOS bundled-Codex lookup.
-- Delivery of a saved `desktop` record through a working bridge or socket. That code is
-  unchanged; here the connection was absent, so the record took the blocked path.
+- The launcher, bridge and Core code removed after this record. Its removal and the block
+  on saved `desktop` records on macOS and Windows have only been tested on Linux with a
+  simulated platform, so the removed paths were not run on either system.
+- Delivery of a saved `desktop` record through a working socket on Linux. Here the
+  connection was absent, so the record took the blocked path.
 - Codex versions other than 0.166.0.
 
 The output match on `Queued message ID for thread UUID.` is specific to the Codex CLI's

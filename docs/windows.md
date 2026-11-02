@@ -84,11 +84,9 @@ variable. For deliberate shell syntax, invoke the shell explicitly, for example
 In release 0.7.0, Windows callbacks use the Agent CLI to resume the exact bound
 session by default. The 0.7.1 preview adds [explicit callback modes](callback-modes.md).
 A normally started Desktop now gets callbacks through the public `codex queue`
-command, which has not been run on Windows yet. An earlier, now
-[retired Desktop bridge](windows-desktop-bridge.md) connected Desktop and LTC to one
-shared App Server; its package-context route passed GUI execution, one App Tools
-call, original-session delivery and ACK on the tested installation on 2026-09-27,
-while default direct startup of the Store package failed with error 5.
+command, which has not been run on Windows yet. An earlier Desktop bridge has been
+removed; a callback saved for it waits in `failed` naming
+`ltc retry --id ID --callback-mode codex-queue`.
 LTC does not guess a Desktop socket or silently switch sessions. Each callback includes a PowerShell
 ACK command pinned to this installation. Copy that command exactly, including
 the leading `&` and single-quoted paths; doubled single quotes inside paths are
@@ -108,10 +106,7 @@ session: Codex 0.153.4 reported `already has an active writer`. Native workload
 completion and fake-Agent delivery/ACK passed, but that original-session delivery
 did not. Ending a turn does not establish that Desktop releases its session owner.
 Do not delete Codex's writer lock or change the callback target to work around it;
-retain the failed callback for a supported Desktop transport or valid CLI ownership.
-The bridge's isolated real App Server protocol test demonstrates two clients resuming
-one owned test thread, without any model call; this is narrower than real Desktop
-receipt and ACK. The later package-context Desktop acceptance is recorded above.
+retain the failed callback for `codex-queue` or valid CLI ownership.
 
 ## Inspect, update and remove
 

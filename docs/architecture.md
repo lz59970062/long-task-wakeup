@@ -6,10 +6,8 @@ The working preview separates callback capability from OS task ownership.
 See [callback modes](callback-modes.md). Codex Desktop callbacks go through
 `codex_queue.py`, which runs the public `codex queue` command once and keeps a
 durable receipt; `callback_transport.py` selects it for Desktop origins. The earlier
-launcher ([Mac](macos-desktop-bridge.md), [Windows](windows-desktop-bridge.md)) is
-retired: `ltc` no longer reaches `desktop.py`, `desktop_macos.py` or
-`desktop_windows.py`, while `desktop_connection.py` still serves saved `desktop`
-records and `ltc-desktop-core` still serves a Core that is already running.
+Desktop launcher, its shared Core and the Windows bridge have been removed; see
+[moving saved callbacks](callback-modes.md#retired-desktop-launcher).
 New managed task records are version 3 and explicit callback records version 2,
 with version 6 and version 5 for the native queue; older coordinators reject them
 so they cannot silently ignore manual intent or resume a thread an open chat owns.
@@ -204,18 +202,7 @@ draining it first; each profile owns one coordinator/runtime record.
 Windows callbacks use the bound Agent CLI session. Native executables and recognized
 npm/forwarding batch shims are resolved without a shell; unknown batch scripts fail
 explicitly. Generated ACK/goal commands are literal PowerShell argument arrays.
-The optional Windows Desktop bridge is an experimental explicit transport.
-Desktop launches `desktop_core.py` through an explicit CLI override. It relays
-Desktop's stdio protocol and preserves the environment and configuration that
-Desktop supplies for its tools and approvals. `desktop_bridge.py` owns one App
-Server and a gateway that verifies connected Windows peers before adding a
-private upstream Bearer token. Desktop and LTC must use that same server.
-`desktop_connection.py` validates metadata/profile,
-and `platforms/windows_tcp.py` authenticates the connected reverse TCP tuple,
-PID, SID and creation identity. No unauthenticated upstream is exposed; browser
-Origin headers are rejected. See [bridge setup and limits](windows-desktop-bridge.md).
-Real Windows Desktop original-session delivery and ACK passed with the explicit
-package-context bridge on 2026-09-27; the default CLI active-writer limitation remains. A durable submission
+The default CLI active-writer limitation remains. A durable submission
 intent precedes `turn/start`, so response loss or a parent timeout preserves the
 cross-queue lease instead of authorizing another delivery.
 

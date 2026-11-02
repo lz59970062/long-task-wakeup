@@ -311,7 +311,7 @@ Use `--service standalone --now` where user systemd is unavailable (e.g. AutoDL)
 | Restart, recovery and self-repair | [docs/recovery.md](docs/recovery.md) |
 | Architecture and extension points | [docs/architecture.md](docs/architecture.md) |
 | macOS · Windows · Containers | [macOS](docs/macos.md) · [Windows](docs/windows.md) · [Containers](docs/containers.md) |
-| Codex Desktop | [Guide](docs/integrations/desktop.en.md) · retired bridges: [Mac](docs/macos-desktop-bridge.md), [Windows](docs/windows-desktop-bridge.md) |
+| Codex Desktop | [Guide](docs/integrations/desktop.en.md) |
 | Validation records | [0.7.0](docs/validation-0.7.0.md) · [0.7.1 preview](docs/validation-0.7.1-preview.md) · [Linux preview](docs/validation-0.7.0a1.md) · [macOS](docs/validation-macos.md) · [Windows](docs/validation-windows.md) |
 | Release history | [CHANGELOG.md](CHANGELOG.md) |
 

@@ -23,10 +23,9 @@ dependencies = ["PyYAML>=6.0"]
 [project.scripts]
 ltc = "long_task_callback.cli:main"
 codex-long-task-wakeup = "long_task_callback.cli:main"
-ltc-desktop-core = "long_task_callback.desktop_core:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-long_task_callback = ["skill/SKILL.md", "claude_skill/SKILL.md", "pi_skill/SKILL.md", "skill/agents/openai.yaml", "templates/*.md", "platforms/*.ps1", "desktop_windows_assets/*.ps1", "desktop_windows_assets/*.py", "pi_extension/*.js"]
+long_task_callback = ["skill/SKILL.md", "claude_skill/SKILL.md", "pi_skill/SKILL.md", "skill/agents/openai.yaml", "templates/*.md", "platforms/*.ps1", "pi_extension/*.js"]
