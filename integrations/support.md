@@ -12,7 +12,7 @@ Harness 指运行 Agent 的外层程序：它管理会话、调用模型、执�
 | Claude Code CLI | `ltc agent claude` | 后台 `ltc wait` 实时接收；独立 CLI 可恢复会话 | 子 Agent、CLI 恢复从 0.7.0 起；实时回调为 0.7.1 预览，Linux/macOS 已验证 |
 | Claude 桌面应用的 Code 会话 | 子任务通过已登录的独立 Claude CLI 执行 | 后台 Bash 运行 `ltc wait` | 0.7.1 预览；macOS 本地会话、Linux SSH 会话已验证 |
 | Pi | `ltc agent pi` | 扩展向当前进程发送 steer 消息；`ltc pi` 增加关闭后的会话恢复 | 0.7.1 预览；Linux、Pi 0.87.1 有验证记录，macOS/Windows 待验证 |
-| Codex Desktop | 子任务使用 Codex CLI | 共享 Core 启动器和 `--callback-mode desktop` | 0.7.1 预览；新安装路径的真实 Desktop 重启、接收和 ACK 验收待完成 |
+| Codex Desktop | 子任务使用 Codex CLI | 公开命令 `codex queue`，自动选择（`--callback-mode codex-queue`） | 0.7.1 预览；新安装路径的真实 Desktop 重启、接收和 ACK 验收待完成 |
 
 子 Agent 与接收方可以组合。例如在 Codex 中执行 `ltc agent claude`，Claude 执行任务，结果回到 Codex。操作步骤见 [Codex](codex.md)、[Claude](claude.md)、[Pi](pi.md)和 [Desktop](desktop.md)。
 
@@ -56,4 +56,5 @@ Claude 还提供 `ltc claude` channel 研究预览入口，已记录 Linux 上 C
 - [0.7.0 发布验证](https://github.com/lz59970062/long-task-wakeup/blob/main/docs/validation-0.7.0.md)
 - [Claude Code 平台记录](https://github.com/lz59970062/long-task-wakeup/blob/main/docs/claude-code.md#platform-status)
 - [Pi 接入与验证](https://github.com/lz59970062/long-task-wakeup/blob/main/docs/validation-pi-child.md)
+- [Codex 队列验证记录](https://github.com/lz59970062/long-task-wakeup/blob/main/docs/validation-codex-queue.md)
 - [Desktop 预览版验收记录](https://github.com/lz59970062/long-task-wakeup/blob/main/docs/validation-0.7.1-preview.md)
