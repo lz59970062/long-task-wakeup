@@ -641,6 +641,27 @@ class SavedDesktopRecordTests(QueueTestCase):
         self.assertIn(str(launcher), self.errors.getvalue())
         self.assertTrue(launcher.is_file())
 
+    def test_setup_names_leftover_bridge_state_and_says_to_stop_it_first(self):
+        state = self.root / "profile/long-task-wakeup"
+        (state / "desktop").mkdir(parents=True)
+        leftovers = [state / name for name in ("desktop.json", "desktop-bridge.json", ".desktop-bridge-0f.token",
+                                               "desktop-bridge-app-server-0f.log")]
+        for path in leftovers:
+            path.write_text("{}", encoding="utf-8")
+        cli.report_retired_desktop_launcher()
+        report = self.errors.getvalue()
+        for path in (*leftovers, state / "desktop"):
+            self.assertIn(str(path), report)
+            self.assertTrue(path.exists())
+        self.assertIn("Quit any Codex Desktop", report)
+        self.assertIn(cli.RETIRED_BRIDGE_MODULE, report)
+
+    def test_setup_says_nothing_without_leftovers(self):
+        (self.root / "profile/long-task-wakeup").mkdir(parents=True)
+        (self.root / "profile/long-task-wakeup/config.json").write_text("{}", encoding="utf-8")
+        cli.report_retired_desktop_launcher()
+        self.assertEqual(self.errors.getvalue(), "")
+
 
 class PromptTests(QueueTestCase):
     def test_receipt_instructions_describe_native_permissions_and_no_replay(self):

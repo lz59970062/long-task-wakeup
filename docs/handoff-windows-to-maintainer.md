@@ -1,6 +1,6 @@
 # LTC 0.7.0：Windows 完成后的开发交接
 
-> 后续状态：下文的 Desktop 桥接、启动器和 `examples/windows` 已移除，代码和说明保留在 git 历史中。Desktop 回调改用 `codex-queue`，见 [回调模式](callback-modes.md)。下文保留为历史基线。
+> 后续状态：Desktop 桥接、启动器、`windows_tcp.py` 和 `examples/windows` 已移除，代码和说明保留在 git 历史中，下文相应内容已标注。Desktop 回调改用 `codex-queue`，见 [回调模式](callback-modes.md)。下文保留为历史基线。
 
 交接日期：2026-09-27。后续统一在 **`codex/0.7.0-preview`** 上继续开发。
 Windows 临时分支 `codex/windows-support` 已快进合入此分支；不要再次从旧 Mac
@@ -38,12 +38,12 @@ py -3 -m venv .venv
 - Windows 原生任务所有者：`platforms/windows.py`、`windows_scheduler.ps1`。
   每次业务尝试由独立 Task Scheduler 作业运行，不依赖 WSL、screen 或当前 Agent 回合。
 - 协调器：`windows_service.py`，支持安装、启动、重载、排空后移除，以及独立业务任务存活。
-- 文件与进程：`platforms/windows_io.py`、`windows_process.py`、`windows_tcp.py`。
+- 文件与进程：`platforms/windows_io.py`、`windows_process.py`。
   包括私有 ACL、原子写入、跨进程锁、SID/boot/进程创建时间校验和 Job Object 子进程回收。
-- Desktop 实验桥接：`desktop_core.py` 保留 Desktop 注入的工具环境和 Core 参数；
+- （已移除）Desktop 实验桥接：`desktop_core.py` 保留 Desktop 注入的工具环境和 Core 参数；
   `desktop_bridge.py` 提供经本机用户身份校验的共享 App Server；
   `desktop_connection.py` 校验连接元数据和 profile。
-- 0.7.0 的打包版启动入口：`examples/windows/start-desktop-bridge.ps1` 及同目录辅助脚本。
+- （已移除）0.7.0 的打包版启动入口：`examples/windows/start-desktop-bridge.ps1` 及同目录辅助脚本。
   0.7.1 本地预览已将实现移入安装包 `desktop_windows_assets/`，由统一的
   `ltc setup` 生成本机 `.cmd`/`.ps1`，通过 `ltc desktop` 管理；examples 保留兼容入口。
   新安装流程仍待 Windows 原生验收，不能沿用旧版本回调结果作为通过证据。
@@ -74,9 +74,7 @@ CI 不包含真实 AI 模型回调或实际 Desktop GUI 验收。
 本机 Windows 10 build 19045、Python 3.14.3 曾完成全量原生检查：
 418 项中 406 通过、12 跳过，含真实 Core 协议测试；最后一轮 CI 修复另通过 60 项针对性测试。
 本机测试使用独立 profile、队列、锁目录和临时目录，执行身份是普通登录用户。
-测试子进程须清除 `CODEX_LONG_TASK_WAKEUP_DESKTOP_BRIDGE_FILE`，并将
-`CODEX_LONG_TASK_WAKEUP_DESKTOP_APP_SERVER=0`，避免继承正在使用的 Desktop 桥接。
-桥接集成测试会单独启用自己的测试连接。
+测试子进程须设置 `CODEX_LONG_TASK_WAKEUP_DESKTOP_APP_SERVER=0`，避免连接正在使用的 App Server。
 
 真实原会话验收：任务 `1aa2ba13` 执行 120.0003 秒、exit=0、业务只启动一次。
 Desktop 经显式 `-PackageContext` 重启后，旧任务仅重新投递回调；原会话读取结果后
@@ -102,11 +100,10 @@ GUI、一次 App Tools 调用及原会话 receipt/ACK 均已验证。
 
 ## 仍保留的限制
 
-1. Windows Desktop 桥接仍是显式启用的实验功能。验证版本为 Desktop 26.915.4065.0、
+1. （已移除，仅作历史记录）Windows Desktop 桥接当时是显式启用的实验功能。验证版本为 Desktop 26.915.4065.0、
    Core 0.155.0-alpha.9.2；没有承诺所有版本和所有 App Tools 流程兼容。
-2. 测试的 Store 版 Desktop 默认直接启动路线仍报 Win32 error 5。
+2. （已移除，仅作历史记录）测试的 Store 版 Desktop 默认直接启动路线当时报 Win32 error 5。
    `-PackageContext` 使用微软诊断工具的包上下文；其 token 和其他行为不保证等同正常激活。
-   先阅读桥接文档，预检成功且用户保存工作、关闭 Desktop 后再启动。
 3. 默认 CLI resume 仍可能受打开的 Desktop 会话的 active-writer 约束。
    不得删除 writer 锁、换成 `--last`、伪造 ACK 或重跑已完成的业务任务掩盖投递失败。
 4. Windows 依赖已登录的交互用户；不是注销后仍工作的系统服务。注销、重启可中断任务，
@@ -118,8 +115,7 @@ GUI、一次 App Tools 调用及原会话 receipt/ACK 均已验证。
 > 在 `codex/0.7.0-preview` 继续维护 LTC 0.7.0a1，不要再创建 Windows 专用开发分支。
 > 先读本交接、`docs/windows.md`、
 > `docs/validation-windows.md`、`docs/architecture.md` 和根目录 `SKILL.md`。
-> 核对实际 HEAD、本机协调器队列及 Desktop 桥接状态，保留正在运行的任务和用户配置。
+> 核对实际 HEAD 和本机协调器队列，保留正在运行的任务和用户配置。
 > Windows 原生执行及指定 Desktop 路线的真实回调已完成，不要重复实现或重复跑旧业务任务。
 > 后续按用户指定范围开发；共用生命周期修改必须复验 Linux、macOS、Windows 和容器 CI。
-> 将实验桥接转为默认支持或发布新版本之前，另行验证安装/升级、不同 Desktop 版本、
-> App Tools/审批流程、退出清理和原会话 ACK。当前没有授权自动发布稳定包。
+> 发布新版本之前，另行验证安装/升级、不同 Desktop 版本和原会话 ACK。当前没有授权自动发布稳定包。

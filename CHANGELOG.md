@@ -34,7 +34,10 @@
   `desktop_connection`, the Mac and Windows launcher modules and assets, `platforms/windows_tcp`,
   `examples/windows`, the `ltc-desktop-core` entry point and
   `CODEX_LONG_TASK_WAKEUP_DESKTOP_BRIDGE_FILE`. LTC no longer connects to a Core that is still
-  running; quit Desktop and open it normally.
+  running; quit Desktop before upgrading, because one opened from the launcher cannot restart its
+  Core once the wrapper's target is gone. `ltc setup` also names leftover `desktop.json` and bridge
+  files. The Codex Desktop guide shows how to end a Windows bridge that outlived Desktop; that
+  command has not been run on Windows.
 - Saved `desktop` tasks and callbacks keep their results and still load. On macOS and Windows they
   wait in `failed` naming `ltc retry --id ID --callback-mode codex-queue`, which does not rerun the
   workload. On Linux they keep delivering through the local App Server socket. The removal has been

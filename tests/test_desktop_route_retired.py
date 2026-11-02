@@ -181,7 +181,7 @@ class RetiredDesktopRouteTests(unittest.TestCase):
 
 @unittest.skipUnless(hasattr(socket, "AF_UNIX") and os.name == "posix", "App Server callbacks use Unix sockets")
 class SocketRpcTests(unittest.TestCase):
-    def test_websocket_rpc_answers_ping_and_reports_completion(self):
+    def listen(self):
         directory = tempfile.TemporaryDirectory(prefix="ltc-rpc-", dir="/tmp")
         self.addCleanup(directory.cleanup)
         path = Path(directory.name) / "core.sock"
@@ -190,7 +190,11 @@ class SocketRpcTests(unittest.TestCase):
         server.bind(str(path))
         server.listen(1)
         server.settimeout(3)
-        errors, methods = [], []
+        return path, server
+
+    def deliver(self, mode):
+        path, server = self.listen()
+        errors, methods, started = [], [], []
 
         def exact(peer, count):
             data = b""
@@ -232,6 +236,8 @@ class SocketRpcTests(unittest.TestCase):
                         opcode, value = frame(peer)
                         message = json.loads(value)
                         methods.append((opcode, message["method"]))
+                        if expected == "turn/start":
+                            started.append(message["params"])
                         if "id" in message:
                             if expected == "initialize":
                                 peer.sendall(b"\x8a\x00\x89\x01p")  # An unsolicited pong, then a ping.
@@ -244,10 +250,11 @@ class SocketRpcTests(unittest.TestCase):
 
         thread = threading.Thread(target=serve)
         thread.start()
-        payload = {"request": {"target": {"kind": "session", "value": "original"}, "callback_mode": "cli",
-                               "sandbox_mode": "workspace-write", "queue_dir": str(Path(directory.name) / "queue")},
-                   "cwd": directory.name, "prompt": "fixture callback", "timeout": 2}
-        with mock.patch.object(cli, "desktop_app_server_socket", return_value=path):
+        payload = {"request": {"target": {"kind": "session", "value": "original"}, "callback_mode": mode,
+                               "sandbox_mode": "workspace-write", "queue_dir": str(path.parent / "queue")},
+                   "cwd": str(path.parent), "prompt": "fixture callback", "timeout": 2}
+        with mock.patch.dict(os.environ, {cli.DESKTOP_APP_SERVER_ENV: "1", cli.APP_SERVER_SOCKET_ENV: str(path),
+                                          cli.ALLOW_APP_SERVER_SOCKET_OVERRIDE_ENV: "1"}):
             callback = cli.start_desktop_app_server_turn(payload)
         self.assertIsNotNone(callback)
         try:
@@ -258,6 +265,36 @@ class SocketRpcTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(errors, [])
         self.assertEqual(methods, [(1, "initialize"), (1, "initialized"), (1, "thread/resume"), (1, "turn/start")])
+        self.assertEqual(started[0]["threadId"], "original")
+        self.assertIn("fixture callback", json.dumps(started[0]))
+
+    def test_websocket_rpc_answers_ping_and_reports_completion(self):
+        self.deliver("cli")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "only Linux still delivers saved desktop records this way")
+    def test_saved_desktop_record_is_delivered_through_the_socket(self):
+        self.deliver("desktop")
+
+    def test_socket_owned_by_another_user_receives_nothing(self):
+        path, server = self.listen()
+        received = []
+
+        def serve():
+            peer, _ = server.accept()
+            with peer:
+                peer.settimeout(3)
+                received.append(peer.recv(1))
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        connection = cli.AppServerConnection(path, 2)
+        with mock.patch.object(cli.os, "geteuid", return_value=os.geteuid() + 1), \
+                self.assertRaisesRegex(cli.AppServerProtocolError, "does not belong to this user"):
+            connection.connect()
+        thread.join(3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(received, [b""])
+        self.assertIsNone(connection.socket)
 
 
 if __name__ == "__main__":

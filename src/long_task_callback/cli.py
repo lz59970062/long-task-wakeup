@@ -4932,13 +4932,20 @@ def select_daemon_service(args: argparse.Namespace) -> str:
     return service
 
 
+RETIRED_BRIDGE_MODULE = "long_task_callback.desktop_bridge"
+
+
 def report_retired_desktop_launcher() -> None:
     state = codex_home() / LEGACY_STATE_DIR_NAME
-    names = ("Start LTC Desktop.command", "desktop-core.command", "Start LTC Desktop.cmd", "Start LTC Desktop.ps1")
-    stale = [path for path in (state / name for name in names) if path.is_file()]
+    names = ("Start LTC Desktop.command", "desktop-core.command", "Start LTC Desktop.cmd", "Start LTC Desktop.ps1",
+             "desktop.json", "desktop")
+    stale = [state / name for name in names if os.path.lexists(state / name)]
+    for pattern in ("desktop-bridge*", ".desktop-bridge-*"):
+        stale.extend(sorted(state.glob(pattern)))
     if stale:
-        print("ltc: the Desktop launcher is retired; open Codex Desktop normally. You can delete: "
-              + ", ".join(str(path) for path in stale), file=sys.stderr)
+        print("ltc: the Desktop launcher is retired. Quit any Codex Desktop it opened, because that Desktop cannot "
+              f"restart its Core, and end any process still running {RETIRED_BRIDGE_MODULE}. Then open Codex Desktop "
+              "normally and delete: " + ", ".join(str(path) for path in stale), file=sys.stderr)
 
 
 def setup(args: argparse.Namespace) -> int:
@@ -5849,8 +5856,9 @@ def main() -> int:
     args = parser.parse_args()
     migrate_legacy_state_dir()
     if args.mode == "desktop":
-        print("ltc: the Desktop launcher is retired. Quit Codex Desktop and open it normally; callbacks use the "
-              "native Codex queue. Move a saved desktop callback with: ltc retry --id ID --callback-mode codex-queue",
+        print("ltc: the Desktop launcher is retired. Quit Codex Desktop, end any process still running "
+              f"{RETIRED_BRIDGE_MODULE}, and open Desktop normally; callbacks use the native Codex queue. "
+              "Move a saved desktop callback with: ltc retry --id ID --callback-mode codex-queue",
               file=sys.stderr)
         return 2
     if args.mode == "retry":

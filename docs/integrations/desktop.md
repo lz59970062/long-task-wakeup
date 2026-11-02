@@ -45,4 +45,14 @@ ACK 按会话自身的权限运行。如果沙箱不能写 LTC 队列目录（�
 ltc retry --id ID --callback-mode codex-queue
 ```
 
-这不会重新运行任务。退出 Desktop 后正常打开即可；`ltc setup` 会列出遗留的启动器文件，可以删除。
+这不会重新运行任务。
+
+升级前先退出由启动器打开的 Desktop，因为包装脚本指向的文件删除后，它无法再次启动 Core。之后正常打开 Desktop 即可。
+
+在 Windows 上，桥接进程可能在 Desktop 退出后继续运行。如有残留，请结束它，它的 App Server 会一起停止。这条命令尚未在 Windows 上运行过：
+
+```powershell
+Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%long_task_callback.desktop_bridge%'" | ForEach-Object { Stop-Process -Id $_.ProcessId }
+```
+
+`ltc setup` 会列出遗留的启动器和桥接文件，包括 `desktop.json`。Desktop 和桥接都停止后即可删除。

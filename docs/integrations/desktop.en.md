@@ -45,4 +45,14 @@ The launcher and its shared Core are gone. `ltc setup` no longer generates them 
 ltc retry --id ID --callback-mode codex-queue
 ```
 
-This does not rerun the workload. Quit Desktop and open it normally; `ltc setup` names any leftover launcher files, which you can delete.
+This does not rerun the workload.
+
+Quit any Desktop opened from the launcher before you upgrade, because it cannot start its Core again once the wrapper's target is gone. Then open Desktop normally.
+
+On Windows, a bridge process can outlive Desktop. If one remains, end it. Its App Server stops with it. This command has not been run on Windows:
+
+```powershell
+Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%long_task_callback.desktop_bridge%'" | ForEach-Object { Stop-Process -Id $_.ProcessId }
+```
+
+`ltc setup` names any leftover launcher and bridge files, including `desktop.json`. Delete them once Desktop and the bridge have stopped.
