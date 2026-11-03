@@ -244,7 +244,10 @@ def _session_of(request: Mapping[str, object]) -> str | None:
 def live_watcher_dir(session: str, *, agent: str = "claude") -> Path:
     from . import cli
 
-    digest = hashlib.sha256(f"{agent}:{session}".encode("utf-8")).hexdigest()
+    # Claude keeps its original key: a waiter started before an upgrade must
+    # still hold back the upgraded daemon.
+    key = f"session:{session}" if agent == "claude" else f"{agent}:{session}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return cli.target_lock_dir() / LIVE_WATCHER_DIR_NAME / digest
 
 

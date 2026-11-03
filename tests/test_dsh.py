@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -203,6 +204,14 @@ class DshLiveWaitTests(unittest.TestCase):
         claude_dir = live_session.live_watcher_dir("shared", agent="claude")
         dsh_dir = live_session.live_watcher_dir("shared", agent="dsh")
         self.assertNotEqual(claude_dir, dsh_dir)
+
+
+class DshUpgradeTests(unittest.TestCase):
+    def test_claude_keeps_the_watcher_directory_of_earlier_versions(self):
+        # A waiter started before an upgrade holds a lock here; the upgraded
+        # daemon has to see it or it resumes the session beside it.
+        digest = hashlib.sha256(b"session:shared").hexdigest()
+        self.assertEqual(live_session.live_watcher_dir("shared").name, digest)
 
 
 class DshInstallTests(unittest.TestCase):

@@ -64,7 +64,7 @@ dsh: session "session-…" runs under agent preset "standard", which the one-sho
 ## DSH 作为子 Agent
 
 ```bash
-ltc agent dsh --cwd "$PWD" --name parser-review -- "Inspect parser.py and report concrete defects."
+ltc agent dsh --cwd "$PWD" --task parser-review -- "Inspect parser.py and report concrete defects."
 ```
 
 LTC 以 stdin 传入提示词、运行 `dsh --profile headless`，并从 stdout 读取最终回答。headless
@@ -78,8 +78,10 @@ profile 中恢复凭据存储，否则子任务会报告认证错误。
 | `--system-prompt-file` | 不支持 |
 | `LONG_TASK_WAKEUP_DSH_BIN` / `setup --dsh-bin` | 指定 `dsh` 启动器 |
 
-子任务保留 `DEEPSEEK_API_KEY`，并移除 `DSH_SESSION_ID`、`DSH_SHELL`、`DSH_WEB_URL`、
-`DSH_PROFILE` 和 `DSH_HOME`，避免子进程递归接管父会话。
+子任务移除 `DSH_SESSION_ID`、`DSH_SHELL` 和 `DSH_WEB_URL`，避免子进程绑定到父会话；保留
+`DEEPSEEK_API_KEY`、`DSH_HOME` 和 `DSH_PROFILE`，它们决定子进程自己的配置和凭据。
+
+真实 DSH 会话目前只在 macOS 桌面端验证过。Linux 上用替身 `dsh` 测试了 LTC 这一侧的路径，没有对接过真实 DSH。
 
 ## 验证
 

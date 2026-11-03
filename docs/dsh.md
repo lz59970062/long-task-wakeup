@@ -72,7 +72,7 @@ desktop or interactive CLI session.
 ## DSH as a child agent
 
 ```bash
-ltc agent dsh --cwd "$PWD" --name parser-review -- "Inspect parser.py and report concrete defects."
+ltc agent dsh --cwd "$PWD" --task parser-review -- "Inspect parser.py and report concrete defects."
 ```
 
 LTC runs `dsh --profile headless` with the prompt on stdin and captures the final answer from
@@ -87,8 +87,12 @@ an authentication error.
 | `--system-prompt-file` | unsupported |
 | `LONG_TASK_WAKEUP_DSH_BIN` / `setup --dsh-bin` | select the `dsh` launcher |
 
-Child commands keep `DEEPSEEK_API_KEY` and strip `DSH_SESSION_ID`, `DSH_SHELL`, `DSH_WEB_URL`,
-`DSH_PROFILE` and `DSH_HOME`, so the child cannot recurse into the parent session.
+Child commands strip `DSH_SESSION_ID`, `DSH_SHELL` and `DSH_WEB_URL`, so the child cannot bind to the
+parent session. They keep `DEEPSEEK_API_KEY`, `DSH_HOME` and `DSH_PROFILE`, which select the child's
+own configuration and credentials.
+
+Real DSH sessions have been verified on macOS desktop only. On Linux, the LTC side of the route is
+tested against a stand-in `dsh`, not a real DSH.
 
 ## Verification
 

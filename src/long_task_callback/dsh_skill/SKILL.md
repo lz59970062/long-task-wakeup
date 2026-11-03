@@ -67,15 +67,9 @@ differs from this page about callback delivery, this page applies to DeepSeek Ha
 - **Fresh child agent** (independent review, test authoring, a parallel fix):
 
   ```bash
-  ltc agent dsh --cwd "$PWD" --name parser-review -- "Inspect parser.py and report concrete defects."
-  ltc agent codex --template test --name parser-tests -- "Test the contract in docs/parser.md."
-  ltc agent continue <task-or-callback-id> --name recheck -- "I fixed those; review parser.py again."
+  ltc agent dsh --cwd "$PWD" --task parser-review -- "Inspect parser.py and report concrete defects."
+  ltc agent codex --template test --task parser-tests -- "Test the contract in docs/parser.md."
   ```
-
-  Every child needs `--name`. `ltc agent continue <id>` reuses the same child with what it already
-  learned; `ltc agent fork <id>` branches from it. `<id>` is the task ID, the callback ID, or the
-  node's full name; prefer IDs. See `ltc context show <node>` for summaries;
-  never read a child's raw session.
 
   Then background `ltc wait --task <id>` exactly as for `ltc run`. A DSH child runs
   `dsh --profile headless`; that profile uses `DEEPSEEK_API_KEY` (or credentials restored in the
