@@ -858,6 +858,29 @@
   
   
     <li class="md-nav__item">
+      <a href="../dsh/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    DeepSeek Harness
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../desktop/" class="md-nav__link">
         
   
@@ -1226,6 +1249,12 @@
 <td>0.7.1 预览；Linux、Pi 0.87.1 有验证记录，macOS/Windows 待验证</td>
 </tr>
 <tr>
+<td>DeepSeek Harness（DSH）</td>
+<td><code>ltc agent dsh</code></td>
+<td>后台 <code>ltc wait</code> 作为 DSH 作业运行，作业完成通知唤醒同一会话；DSH 不支持 headless 恢复</td>
+<td>真实会话的提交、作业通知和 ACK 已在 macOS 桌面端和 Linux（<code>dsh</code> 0.2.1-rc.5，通过 ACP）验证</td>
+</tr>
+<tr>
 <td>Codex Desktop</td>
 <td>子任务使用 Codex CLI</td>
 <td>公开命令 <code>codex queue</code>，自动选择（<code>--callback-mode codex-queue</code>）</td>
@@ -1255,14 +1284,9 @@
 <td>将工作流保存为脚本，通过 <code>ltc run</code> 执行，或在已有任务末尾调用 <code>ltc done</code></td>
 <td>为接收回调的会话实现适配器与唤醒通道</td>
 </tr>
-<tr>
-<td>DSH</td>
-<td>仓库路线图中规划了适配器</td>
-<td>完成实现与验证后加入原生接入表</td>
-</tr>
 </tbody>
 </table>
-<p>这些框架目前处于通用命令接入层，仓库原生适配器注册表包含 <code>codex</code>、<code>claude</code>、<code>pi</code>。开始接入时，先让脚本打印一行结果并正常退出，再检查日志、回调和 ACK；随后接入实际工作流。脚本示例见<a href="../../guides/use-cases/#运行自定义-agent-工作流">典型使用场景</a>。</p>
+<p>这些框架目前处于通用命令接入层，仓库原生适配器注册表包含 <code>codex</code>、<code>claude</code>、<code>pi</code>、<code>dsh</code>。开始接入时，先让脚本打印一行结果并正常退出，再检查日志、回调和 ACK；随后接入实际工作流。脚本示例见<a href="../../guides/use-cases/#运行自定义-agent-工作流">典型使用场景</a>。</p>
 <h2 id="执行环境">执行环境<a class="headerlink" href="#执行环境" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
