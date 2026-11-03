@@ -1,7 +1,5 @@
 # DeepSeek Harness（DSH）接入
 
-[← 返回 README](../../README.zh-CN.md)
-
 LTC 与 DeepSeek Harness（`dsh`，桌面应用或 CLI）双向配合：DSH 可以作为**子 Agent**
 （`ltc agent dsh`），正在运行的 DSH 会话也可以作为**回调接收方**，在任务结束后被唤醒。
 
