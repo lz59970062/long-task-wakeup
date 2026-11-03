@@ -24,6 +24,7 @@
 - [Codex CLI](integrations/codex.md)
 - [Claude Code](integrations/claude.md)
 - [Pi](integrations/pi.md)
+- [DeepSeek Harness](integrations/dsh.md)
 - [Codex Desktop](integrations/desktop.md)
 
 ## Reference
