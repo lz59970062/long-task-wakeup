@@ -1,5 +1,5 @@
 {
-  "source_commit": "6657045300a7430ecb44ed9994e97a80ac845453",
+  "source_commit": "80023cec35f89b5f5084e8c6664eddf00ec3a8b0",
   "language": "zh",
   "pages": [
     "index.md",
@@ -17,6 +17,7 @@
     "integrations/codex.md",
     "integrations/claude.md",
     "integrations/pi.md",
+    "integrations/dsh.md",
     "integrations/desktop.md",
     "reference/cli.md",
     "reference/configuration.md",
