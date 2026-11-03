@@ -427,8 +427,8 @@ def dsh_profile(executable: str | None) -> dict[str, object]:
         ),
         "headless_fallback": "unavailable: DSH desktop sessions cannot be resumed headlessly",
         "child_agents": (
-            "available through `dsh --profile headless`; that profile needs DEEPSEEK_API_KEY or restored "
-            "stored credentials" if executable is not None else "unavailable: no dsh launcher found"
+            "available through `dsh --profile headless`; that profile needs DEEPSEEK_API_KEY, restored "
+            "stored credentials or a provider route in cordis.patch.yml" if executable is not None else "unavailable: no dsh launcher found"
         ),
     }
 

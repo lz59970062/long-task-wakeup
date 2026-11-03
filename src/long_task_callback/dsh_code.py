@@ -18,7 +18,8 @@ from typing import NamedTuple, Optional
 
 from .agents.dsh import DSH_BIN_ENV
 
-SESSION_ID_PATTERN = re.compile(r"session-[A-Za-z0-9-]+")
+# Web and headless sessions are named session-<uuid>; ACP sessions are a bare UUID.
+SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9-]+")
 STANDALONE_LOCATIONS = (
     "~/.local/bin/dsh",
     "/opt/homebrew/bin/dsh",

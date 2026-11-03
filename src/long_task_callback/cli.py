@@ -3736,6 +3736,7 @@ def submit_managed_run(args: argparse.Namespace) -> int:
               file=sys.stderr)
         print("ltc: DSH has no headless fallback; the callback waits until this session runs `ltc wait`",
               file=sys.stderr)
+        print("ltc: if this submission needed sandbox_permissions, give the wait the same ones", file=sys.stderr)
     return 0
 
 

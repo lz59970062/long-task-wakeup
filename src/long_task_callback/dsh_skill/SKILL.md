@@ -5,7 +5,7 @@ description: Run long jobs (training, benchmarks, builds, test suites, deploymen
 
 # Long Task Callback (ltc) for DeepSeek Harness
 
-Reins hands a long command to an independent OS task owner (launchd on macOS, systemd on Linux,
+LTC hands a long command to an independent OS task owner (launchd on macOS, systemd on Linux,
 Task Scheduler on Windows) and queues a callback when it exits. In DeepSeek Harness you receive
 that callback **in this live session** by starting `ltc wait` as a DSH background job: DSH
 notifies the conversation when a background job finishes, and `ltc wait` exits as soon as the
@@ -17,7 +17,7 @@ differs from this page about callback delivery, this page applies to DeepSeek Ha
 
 ## When to use it
 
-- Reliably done within 60 seconds → run it in the foreground once. No Reins.
+- Reliably done within 60 seconds → run it in the foreground once. No LTC.
 - About a minute or longer, uncertain duration, or might need a second check → `ltc run` from the start.
 - Never keep a job alive by polling it with `sleep`/`tail`, and never start a long job with a plain
   foreground Bash call: it blocks the conversation and dies with the turn.
@@ -72,9 +72,10 @@ differs from this page about callback delivery, this page applies to DeepSeek Ha
   ```
 
   Then background `ltc wait --task <id>` exactly as for `ltc run`. A DSH child runs
-  `dsh --profile headless`; that profile uses `DEEPSEEK_API_KEY` (or credentials restored in the
-  headless profile), not the desktop app's saved sign-in. If it cannot authenticate, the child
-  callback reports the error — do not retry blindly.
+  `dsh --profile headless`; that profile uses `DEEPSEEK_API_KEY`, credentials restored in the
+  headless profile or a provider route in `cordis.patch.yml`, not the desktop app's saved sign-in.
+  If it cannot authenticate, the child callback reports the error — do not retry blindly. The child
+  can write only inside `--cwd`, and nobody can approve an escalation.
 
 - **Work already owned elsewhere** (tmux, screen, Slurm, a script): add `ltc done` at its end.
 
@@ -89,6 +90,12 @@ differs from this page about callback delivery, this page applies to DeepSeek Ha
 
 ## Rules
 
+- **Sandbox**: in DSH's default `workspace-write` mode every `ltc` command that touches `~/.ltc` is
+  denied (`Read-only file system`), including `ltc wait` and `ltc ack`. Retry that exact command once
+  with `sandbox_permissions` and a `justification`, as DSH's shell tool describes, then pass them
+  from the first attempt on later `ltc` commands in this session: a denied background `ltc wait` only
+  tells you so after spending a wake-up. A denial is not a broken install, so do not run the
+  `[ltc-status]` repair command for it, and do not move the queue.
 - **After `--` comes one command, not shell code**: for `;`, `&&`, pipes or redirection use
   `-- bash -c '...'` (`ltc run --task check -- bash -c 'sleep 720; python3 report.py'`).
 - **Heredoc scripts work**: input piped into `ltc run` (`-- python3 - <<'EOF'`) becomes the task's

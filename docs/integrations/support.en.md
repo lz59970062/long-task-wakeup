@@ -12,7 +12,7 @@ This page reflects the current `main` implementation and repository validation r
 | Claude Code CLI | `ltc agent claude` | Background `ltc wait` for live delivery; standalone CLI for session resume | Child and CLI resume support from 0.7.0; live delivery in the 0.7.1 preview, verified on Linux/macOS |
 | Claude desktop app, Code sessions | Child tasks use a signed-in standalone Claude CLI | Run `ltc wait` through background Bash | 0.7.1 preview; verified with macOS local sessions and Linux SSH sessions |
 | Pi | `ltc agent pi` | Extension sends a steer message to the live process; `ltc pi` adds recovery after closing | 0.7.1 preview; recorded validation on Linux with Pi 0.87.1; macOS/Windows validation pending |
-| DeepSeek Harness (DSH) | `ltc agent dsh` | Background `ltc wait` runs as a DSH job; its completion notification wakes the same conversation; no headless resume | Real sessions verified on macOS desktop for submit, job notification and ACK; Linux not yet verified with a real DSH |
+| DeepSeek Harness (DSH) | `ltc agent dsh` | Background `ltc wait` runs as a DSH job; its completion notification wakes the same conversation; no headless resume | Real sessions verified for submit, job notification and ACK on macOS desktop and Linux (`dsh` 0.2.1-rc.5 over ACP) |
 | Codex Desktop | Child tasks use Codex CLI | Public `codex queue`, selected automatically (`--callback-mode codex-queue`) | 0.7.1 preview; real Desktop restart, receipt, and ACK acceptance for the new installation path is pending |
 
 You can combine child and receiving Agents. For example, `ltc agent claude` in Codex runs the task with Claude and returns the result to Codex. Follow the [Codex](codex.md), [Claude](claude.md), [Pi](pi.md), or [Desktop](desktop.md) guide.

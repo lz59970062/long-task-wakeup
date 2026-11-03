@@ -115,6 +115,10 @@ class DshSessionTests(unittest.TestCase):
             self.assertEqual(dsh_code.session_cwd("session-abc", {"DSH_HOME": home}), started)
             self.assertTrue(dsh_code.session_exists("session-abc", {"DSH_HOME": home}))
             self.assertIsNone(dsh_code.session_cwd("../escape", {"DSH_HOME": home}))
+            acp_session = "e6eb859c-aa02-47a0-8643-f00b55f9903d"
+            acp_cache = cache.parent / f"{acp_session}.json"
+            acp_cache.write_text(json.dumps({"record": {"identity": {"cwd": started}}}), encoding="utf-8")
+            self.assertEqual(dsh_code.session_cwd(acp_session, {"DSH_HOME": home}), started)
             self.assertIsNone(dsh_code.session_cwd("session-missing", {"DSH_HOME": home}))
 
     def test_launcher_discovery_prefers_configuration_then_path(self):

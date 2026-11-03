@@ -71,6 +71,28 @@ LTC 以 stdin 传入提示词、运行 `dsh --profile headless`，并从 stdout 
 profile 不使用桌面应用保存的登录状态：需要设置 `DEEPSEEK_API_KEY`，或按 DSH 文档在 headless
 profile 中恢复凭据存储，否则子任务会报告认证错误。
 
+子任务运行在 DSH 默认的 `workspace-write` 沙箱里，也没有审批通道，所以只能写 `--cwd` 内的文件。
+它的结果就是最终回答（`agent-result.txt`）。
+
+要让 DSH 使用自己的端点，在 `~/.dsh/cordis.patch.yml` 中声明路由。它对所有 profile 生效，`acp`
+需要单独选择模型：
+
+```yaml
+- id: llm-pi-ai
+  config:
+    providers:
+      my-gateway:
+        apiKeyEnv: MY_GATEWAY_API_KEY
+        api: openai-completions
+        baseURL: https://gateway.example/v1
+        models:
+          - id: my-model
+- id: agent-default-model
+  config: {provider: my-gateway, model: my-model}
+- id: acp
+  config: {provider: my-gateway, model: my-model}
+```
+
 | 选项 | DSH 行为 |
 | --- | --- |
 | `--model` | 不支持；模型由 compose profile 选择 |
@@ -81,7 +103,10 @@ profile 中恢复凭据存储，否则子任务会报告认证错误。
 子任务移除 `DSH_SESSION_ID`、`DSH_SHELL` 和 `DSH_WEB_URL`，避免子进程绑定到父会话；保留
 `DEEPSEEK_API_KEY`、`DSH_HOME` 和 `DSH_PROFILE`，它们决定子进程自己的配置和凭据。
 
-真实 DSH 会话目前只在 macOS 桌面端验证过。Linux 上用替身 `dsh` 测试了 LTC 这一侧的路径，没有对接过真实 DSH。
+在 DSH 默认的 `workspace-write` 模式下，`~/.ltc` 对会话只读。`ltc run`、`wait` 和 `ack` 会被拒绝，
+模型需要带 `sandbox_permissions` 重试。技能里写了这条规则，每次重试都需要审批一次。
+
+真实 DSH 会话的提交、作业通知和 ACK 已在 macOS 桌面端和 Linux（`dsh` 0.2.1-rc.5，通过 ACP，含子 Agent）验证。Windows 尚未对接真实 DSH。
 
 ## 验证
 

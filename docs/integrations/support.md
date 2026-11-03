@@ -12,7 +12,7 @@ Harness 指运行 Agent 的外层程序：它管理会话、调用模型、执�
 | Claude Code CLI | `ltc agent claude` | 后台 `ltc wait` 实时接收；独立 CLI 可恢复会话 | 子 Agent、CLI 恢复从 0.7.0 起；实时回调为 0.7.1 预览，Linux/macOS 已验证 |
 | Claude 桌面应用的 Code 会话 | 子任务通过已登录的独立 Claude CLI 执行 | 后台 Bash 运行 `ltc wait` | 0.7.1 预览；macOS 本地会话、Linux SSH 会话已验证 |
 | Pi | `ltc agent pi` | 扩展向当前进程发送 steer 消息；`ltc pi` 增加关闭后的会话恢复 | 0.7.1 预览；Linux、Pi 0.87.1 有验证记录，macOS/Windows 待验证 |
-| DeepSeek Harness（DSH） | `ltc agent dsh` | 后台 `ltc wait` 作为 DSH 作业运行，作业完成通知唤醒同一会话；DSH 不支持 headless 恢复 | 真实会话的提交、作业通知和 ACK 已在 macOS 桌面端验证；Linux 尚未对接真实 DSH 验证 |
+| DeepSeek Harness（DSH） | `ltc agent dsh` | 后台 `ltc wait` 作为 DSH 作业运行，作业完成通知唤醒同一会话；DSH 不支持 headless 恢复 | 真实会话的提交、作业通知和 ACK 已在 macOS 桌面端和 Linux（`dsh` 0.2.1-rc.5，通过 ACP）验证 |
 | Codex Desktop | 子任务使用 Codex CLI | 公开命令 `codex queue`，自动选择（`--callback-mode codex-queue`） | 0.7.1 预览；新安装路径的真实 Desktop 重启、接收和 ACK 验收待完成 |
 
 子 Agent 与接收方可以组合。例如在 Codex 中执行 `ltc agent claude`，Claude 执行任务，结果回到 Codex。操作步骤见 [Codex](codex.md)、[Claude](claude.md)、[Pi](pi.md)和 [Desktop](desktop.md)。
