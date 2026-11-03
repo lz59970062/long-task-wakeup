@@ -1289,6 +1289,10 @@ def select_pending(root: Path, now: float) -> Path | None:
             request = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return path
+        if isinstance(request, dict) and (ack_path(root, path.stem).exists() or is_canceled(root, path.stem)):
+            # Finalize an ACKed/canceled callback even when its delivery route
+            # never lets the daemon start a resume (for example live-only DSH).
+            return path
         if isinstance(request, dict) and (request.get("callback_mode") == "manual"
                                          or (request.get("delivery_state") == codex_queue.AWAITING_ACK
                                              and not ack_path(root, path.stem).exists())

@@ -11,6 +11,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+import yaml
+
 from long_task_callback import cli
 from long_task_callback import claude_code as live_session
 from long_task_callback import dsh_code
@@ -169,11 +171,33 @@ class DshLiveWaitTests(unittest.TestCase):
         self.assertIn("[long-task-callback] callback", output.getvalue())
         self.assertTrue((self.root / "pending" / "task-c1.json").exists())
 
+    def test_acknowledged_live_callback_is_still_finalized(self):
+        self.write_request()
+        (self.root / "acks" / "task-c1.json").write_text("{}", encoding="utf-8")
+        self.assertIsNotNone(cli.select_pending(self.root, 10**12))
+
     def test_a_live_watcher_blocks_daemon_selection(self):
         request = json.loads(self.write_request().read_text())
         watcher = live_session.register_live_watcher("session-abc", agent="dsh")
         self.addCleanup(live_session.release_live_watcher, watcher)
         self.assertTrue(live_session.live_watcher_is_held(request))
+
+    def test_wait_prefers_dsh_when_a_claude_marker_is_still_present(self):
+        self.write_request()
+        args = argparse.Namespace(queue_dir=str(self.root), task=None, session=None,
+                                  agent=None, timeout=5, poll_interval=0.05)
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "claude-parent", "CLAUDECODE": "1"}):
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                code = live_session.wait(args)
+        self.assertEqual(code, 0)
+        self.assertIn("[long-task-callback] callback", output.getvalue())
+
+    def test_unsupported_explicit_wait_agent_is_refused(self):
+        args = argparse.Namespace(queue_dir=str(self.root), task=None, session=None,
+                                  agent="codex", timeout=1, poll_interval=0.05)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(live_session.wait(args), 2)
 
     def test_launcher_paths_are_isolated_per_agent(self):
         claude_dir = live_session.live_watcher_dir("shared", agent="claude")
@@ -193,6 +217,9 @@ class DshInstallTests(unittest.TestCase):
                 text = skill.read_text(encoding="utf-8")
                 self.assertIn("DeepSeek Harness", text)
                 self.assertIn("ltc wait", text)
+                frontmatter = yaml.safe_load(text.split("---", 2)[1])
+                self.assertEqual(frontmatter["name"], "long-task-callback")
+                self.assertTrue(frontmatter["description"])
                 self.assertTrue((skill.parent / "REFERENCE.md").is_file())
 
     def test_doctor_describes_live_only_delivery(self):

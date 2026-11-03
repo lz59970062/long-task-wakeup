@@ -379,13 +379,23 @@ def wait(args: argparse.Namespace) -> int:
         print(f"ltc wait: {agent} does not deliver callbacks through a live waiter", file=sys.stderr)
         return 2
     if agent not in LIVE_WAIT_AGENTS:
-        agent = ("dsh" if os.environ.get(DSH_SESSION_ID_ENV, "").strip()
-                 and not os.environ.get(SESSION_ENV, "").strip() else "claude")
+        # Use the registry's precedence rather than a two-marker guess: a DSH
+        # shell nested under Claude can retain both markers, and DSH outranks it.
+        from .agents import AGENTS
+        detected = AGENTS.detect(os.environ)
+        if detected in LIVE_WAIT_AGENTS:
+            agent = detected
+        elif args.session:
+            agent = "claude"  # Legacy explicit session without a live marker.
+    if agent not in LIVE_WAIT_AGENTS:
+        print("ltc wait is only for Claude Code and DeepSeek Harness sessions: "
+              "CLAUDE_CODE_SESSION_ID or DSH_SESSION_ID is unset. "
+              "Other agents receive callbacks from the daemon and should not run it.", file=sys.stderr)
+        return 2
     environment_name = session_environment_name(agent)
     session = args.session or os.environ.get(environment_name, "").strip()
     if not session:
-        print(f"ltc wait is only for Claude Code and DeepSeek Harness sessions: {environment_name} is unset. "
-              "Other agents receive callbacks from the daemon and should not run it.", file=sys.stderr)
+        print(f"ltc wait: {environment_name} is unset for the detected {agent} session.", file=sys.stderr)
         return 2
     root = cli.queue_dir(args).expanduser().absolute()
     cli.ensure_daemon_dirs(root)
